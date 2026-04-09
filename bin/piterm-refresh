@@ -1,0 +1,7 @@
+#!/bin/bash
+
+# Reinstalls Piterm with missing packages and default configs.
+
+if gum confirm "Refresh Piterm (including overwriting configs)?"; then
+  curl -fsSL https://piterm.org/install | bash
+fi

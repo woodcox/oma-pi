@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+# Set the Helix theme (takes effect on next hx launch)
+
+THEMES=(
+  default
+  autumn
+  catppuccin_mocha
+  dracula
+  everforest_dark
+  github_dark
+  gruvbox
+  kanagawa
+  monokai
+  night_owl
+  nord
+  onedark
+  rose_pine
+  tokyonight
+)
+
+CONFIG_DIR="$HOME/.config/helix"
+CONFIG_FILE="$CONFIG_DIR/config.toml"
+CURRENT=$(awk -F'"' '/^theme = / {print $2}' "$CONFIG_FILE" 2>/dev/null | head -n1)
+CURRENT=${CURRENT:-default}
+
+theme=$(gum choose --header "Helix theme (current: $CURRENT)" "${THEMES[@]}")
+
+mkdir -p "$CONFIG_DIR"
+
+if [ -f "$CONFIG_FILE" ] && grep -q '^theme = ' "$CONFIG_FILE"; then
+  sed -i "s/^theme = .*/theme = \"$theme\"/" "$CONFIG_FILE"
+else
+  {
+    echo "theme = \"$theme\""
+    [ -f "$CONFIG_FILE" ] && cat "$CONFIG_FILE"
+  } >"$CONFIG_FILE.tmp"
+  mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+fi
+
+echo "Helix theme set to $theme (restart hx to apply)"

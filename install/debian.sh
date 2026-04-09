@@ -1,18 +1,24 @@
 install_packages() {
+  local core_pkgs=(
+    build-essential openssh-server
+    fzf eza zoxide tmux btop jq
+    gpg docker.io kitty-terminfo
+  )
+
   section "Updating system packages..."
   sudo apt-get update
   sudo apt-get upgrade -y
 
   section "Installing Debian packages..."
   sudo apt-get remove -y containerd.io 2>/dev/null || true
-  sudo apt-get install -y \
-    build-essential git openssh-server libssl-dev sudo less net-tools whois \
-    fzf eza zoxide tmux btop jq man-db \
-    vim neovim luarocks \
-    clang llvm rustc libyaml-0-2 \
-    curl wget gpg \
-    docker.io docker-compose \
-    kitty-terminfo
+  sudo apt-get install -y "${core_pkgs[@]}"
+
+  # docker compose package name differs across Debian/Ubuntu releases
+  if apt-cache show docker-compose-plugin &>/dev/null; then
+    sudo apt-get install -y docker-compose-plugin
+  elif apt-cache show docker-compose &>/dev/null; then
+    sudo apt-get install -y docker-compose
+  fi
 
   # docker-buildx (skip if docker-buildx-plugin from Docker's repo is already installed)
   if ! dpkg -l docker-buildx-plugin &>/dev/null; then
@@ -51,8 +57,16 @@ install_packages() {
   if ! command -v lazygit &>/dev/null; then
     section "Installing lazygit..."
     local LAZYGIT_VERSION
+    local arch
+    arch="$(dpkg --print-architecture)"
+    case "$arch" in
+      amd64) arch="x86_64" ;;
+      arm64) arch="arm64" ;;
+      armhf) arch="armv6" ;;
+      *) arch="x86_64" ;;
+    esac
     LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": *"v\K[^"]*')
-    curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+    curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_${arch}.tar.gz"
     tar xf /tmp/lazygit.tar.gz -C /tmp lazygit
     sudo install /tmp/lazygit /usr/local/bin/
     rm -f /tmp/lazygit.tar.gz /tmp/lazygit
@@ -74,21 +88,28 @@ install_packages() {
     sudo apt-get install -y gum
   fi
 
-  # mise (not in Ubuntu repos)
-  if ! command -v mise &>/dev/null; then
-    section "Installing mise..."
-    curl -fsSL https://mise.run | sh 2>/dev/null
-    export PATH="$HOME/.local/bin:$PATH"
+  # deno runtime
+  if ! command -v deno &>/dev/null; then
+    section "Installing deno..."
+    curl -fsSL https://deno.land/install.sh | sh -s -- -y
+    export PATH="$HOME/.deno/bin:$PATH"
   fi
 }
 
-install_npm_tools() {
-  section "Installing AI coding assistants..."
-  if ! command -v opencode &>/dev/null; then
-    npm install -g opencode-ai
+install_optional_ai_tools() {
+  section "Optional AI coding assistants..."
+
+  if ! command -v deno &>/dev/null; then
+    echo "Skipping AI assistants (deno not found)."
+    return
   fi
-  if ! command -v claude-code &>/dev/null; then
-    npm install -g @anthropic-ai/claude-code
+
+  if gum confirm "Install opencode?" </dev/tty; then
+    deno install -g -A --name opencode npm:opencode-ai || true
+  fi
+
+  if gum confirm "Install claude-code?" </dev/tty; then
+    deno install -g -A --name claude-code npm:@anthropic-ai/claude-code || true
   fi
 }
 

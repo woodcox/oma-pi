@@ -1,34 +1,30 @@
-# Omaterm
+# Piterm
 
-An omakase headless setup for Arch Linux servers or dev boxes in the spirit of Omarchy by DHH.
+An omakase headless setup for Raspberry Pi OS Lite and Ubuntu-on-Pi hosts in the spirit of Omarchy by DHH.
 
 ## Requirements
 
-- Base Arch Linux installation
+- Base Raspberry Pi OS Lite or Ubuntu installation
 - Internet connection
 - `sudo` privileges
 
 ## Install
 
 ```bash
-curl -fsSL https://omaterm.org/install | bash
+curl -fsSL https://piterm.org/install | bash
 ```
 
 ## What it sets up
 
 - **Shell**: Bash with starship prompt, fzf, eza, zoxide
-- **Editors**: Neovim (LazyVim), opencode, claude-code
-- **Dev tools**: mise, docker, github-cli, lazygit, lazydocker
+- **Editors**: Helix
+  - Installed from official GitHub release binaries (`~/.local/bin/hx` + `~/.config/helix/runtime`)
+- **Dev tools**: deno, docker, github-cli, lazygit, lazydocker
+- **Optional AI tools**: opencode, claude-code
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
-## Docker
-
-```bash
-docker run -it -v omaterm-home:/home/omaterm ghcr.io/omacom-io/omaterm
-```
-
-The named volume persists your home directory across container restarts, including git config, gh auth, shell history, and projects.
+> Security note: installer asks whether you want to add your user to the `docker` group. If you decline, use `sudo docker ...`.
 
 ## Interactive prompts
 
@@ -39,6 +35,7 @@ During installation you'll be asked for:
 
 And you'll be offered to setup:
 
+- Optional AI assistants (opencode, claude-code)
 - Tailscale
 - GitHub
 - SSH public keys

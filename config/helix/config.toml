@@ -1,0 +1,12 @@
+# Runtime is installed at ~/.config/helix/runtime.
+theme = "tokyonight"
+
+[editor]
+line-number = "relative"
+mouse = true
+cursorline = true
+bufferline = "always"
+
+[editor.indent-guides]
+render = true
+character = "┆"

@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Common functions for Omaterm installation
+# Common functions for Piterm installation
 show_banner() {
   clear
   echo
-  echo " ▄██████▄    ▄▄▄▄███▄▄▄▄      ▄████████     ███        ▄████████    ▄████████   ▄▄▄▄███▄▄▄▄  
-███    ███ ▄██▀▀▀███▀▀▀██▄   ███    ███ ▀█████████▄   ███    ███   ███    ███ ▄██▀▀▀███▀▀▀██▄
-███    ███ ███   ███   ███   ███    ███    ▀███▀▀██   ███    █▀    ███    ███ ███   ███   ███
-███    ███ ███   ███   ███   ███    ███     ███   ▀  ▄███▄▄▄      ▄███▄▄▄▄██▀ ███   ███   ███
-███    ███ ███   ███   ███ ▀███████████     ███     ▀▀███▀▀▀     ▀▀███▀▀▀▀▀   ███   ███   ███
-███    ███ ███   ███   ███   ███    ███     ███       ███    █▄  ▀███████████ ███   ███   ███
-███    ███ ███   ███   ███   ███    ███     ███       ███    ███   ███    ███ ███   ███   ███
- ▀██████▀   ▀█   ███   █▀    ███    █▀     ▄████▀     ██████████   ███    ███  ▀█   ███   █▀ 
-                                                                   ███    ███                "
+  cat <<'EOF'
+██████╗ ██╗████████╗███████╗██████╗ ███╗   ███╗
+██╔══██╗██║╚══██╔══╝██╔════╝██╔══██╗████╗ ████║
+██████╔╝██║   ██║   █████╗  ██████╔╝██╔████╔██║
+██╔═══╝ ██║   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║
+██║     ██║   ██║   ███████╗██║  ██║██║ ╚═╝ ██║
+╚═╝     ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
+EOF
 }
 
 section() {
@@ -24,21 +23,62 @@ install_omadots() {
   curl -fsSL https://raw.githubusercontent.com/omacom-io/omadots/refs/heads/master/install.sh | bash
 }
 
+install_helix_binary() {
+  section "Installing Helix from GitHub releases..."
+
+  local arch
+  local version
+  local asset
+  local tmpdir
+
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) arch="x86_64-linux" ;;
+    aarch64|arm64) arch="aarch64-linux" ;;
+    armv7l) arch="armv7-linux" ;;
+    *)
+      echo "Unsupported architecture for Helix prebuilt binary: $arch"
+      return 1
+      ;;
+  esac
+
+  version="$(curl -fsSL https://api.github.com/repos/helix-editor/helix/releases/latest | grep -Po '"tag_name": *"\K[^"]+')"
+  asset="helix-${version}-${arch}.tar.xz"
+  tmpdir="$(mktemp -d)"
+
+  curl -fL "https://github.com/helix-editor/helix/releases/download/${version}/${asset}" -o "$tmpdir/helix.tar.xz"
+  tar -xJf "$tmpdir/helix.tar.xz" -C "$tmpdir"
+
+  mkdir -p "$HOME/.local/bin" "$HOME/.config/helix"
+  install -m 0755 "$tmpdir/helix-${version}-${arch}/hx" "$HOME/.local/bin/hx"
+  rm -rf "$HOME/.config/helix/runtime"
+  cp -R "$tmpdir/helix-${version}-${arch}/runtime" "$HOME/.config/helix/runtime"
+
+  rm -rf "$tmpdir"
+  echo "✓ Helix ${version}"
+}
+
 install_configs() {
   section "Installing configs..."
   mkdir -p "$HOME/.config"
   cp -Rf "$INSTALLER_DIR/config/"* "$HOME/.config/"
-  echo "✓ Neovim"
+  echo "✓ Helix config"
   echo "✓ Starship"
 
   if ! grep -q "if \[\[ -z \$TMUX \]\]" "$HOME/.bashrc" 2>/dev/null; then
-    cat >>"$HOME/.bashrc" <<'EOF'
+    cat >>"$HOME/.bashrc" <<'BASHRC_TMUX'
 if [[ -z $TMUX ]]; then
   t
 fi
-EOF
+BASHRC_TMUX
     echo "✓ Tmux auto-start"
   fi
+
+  if ! grep -q 'export PATH="$HOME/.deno/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null; then
+    echo 'export PATH="$HOME/.deno/bin:$PATH"' >>"$HOME/.bashrc"
+    echo "✓ Deno PATH"
+  fi
+
 }
 
 install_bins() {
@@ -46,32 +86,9 @@ install_bins() {
   mkdir -p "$HOME/.local/bin"
   cp -Rf "$INSTALLER_DIR/bin/"* "$HOME/.local/bin/"
   chmod +x "$HOME/.local/bin/"*
-  echo "✓ omaterm-ssh"
-  echo "✓ omaterm-theme"
-  echo "✓ omaterm-refresh"
-}
-
-install_mise_tools() {
-  section "Installing Ruby + Node..."
-  eval "$(mise activate bash)" 2>/dev/null || true
-
-  mise use -g node
-
-  mise settings set ruby.compile false
-  mise settings set idiomatic_version_file_enable_tools ruby
-  mise use -g ruby
-
-  export PATH="$HOME/.local/share/mise/shims:$PATH"
-}
-
-setup_docker_group() {
-  if ! groups | grep -q docker; then
-    if command -v usermod &>/dev/null; then
-      sudo usermod -aG docker "$USER"
-    else
-      sudo adduser "$USER" docker
-    fi
-  fi
+  echo "✓ piterm-ssh"
+  echo "✓ piterm-theme"
+  echo "✓ piterm-refresh"
 }
 
 interactive_setup() {
@@ -105,6 +122,26 @@ interactive_setup() {
   fi
 }
 
+configure_docker_access() {
+  section "Docker user access..."
+
+  if groups | grep -q docker; then
+    echo "✓ $USER is already in docker group"
+    return
+  fi
+
+  if gum confirm "Allow Docker without sudo by adding $USER to the docker group?" </dev/tty; then
+    if command -v usermod &>/dev/null; then
+      sudo usermod -aG docker "$USER"
+    else
+      sudo adduser "$USER" docker
+    fi
+    echo "✓ Added $USER to docker group (log out/in to apply)"
+  else
+    echo "✓ Keeping Docker usage with sudo"
+  fi
+}
+
 finish() {
   section "Finished!"
   echo "Now logout and back in for everything to take effect"
@@ -131,21 +168,21 @@ run_installation() {
   # Omadots
   install_omadots
 
+  # Helix binary + runtime
+  install_helix_binary
+
   # Configs and bins
   install_configs
   install_bins
 
-  # Mise tooling
-  install_mise_tools
-
-  # OS-specific tools that need npm (installed after mise provides node)
-  install_npm_tools
+  # Optional tools
+  install_optional_ai_tools
 
   # OS-specific service enabling
   enable_services
 
-  # Setup Docker group
-  setup_docker_group
+  # Optional Docker group access
+  configure_docker_access
 
   # Interactive setup
   interactive_setup
@@ -156,35 +193,34 @@ run_installation() {
 
 # Getting started
 show_banner
-section "Installing Omaterm..."
+section "Installing Piterm..."
 
 # Ensure correct git is installed
 if ! command -v git &>/dev/null; then
-  if [ -f /etc/arch-release ]; then
-    sudo pacman -Sy --noconfirm git
-  elif [ -f /etc/debian_version ]; then
+  if [ -f /etc/debian_version ]; then
     sudo apt-get update && sudo apt-get install -y git
-  elif [ -f /etc/fedora-release ]; then
-    sudo dnf install -y git
   fi
 fi
 
-REPO="https://github.com/omacom-io/omaterm.git"
+# Ensure curl exists for remote installers
+if ! command -v curl &>/dev/null; then
+  if [ -f /etc/debian_version ]; then
+    sudo apt-get update && sudo apt-get install -y curl
+  fi
+fi
+
+REPO="https://github.com/omacom-io/piterm.git"
 INSTALLER_DIR="$(mktemp -d)"
 trap 'rm -rf "$INSTALLER_DIR"' EXIT
 
 git clone --depth 1 "$REPO" "$INSTALLER_DIR"
 
 # OS detection and dispatch
-if [ -f /etc/arch-release ]; then
-  source "$INSTALLER_DIR/install/arch.sh"
-elif [ -f /etc/debian_version ]; then
+if [ -f /etc/debian_version ]; then
   source "$INSTALLER_DIR/install/debian.sh"
-elif [ -f /etc/fedora-release ]; then
-  source "$INSTALLER_DIR/install/fedora.sh"
 else
   echo "Error: Unsupported operating system"
-  echo "Omaterm supports Arch Linux, Debian/Ubuntu, and Fedora"
+  echo "Piterm supports Debian/Ubuntu"
   exit 1
 fi
 
