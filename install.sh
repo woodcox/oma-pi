@@ -143,6 +143,8 @@ configure_docker_access() {
 }
 
 finish() {
+  # Remove and purge unused packages
+  sudo apt autoremove --purge
   section "Finished!"
   echo "Now logout and back in for everything to take effect"
 }
@@ -181,7 +183,7 @@ run_installation() {
   # OS-specific service enabling
   enable_services
 
-  # Optional Docker group access
+  # Optional Docker group root level access
   configure_docker_access
 
   # Interactive setup
@@ -197,30 +199,30 @@ section "Installing Piterm..."
 
 # Ensure correct git is installed
 if ! command -v git &>/dev/null; then
-  if [ -f /etc/debian_version ]; then
-    sudo apt-get update && sudo apt-get install -y git
+  if [ -f /etc/rpi_version ]; then
+    sudo apt update && sudo apt install -y git
   fi
 fi
 
 # Ensure curl exists for remote installers
 if ! command -v curl &>/dev/null; then
-  if [ -f /etc/debian_version ]; then
-    sudo apt-get update && sudo apt-get install -y curl
+  if [ -f /etc/rpi_version ]; then
+    sudo apt update && sudo apt install -y curl
   fi
 fi
 
-REPO="https://github.com/omacom-io/piterm.git"
+REPO="https://github.com/woodcox/piterm.git"
 INSTALLER_DIR="$(mktemp -d)"
 trap 'rm -rf "$INSTALLER_DIR"' EXIT
 
 git clone --depth 1 "$REPO" "$INSTALLER_DIR"
 
 # OS detection and dispatch
-if [ -f /etc/debian_version ]; then
-  source "$INSTALLER_DIR/install/debian.sh"
+if [ -f /etc/rpi_version ]; then
+  source "$INSTALLER_DIR/install/rpi-lite-os.sh"
 else
   echo "Error: Unsupported operating system"
-  echo "Piterm supports Debian/Ubuntu"
+  echo "Piterm supports Raspberry Pi OS lite/Ubuntu"
   exit 1
 fi
 

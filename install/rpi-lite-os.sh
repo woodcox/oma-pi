@@ -6,48 +6,48 @@ install_packages() {
   )
 
   section "Updating system packages..."
-  sudo apt-get update
-  sudo apt-get upgrade -y
+  sudo apt update
+  sudo apt upgrade -y
 
-  section "Installing Debian packages..."
-  sudo apt-get remove -y containerd.io 2>/dev/null || true
-  sudo apt-get install -y "${core_pkgs[@]}"
+  section "Installing packages..."
+  sudo apt remove -y containerd.io 2>/dev/null || true
+  sudo apt install -y "${core_pkgs[@]}"
 
-  # docker compose package name differs across Debian/Ubuntu releases
+  # docker compose package name differs across RP-lite-OS/Ubuntu releases
   if apt-cache show docker-compose-plugin &>/dev/null; then
-    sudo apt-get install -y docker-compose-plugin
+    sudo apt install -y docker-compose-plugin
   elif apt-cache show docker-compose &>/dev/null; then
-    sudo apt-get install -y docker-compose
+    sudo apt install -y docker-compose
   fi
 
   # docker-buildx (skip if docker-buildx-plugin from Docker's repo is already installed)
   if ! dpkg -l docker-buildx-plugin &>/dev/null; then
-    sudo apt-get install -y docker-buildx 2>/dev/null || true
+    sudo apt install -y docker-buildx 2>/dev/null || true
   fi
 
-  # tldr: Debian Trixie+ replaced tldr with tealdeer
+  # tldr: RP-lite-OS Trixie+ replaced tldr with tealdeer
   if apt-cache show tealdeer &>/dev/null; then
-    sudo apt-get install -y tealdeer
+    sudo apt install -y tealdeer
   else
-    sudo apt-get install -y tldr
+    sudo apt install -y tldr
   fi
 
-  # github-cli (not in Debian/Ubuntu repos)
+  # github-cli (not in RP-lite-OS/Ubuntu repos)
   if ! command -v gh &>/dev/null; then
     section "Installing GitHub CLI..."
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list
-    sudo apt-get update
-    sudo apt-get install -y gh
+    sudo apt update
+    sudo apt install -y gh
   fi
 
-  # tailscale (not in Debian/Ubuntu repos)
+  # tailscale (not in RP-lite-OS/Ubuntu repos)
   if ! command -v tailscale &>/dev/null; then
     section "Installing Tailscale..."
     curl -fsSL https://tailscale.com/install.sh | sh
   fi
 
-  # starship (not in Debian/Ubuntu repos)
+  # starship (not in RP-lite-OS/Ubuntu repos)
   if ! command -v starship &>/dev/null; then
     section "Installing starship..."
     curl -sS https://starship.rs/install.sh | sh -s -- --yes
@@ -84,8 +84,8 @@ install_packages() {
     sudo mkdir -p /etc/apt/keyrings
     curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
     echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
-    sudo apt-get update
-    sudo apt-get install -y gum
+    sudo apt update
+    sudo apt install -y gum
   fi
 
   # deno runtime
