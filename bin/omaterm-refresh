@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Reinstalls Omaterm with missing packages and default configs.
+# Reinstalls PiTerm with missing packages and default configs.
 
-if gum confirm "Refresh Omaterm (including overwriting configs)?"; then
-  curl -fsSL https://omaterm.org/install | bash
+if gum confirm "Refresh PiTerm (including overwriting configs)?"; then
+  curl -fsSL https://raw.githubusercontent.com/woodcox/piterm/install | bash
 fi

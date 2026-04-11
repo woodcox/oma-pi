@@ -1,29 +1,22 @@
 install_packages() {
+  local core_pkgs=(
+    build-essential openssh-server
+    fzf eza zoxide tmux btop jq
+    gpg kitty-terminfo
+  )
+
   section "Updating system packages..."
-  sudo apt-get update
-  sudo apt-get upgrade -y
+  sudo apt update
+  sudo apt upgrade -y
 
   section "Installing Debian packages..."
-  sudo apt-get remove -y containerd.io 2>/dev/null || true
-  sudo apt-get install -y \
-    build-essential git openssh-server libssl-dev sudo less net-tools whois \
-    fzf eza zoxide tmux btop jq man-db \
-    vim neovim luarocks \
-    clang llvm rustc libyaml-0-2 \
-    curl wget gpg \
-    docker.io docker-compose \
-    kitty-terminfo
-
-  # docker-buildx (skip if docker-buildx-plugin from Docker's repo is already installed)
-  if ! dpkg -l docker-buildx-plugin &>/dev/null; then
-    sudo apt-get install -y docker-buildx 2>/dev/null || true
-  fi
+  sudo apt install -y "${core_pkgs[@]}"
 
   # tldr: Debian Trixie+ replaced tldr with tealdeer
   if apt-cache show tealdeer &>/dev/null; then
-    sudo apt-get install -y tealdeer
+    sudo apt install -y tealdeer
   else
-    sudo apt-get install -y tldr
+    sudo apt install -y tldr
   fi
 
   # github-cli (not in Debian/Ubuntu repos)
@@ -31,8 +24,8 @@ install_packages() {
     section "Installing GitHub CLI..."
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list
-    sudo apt-get update
-    sudo apt-get install -y gh
+    sudo apt update
+    sudo apt install -y gh
   fi
 
   # tailscale (not in Debian/Ubuntu repos)
@@ -70,33 +63,86 @@ install_packages() {
     sudo mkdir -p /etc/apt/keyrings
     curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
     echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
-    sudo apt-get update
-    sudo apt-get install -y gum
+    sudo apt update
+    sudo apt install -y gum
   fi
 
-  # mise (not in Ubuntu repos)
-  if ! command -v mise &>/dev/null; then
-    section "Installing mise..."
-    curl -fsSL https://mise.run | sh 2>/dev/null
-    export PATH="$HOME/.local/bin:$PATH"
+  # deno runtime
+  if ! command -v deno &>/dev/null; then
+    section "Installing deno..."
+    curl -fsSL https://deno.land/install.sh | sh -s -- -y
+    export PATH="$HOME/.deno/bin:$PATH"
   fi
 }
 
-install_npm_tools() {
-  section "Installing AI coding assistants..."
-  if ! command -v opencode &>/dev/null; then
-    npm install -g opencode-ai
+
+# See: https://docs.docker.com/engine/install/debian/ for docker install guidance
+install_docker() {
+  echo "Installing Docker..."
+
+  set -e  # stop on error
+
+  # Ensure required packages
+  sudo apt update
+  sudo apt install -y ca-certificates curl
+
+  # Create keyrings dir if it doesn't exist
+  sudo install -m 0755 -d /etc/apt/keyrings
+
+  # Add Docker GPG key (only if missing)
+  if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+    echo "Adding Docker GPG key..."
+    sudo curl -fsSL https://download.docker.com/linux/debian/gpg \
+      -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+  else
+    echo "Docker GPG key already exists, skipping"
   fi
-  if ! command -v claude-code &>/dev/null; then
-    npm install -g @anthropic-ai/claude-code
+
+  # Detect codename + arch once
+  CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  ARCH="$(dpkg --print-architecture)"
+
+  # Add repo (overwrite safely every time)
+  echo "Setting up Docker repository..."
+  sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: ${CODENAME}
+Components: stable
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+  # Install Docker
+  sudo apt update
+  sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  echo "Docker installation complete ✅"
+}
+
+install_optional_ai_tools() {
+  section "Optional AI coding assistants..."
+
+  if ! command -v deno &>/dev/null; then
+    echo "Skipping AI assistants (deno not found)."
+    return
+  fi
+
+  if gum confirm "Install opencode?" </dev/tty; then
+    deno install -g -A --name opencode npm:opencode-ai || true
+  fi
+
+  if gum confirm "Install claude-code?" </dev/tty; then
+    deno install -g -A --name claude-code npm:@anthropic-ai/claude-code || true
   fi
 }
 
 enable_services() {
   section "Enabling services..."
 
-  sudo systemctl enable docker.service
-  sudo systemctl start --no-block docker.service
+  sudo systemctl enable docker
+  sudo systemctl start docker
   echo "✓ Docker"
 
   sudo systemctl enable --now ssh.service

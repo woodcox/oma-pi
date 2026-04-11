@@ -2,7 +2,6 @@
 set -euo pipefail
 
 # Add SSH public key for remote access
-# https://github.com/basecamp/omaterm
 
 if gum confirm "Add SSH public key for remote access?"; then
   mkdir -p "$HOME/.ssh"
