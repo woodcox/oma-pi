@@ -28,6 +28,8 @@ section() {
 
 install_omadots() {
   curl -fsSL https://raw.githubusercontent.com/omacom-io/omadots/refs/heads/master/install.sh | bash
+
+  #TODO: remove the unneeded config files from the omadots
 }
 
 install_helix_binary() {
@@ -88,7 +90,6 @@ install_bins() {
   cp -Rf "$INSTALLER_DIR/bin/"* "$HOME/.local/bin/"
   chmod +x "$HOME/.local/bin/"*
   echo "✓ omaterm-ssh"
-  echo "✓ omaterm-theme"
   echo "✓ omaterm-refresh"
 }
 
