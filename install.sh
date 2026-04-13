@@ -144,6 +144,80 @@ configure_docker_access() {
   fi
 }
 
+install_caddy() {
+  echo "Installing Caddy..."
+
+  set -e
+
+  BASE_DIR="$HOME/docker/caddy"
+
+  # Create folders
+  mkdir -p "$BASE_DIR"
+  mkdir -p "$BASE_DIR/data"
+  mkdir -p "$BASE_DIR/config"
+
+  cd "$BASE_DIR"
+
+  # Create shared docker network if it doesn't exist
+  if ! docker network ls | grep -q caddy; then
+    echo "Creating docker network: caddy"
+    docker network create caddy
+  else
+    echo "Docker network 'caddy' already exists"
+  fi
+
+  # Create Caddyfile if missing
+  if [ ! -f Caddyfile ]; then
+    echo "Creating Caddyfile..."
+
+    cat <<'EOF' > Caddyfile
+:80 {
+  reverse_proxy haloy:3000
+}
+EOF
+
+  else
+    echo "Caddyfile already exists, skipping"
+  fi
+
+  # Create docker-compose.yml if missing
+  if [ ! -f docker-compose.yml ]; then
+    echo "Creating docker-compose.yml..."
+
+    cat <<'EOF' > docker-compose.yml
+version: "3.8"
+
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./data:/data
+      - ./config:/config
+    networks:
+      - caddy
+
+networks:
+  caddy:
+    external: true
+EOF
+
+  else
+    echo "docker-compose.yml already exists, skipping"
+  fi
+
+  # Start Caddy
+  echo "Starting Caddy..."
+  docker compose up -d
+
+  echo "Caddy installed and running ✅"
+}
+
 finish() {
   section "Almost Finished!"
 
