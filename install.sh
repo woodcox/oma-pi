@@ -200,7 +200,7 @@ run_installation() {
 
 # Getting started
 show_banner
-section "Installing PiTerm..."
+section "Installing PimaTerm..."
 
 # Ensure git is installed
 if ! command -v git &>/dev/null; then
@@ -208,7 +208,7 @@ if ! command -v git &>/dev/null; then
     sudo apt update && sudo apt install -y git
 fi
 
-REPO="https://github.com/woodcox/piterm.git"
+REPO="https://github.com/woodcox/pimaterm.git"
 INSTALLER_DIR="$(mktemp -d)"
 trap 'rm -rf "$INSTALLER_DIR"' EXIT
 
@@ -219,7 +219,7 @@ if [ -f /etc/debian_version ]; then
   source "$INSTALLER_DIR/install/debian.sh"
 else
   echo "Error: Unsupported operating system"
-  echo "PiTerm only supports Debian based OS such as Raspberry Pi OS, Debian and Ubuntu"
+  echo "PimaTerm only supports Debian based OS such as Raspberry Pi OS, Debian and Ubuntu"
   exit 1
 fi
 

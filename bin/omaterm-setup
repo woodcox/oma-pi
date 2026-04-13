@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MARKER="$HOME/.piterm-setup-done"
+MARKER="$HOME/.pimaterm-setup-done"
 
 if [ -f "$MARKER" ]; then
   exec /bin/bash -l "$@"
@@ -22,7 +22,7 @@ echo -e "${RED}
                                                       ███    ███        
 ${RESET}"
 echo
-echo "Welcome to PiTerm 🚀, let's get you set up."
+echo "Welcome to PimaTerm 🚀, let's get you set up."
 echo
 
 # Git identity

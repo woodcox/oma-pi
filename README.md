@@ -1,4 +1,4 @@
-# PiTerm
+# PimaTerm
 
 #TODO: 
 
@@ -21,7 +21,7 @@ An headless setup for debian based systems like Raspberry Pi OS Lite and Ubuntu 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/woodcox/piterm/install | bash
+curl -fsSL https://raw.githubusercontent.com/woodcox/pimaterm/install | bash
 
 ```
 
