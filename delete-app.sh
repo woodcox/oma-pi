@@ -1,73 +1,86 @@
 #!/usr/bin/env bash
-
 set -e
 
 BASE_DIR="$HOME/docker"
-CADDYFILE="$BASE_DIR/caddy/Caddyfile"
+CADDY_DIR="$BASE_DIR/caddy"
+SITES_DIR="$CADDY_DIR/sites"
+
+APP_NAME="${1:-}"
 
 # --- helpers ---
 confirm() {
-  read -rp "$1 (y/n): " yn
-  [[ "$yn" == "y" || "$yn" == "Y" ]]
+  read -rp "⚠️  Delete '$APP_NAME'? This cannot be undone. (y/n): " yn
+  [[ "$yn" =~ ^[Yy]$ ]]
+}
+
+validate_name() {
+  [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]]
 }
 
 # --- input ---
-APP_NAME="$1"
-
-echo "=== Delete Docker App ==="
-
-# If no arg, list apps
 if [ -z "$APP_NAME" ]; then
-  echo "Available apps:"
-  ls -1 "$BASE_DIR" | grep -v "^caddy$" || true
-  echo
-  read -rp "Enter app name to delete: " APP_NAME
-fi
-
-APP_DIR="$BASE_DIR/$APP_NAME"
-
-if [ ! -d "$APP_DIR" ]; then
-  echo "❌ App '$APP_NAME' does not exist"
+  echo "Usage: delete.sh <app-name>"
   exit 1
 fi
 
-echo
-echo "⚠️  This will:"
-echo "  - Stop and remove container"
-echo "  - Delete folder: $APP_DIR"
-echo "  - Remove Caddy route (if exists)"
-echo
+if ! validate_name "$APP_NAME"; then
+  echo "❌ Invalid app name"
+  exit 1
+fi
 
-if ! confirm "Are you sure you want to delete '$APP_NAME'?"; then
+APP_DIR="$BASE_DIR/$APP_NAME"
+SITE_FILE="$SITES_DIR/$APP_NAME.caddy"
+
+echo "=== Delete Docker App ==="
+echo "App: $APP_NAME"
+
+if ! confirm; then
   echo "Cancelled"
   exit 0
 fi
 
-# --- stop container ---
-echo "Stopping container..."
-cd "$APP_DIR"
+echo
 
-if [ -f docker-compose.yml ]; then
-  docker compose down || true
+# --- stop & remove container ---
+if [ -d "$APP_DIR" ]; then
+  echo "Stopping containers..."
+
+  (
+    cd "$APP_DIR"
+    docker compose down >/dev/null 2>&1 || true
+  )
+
+  echo "Containers stopped"
 else
-  docker rm -f "$APP_NAME" >/dev/null 2>&1 || true
+  echo "App directory not found, skipping container stop"
 fi
 
-# --- remove folder ---
-echo "Removing folder..."
-rm -rf "$APP_DIR"
+# --- remove app directory ---
+if [ -d "$APP_DIR" ]; then
+  echo "Removing app directory..."
+  rm -rf "$APP_DIR"
+  echo "Directory removed"
+else
+  echo "App directory already removed"
+fi
 
-# --- remove Caddy route ---
-if [ -f "$CADDYFILE" ]; then
-  echo "Cleaning Caddyfile..."
+# --- remove caddy site ---
+if [ -f "$SITE_FILE" ]; then
+  echo "Removing Caddy site..."
+  rm "$SITE_FILE"
+  echo "Caddy site removed"
 
-  # Remove block like:
-  # app.local { ... }
-  sed -i "/^$APP_NAME\.local {/,/^}/d" "$CADDYFILE"
-
-  # Reload Caddy
-  docker exec caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+  # reload caddy if running
+  if docker ps --format '{{.Names}}' | grep -q '^caddy$'; then
+    docker exec caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+    echo "Caddy reloaded"
+  else
+    echo "⚠️ Caddy not running, reload skipped"
+  fi
+else
+  echo "No Caddy site found, skipping"
 fi
 
 echo
-echo "✅ App '$APP_NAME' deleted"
+echo "🗑️ App '$APP_NAME' deleted successfully"
+echo
