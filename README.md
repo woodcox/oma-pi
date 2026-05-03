@@ -46,3 +46,15 @@ And you'll be offered to setup:
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
 
 > Security note: the installer asks whether you want to add your user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
+
+## Commands
+See [Learn Omarchy manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands for using:
+
+- Tmux
+- Opencode
+- Claude Code
+- Lazydocker
+- Lazygit
+- fzf
+- Zoxide
+- eza
