@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install | bash
 - **Shell**: Bash with starship prompt, fzf, eza, zoxide
 - **Editors**: [Helix editor](https://helix-editor.com/) installed from official GitHub release binaries (`~/.local/bin/hx` + `~/.config/helix/runtime`)
 - **Dev tools**: deno, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
-- **Optional AI tools**: opencode, claude-code
+- **Optional AI tools**: opencode, claude-code, codex
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
@@ -53,6 +53,7 @@ See [Learn Omarchy manual](https://learn.omacom.io/2/the-omarchy-manual/106/term
 - Tmux
 - Opencode
 - Claude Code
+- Openai Codex
 - Lazydocker
 - Lazygit
 - fzf
