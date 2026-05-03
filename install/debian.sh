@@ -171,6 +171,10 @@ install_optional_ai_tools() {
   if gum confirm "Install claude-code?" </dev/tty; then
     deno install -g -A --name claude-code npm:@anthropic-ai/claude-code || true
   fi
+
+  if gum confirm "Install Openai Codex?" </dev/tty; then
+    deno install -g -A --name codex npm:@openai/codex || true
+  fi
 }
 
 enable_services() {
