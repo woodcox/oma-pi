@@ -29,7 +29,7 @@ section() {
 install_omadots() {
   section "Installing Omadots configs..."
   
-  local repo
+ local repo
   local tmpdir
   local skipped
 
@@ -56,12 +56,20 @@ install_omadots() {
     echo "✓ $name"
   done
 
+  # Remove or neutralize nvim-specific defaults from copied shell config.
+  if [ -f "$HOME/.config/shell/envs" ]; then
+    sed -i 's/^export EDITOR="nvim"$/export EDITOR="hx"/' "$HOME/.config/shell/envs"
+  fi
+
+  if [ -f "$HOME/.config/shell/aliases" ]; then
+    sed -i '/nvim/d' "$HOME/.config/shell/aliases"
+  fi
+
   section "Configuring shell..."
   case "$(basename "${SHELL:-bash}")" in
     zsh)
       cat >"$HOME/.zshrc" <<'EOF_ZSH'
 source ~/.config/shell/all
-source ~/.config/shell/zoptions
 EOF_ZSH
       echo '. ~/.zshrc' >"$HOME/.zprofile"
       echo "✓ Zsh"
