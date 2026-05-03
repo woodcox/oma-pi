@@ -1,8 +1,9 @@
 install_packages() {
   local core_pkgs=(
     build-essential openssh-server
-    fzf zoxide tmux btop jq unzip
+    fzf zoxide tmux btop jq
     gpg kitty-terminfo
+    unzip fontconfig
   )
 
   section "Updating system packages..."
@@ -46,28 +47,27 @@ install_packages() {
   fi
 
   # add hack nerd fonts (needed for Starship)
-  # add hack nerd fonts (needed for Starship)
-FONT_VERSION="2.1.0"
-FONT_DIR="$HOME/.local/share/fonts/Hack"
-FONT_MARKER="$FONT_DIR/.version"
+  FONT_VERSION="2.1.0"
+  FONT_DIR="$HOME/.local/share/fonts/Hack"
+  FONT_MARKER="$FONT_DIR/.version"
 
-if [ ! -f "$FONT_MARKER" ] || [ "$(cat "$FONT_MARKER")" != "$FONT_VERSION" ]; then
-  section "Installing Hack Nerd Font v$FONT_VERSION..."
+  if [ ! -f "$FONT_MARKER" ] || [ "$(cat "$FONT_MARKER")" != "$FONT_VERSION" ]; then
+    section "Installing Hack Nerd Font v$FONT_VERSION..."
 
-  mkdir -p "$FONT_DIR"
-  tmp_zip="/tmp/hack-nerd-font.zip"
+    mkdir -p "$FONT_DIR"
+    tmp_zip="/tmp/hack-nerd-font.zip"
 
-  wget -qO "$tmp_zip" "https://github.com/ryanoasis/nerd-fonts/releases/download/v${FONT_VERSION}/Hack.zip"
-  unzip -q "$tmp_zip" -d "$FONT_DIR"
-  rm -f "$tmp_zip"
+    wget -qO "$tmp_zip" "https://github.com/ryanoasis/nerd-fonts/releases/download/v${FONT_VERSION}/Hack.zip"
+    unzip -q "$tmp_zip" -d "$FONT_DIR"
+    rm -f "$tmp_zip"
 
-  echo "$FONT_VERSION" > "$FONT_MARKER"
+    echo "$FONT_VERSION" > "$FONT_MARKER"
 
-  fc-cache -fv >/dev/null
-  echo "✓ Hack Nerd Font installed"
-else
-  echo "Hack Nerd Font already installed, skipping"
-fi
+    fc-cache -fv >/dev/null
+    echo "✓ Hack Nerd Font installed"
+  else
+    echo "Hack Nerd Font already installed, skipping"
+  fi
 
   # starship (not in Debian/Ubuntu repos)
   if ! command -v starship &>/dev/null; then
