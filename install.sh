@@ -87,6 +87,7 @@ install_helix_binary() {
   section "Installing Helix from GitHub releases..."
 
   local arch
+  local current_version
   local version
   local asset
   local tmpdir
@@ -103,6 +104,16 @@ install_helix_binary() {
   esac
 
   version="$(curl -fsSL https://api.github.com/repos/helix-editor/helix/releases/latest | grep -Po '"tag_name": *"\K[^"]+')"
+  
+  # Check current version of helix
+  if command -v hx &>/dev/null; then
+    current_version="$(hx --version 2>/dev/null | awk 'NR==1{print $2}')"
+    if [ "$current_version" = "$version" ]; then
+      echo "✓ Helix ${version} already installed"
+      return 0
+    fi
+  fi
+  
   asset="helix-${version}-${arch}.tar.xz"
   tmpdir="$(mktemp -d)"
 
