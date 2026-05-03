@@ -29,7 +29,7 @@ section() {
 install_omadots() {
   section "Installing Omadots configs..."
   
- local repo
+  local repo
   local tmpdir
   local skipped
 
@@ -37,7 +37,7 @@ install_omadots() {
   tmpdir="$(mktemp -d)"
   skipped=(nvim mise)
 
-  trap 'rm -rf "$tmpdir"' RETURN
+  trap 'rm -rf "${tmpdir:-}"' RETURN
 
   git clone --depth 1 "$repo" "$tmpdir"
 
@@ -81,6 +81,8 @@ EOF_ZSH
       echo "✓ Bash"
       ;;
   esac
+
+  trap - RETURN
 }
 
 install_helix_binary() {
