@@ -1,7 +1,7 @@
 install_packages() {
   local core_pkgs=(
     build-essential openssh-server
-    fzf eza zoxide tmux btop jq
+    fzf zoxide tmux btop jq
     gpg kitty-terminfo
   )
 
@@ -11,6 +11,17 @@ install_packages() {
 
   section "Installing Debian packages..."
   sudo apt install -y "${core_pkgs[@]}"
+
+   # eza (from deb.gierens.de)
+  if ! command -v eza &>/dev/null; then
+    section "Installing eza..."
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://raw.githubusercontent.com/eza-community/eza/main/deb.asc | sudo gpg --dearmor -o /etc/apt/keyrings/gierens.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de stable main" | sudo tee /etc/apt/sources.list.d/gierens.list >/dev/null
+    sudo chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
+    sudo apt update
+    sudo apt install -y eza
+  fi
 
   # tldr: Debian Trixie+ replaced tldr with tealdeer
   if apt-cache show tealdeer &>/dev/null; then
