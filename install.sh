@@ -27,9 +27,52 @@ section() {
 }
 
 install_omadots() {
-  curl -fsSL https://raw.githubusercontent.com/omacom-io/omadots/refs/heads/master/install.sh | bash
+  section "Installing Omadots configs..."
+  
+  local repo
+  local tmpdir
+  local skipped
 
-  #TODO: remove the unneeded config files from the omadots
+  repo="https://github.com/omacom-io/omadots.git"
+  tmpdir="$(mktemp -d)"
+  skipped=(nvim mise)
+
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  git clone --depth 1 "$repo" "$tmpdir"
+
+  mkdir -p "$HOME/.config"
+
+  for dir in "$tmpdir/config"/*/; do
+    local name
+    name="$(basename "$dir")"
+
+    if [[ " ${skipped[*]} " == *" $name "* ]]; then
+      echo "- Skipping $name"
+      continue
+    fi
+
+    cp -rf "$dir" "$HOME/.config/"
+    echo "✓ $name"
+  done
+
+  section "Configuring shell..."
+  case "$(basename "${SHELL:-bash}")" in
+    zsh)
+      cat >"$HOME/.zshrc" <<'EOF_ZSH'
+source ~/.config/shell/all
+source ~/.config/shell/zoptions
+EOF_ZSH
+      echo '. ~/.zshrc' >"$HOME/.zprofile"
+      echo "✓ Zsh"
+      ;;
+    bash)
+      echo 'source ~/.config/shell/all' >"$HOME/.bashrc"
+      echo '. ~/.bashrc' >"$HOME/.bash_profile"
+      ln -snf "$HOME/.config/shell/inputrc" "$HOME/.inputrc"
+      echo "✓ Bash"
+      ;;
+  esac
 }
 
 install_helix_binary() {
@@ -207,6 +250,7 @@ section "Installing Oma-Pi..."
 if ! command -v git &>/dev/null; then
   if [ -f /etc/debian_version ]; then
     sudo apt update && sudo apt install -y git
+  fi
 fi
 
 REPO="https://github.com/woodcox/oma-pi.git"

@@ -1,12 +1,6 @@
 # Oma-Pi
 
-#TODO: 
-
- - remove the unneeded config files from the omadots - https://github.com/omacom-io/omadots/refs/heads/master/install.sh
- - could just install specfic config files (not nvim)
-
-
-A headless setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in the spirit of Omarchy/[Omaterm](https://github.com/omacom-io/omaterm). This has only been tested on a Raspberry Pi 5 with 8GB ram and SSD storage.
+A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in the spirit of Omarchy/[Omaterm](https://github.com/omacom-io/omaterm). This has only been tested on a Raspberry Pi 5 with 8GB ram and SSD storage.
 
 ## Requirements
 
