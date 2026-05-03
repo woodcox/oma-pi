@@ -1,4 +1,4 @@
-# PimaTerm
+# Oma-Pi
 
 #TODO: 
 
@@ -6,7 +6,7 @@
  - could just install specfic config files (not nvim)
 
 
-An headless setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in the spirit of Omarchy/[Omaterm](https://github.com/omacom-io/omaterm). This has only been tested on a Raspberry Pi 5 with 8GB ram and SSD storage.
+A headless setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in the spirit of Omarchy/[Omaterm](https://github.com/omacom-io/omaterm). This has only been tested on a Raspberry Pi 5 with 8GB ram and SSD storage.
 
 ## Requirements
 
@@ -21,7 +21,7 @@ An headless setup for debian based systems like Raspberry Pi OS Lite and Ubuntu 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/woodcox/pimaterm/install | bash
+curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install | bash
 
 ```
 
@@ -52,92 +52,3 @@ And you'll be offered to setup:
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
 
 > Security note: the installer asks whether you want to add your user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
-
-## The stack
-
-Internet / Tailscale
-        ↓
-Caddy Reverse Proxy
-        ↓
-Docker containers
-┌───────────────┬───────────────┬───────────────┐
-│  Caddy        │    app1       │    app2       │
-│               │   :8080       │   :5000       │
-└───────────────┴───────────────┴───────────────┘
-
-## Folder structure
-
-~/docker/
-  ├── caddy/
-  │   ├── docker-compose.yml
-  │   ├── Caddyfile
-  │   ├── data/
-  │   └── config/
-  │
-  ├── app1/
-  │   ├── docker-compose.yml
-  │   └── data/
-  │
-  ├── app2/
-  │   ├── docker-compose.yml
-  │   └── data/
-  │
-  └── networks/
-      └── (optional notes or scripts)
-
-
-### Caddy
-Caddy controls the traffic to your apps. It needs:
-- Caddyfile → all routing rules
-- docker-compose.yml → runs Caddy
-- data/ → SSL certs, state
-- config/ → internal config
-
-Caddyfile for multiple apps:
-
-haloy.local {
-  reverse_proxy haloy:3000
-}
-
-app1.local {
-  reverse_proxy app1:8080
-}
-
-app2.local {
-  reverse_proxy app2:5000
-}
-
-
-## App management
-
-You can create a new app by running:
-
-~~~sh
-chmod +x create-app.sh
-./create-app.sh
-~~~
-
-This will create a base app in the correct folder structure.
-
-If you want to delete the app run and follow the prompts:
-
-~~~sh
-chmod +x delete-app.sh
-~~~
-
-This will: 
- - Stops & removes the container
- - Deletes the app folder
- - Removes the Caddy route
- - Reloads Caddy
- - Asks for confirmation (so you don’t nuke something accidentally)
-
-> Beware, If you manually edited your Caddyfile heavily,the sed block removal assumes this format:
-
-~~~json
- myapp.local {
-  reverse_proxy myapp:PORT
-}
-~~~
-
-If structure changes a lot, removal might miss it

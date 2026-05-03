@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Reinstalls PimaTerm with missing packages and default configs.
+# Reinstalls Oma-pi with missing packages and default configs.
 
 if gum confirm "Refresh PimaTerm (including overwriting configs)?"; then
-  curl -fsSL https://raw.githubusercontent.com/woodcox/pimaterm/install | bash
+  curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install | bash
 fi
