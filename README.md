@@ -48,14 +48,25 @@ And you'll be offered to setup:
 > Security note: the installer asks whether you want to add your user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
 
 ## Commands
-See [Learn Omarchy manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands for using:
+See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omaterm-manual/113/hotkeys) for using:
 
-- Tmux
-- Opencode
-- Claude Code
-- Openai Codex
-- Lazydocker
-- Lazygit
-- fzf
-- Zoxide
-- eza
+ - opencode: `alias c=opencode`
+ - Claude: `alias cx=printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permissions`
+ - Docker: `alias d=docker`
+ - Lazydocker: `alias lzd=lazydocker`
+ - Tmux: 
+      - `alias t=tmux attach || tmux new -s Work`
+      - `alias ic=tdl c`
+      - `alias ix=tdl cx`
+      - `alias icx=tdl c cx`
+ - Github: `alias gh=github`
+ - Git:   
+      - `alias g=git`
+      - `alias gcm=git commit -m`
+      - `alias gcam=git commit -a -m`
+ - Fzf
+ - Zoxide
+ - Eza
+ - Btop
+ - tldr
+

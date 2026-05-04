@@ -1,3 +1,17 @@
+# Detect CPU architecture once; used by tools that ship per-arch binaries.
+detect_arch() {
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    aarch64) echo "aarch64" ;;
+    x86_64)  echo "x86_64"  ;;
+    *)
+      echo "ERROR: Unsupported architecture: $arch" >&2
+      exit 1
+      ;;
+  esac
+}
+
 install_packages() {
   local core_pkgs=(
     build-essential openssh-server
@@ -13,18 +27,20 @@ install_packages() {
   section "Installing Debian packages..."
   sudo apt install -y "${core_pkgs[@]}"
 
-   # eza (from deb.gierens.de)
+  # eza (from deb.gierens.de)
   if ! command -v eza &>/dev/null; then
     section "Installing eza..."
     sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://raw.githubusercontent.com/eza-community/eza/main/deb.asc | sudo gpg --dearmor -o /etc/apt/keyrings/gierens.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de stable main" | sudo tee /etc/apt/sources.list.d/gierens.list >/dev/null
+    curl -fsSL https://raw.githubusercontent.com/eza-community/eza/main/deb.asc \
+      | sudo gpg --dearmor -o /etc/apt/keyrings/gierens.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de stable main" \
+      | sudo tee /etc/apt/sources.list.d/gierens.list >/dev/null
     sudo chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
     sudo apt update
     sudo apt install -y eza
   fi
 
-  # tldr: Debian Trixie+ replaced tldr with tealdeer
+  # tldr: Debian Trixie+ ships tealdeer instead of tldr
   if apt-cache show tealdeer &>/dev/null; then
     sudo apt install -y tealdeer
   else
@@ -34,8 +50,10 @@ install_packages() {
   # github-cli (not in Debian/Ubuntu repos)
   if ! command -v gh &>/dev/null; then
     section "Installing GitHub CLI..."
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | sudo tee /etc/apt/sources.list.d/github-cli.list
     sudo apt update
     sudo apt install -y gh
   fi
@@ -46,27 +64,25 @@ install_packages() {
     curl -fsSL https://tailscale.com/install.sh | sh
   fi
 
-  # add hack nerd fonts (needed for Starship)
-  FONT_VERSION="2.1.0"
-  FONT_DIR="$HOME/.local/share/fonts/Hack"
-  FONT_MARKER="$FONT_DIR/.version"
+  # Hack Nerd Font (required by Starship prompt)
+  # To update HACK_FONT_VERSION, bump the version number as Nerd Fonts major versions occasionally change glyph mappings.
+  local HACK_FONT_VERSION="3.3.0"
+  local FONT_DIR="$HOME/.local/share/fonts/Hack"
+  local FONT_MARKER="$FONT_DIR/.version"
 
-  if [ ! -f "$FONT_MARKER" ] || [ "$(cat "$FONT_MARKER")" != "$FONT_VERSION" ]; then
-    section "Installing Hack Nerd Font v$FONT_VERSION..."
-
+  if [ ! -f "$FONT_MARKER" ] || [ "$(cat "$FONT_MARKER")" != "$HACK_FONT_VERSION" ]; then
+    section "Installing Hack Nerd Font v$HACK_FONT_VERSION..."
     mkdir -p "$FONT_DIR"
-    tmp_zip="/tmp/hack-nerd-font.zip"
-
-    wget -qO "$tmp_zip" "https://github.com/ryanoasis/nerd-fonts/releases/download/v${FONT_VERSION}/Hack.zip"
+    local tmp_zip="/tmp/hack-nerd-font.zip"
+    wget -qO "$tmp_zip" \
+      "https://github.com/ryanoasis/nerd-fonts/releases/download/v${HACK_FONT_VERSION}/Hack.zip"
     unzip -q "$tmp_zip" -d "$FONT_DIR"
     rm -f "$tmp_zip"
-
-    echo "$FONT_VERSION" > "$FONT_MARKER"
-
+    echo "$HACK_FONT_VERSION" > "$FONT_MARKER"
     fc-cache -fv >/dev/null
     echo "✓ Hack Nerd Font installed"
   else
-    echo "Hack Nerd Font already installed, skipping"
+    echo "Hack Nerd Font already up to date, skipping"
   fi
 
   # starship (not in Debian/Ubuntu repos)
@@ -79,8 +95,19 @@ install_packages() {
   if ! command -v lazygit &>/dev/null; then
     section "Installing lazygit..."
     local LAZYGIT_VERSION
-    LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": *"v\K[^"]*')
-    curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+    LAZYGIT_VERSION="$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" \
+      | grep -Po '"tag_name": *"v\K[^"]*')"
+
+    # lazygit uses "arm64" not "aarch64" in its release filenames
+    local ARCH LG_ARCH
+    ARCH="$(detect_arch)"
+    case "$ARCH" in
+      aarch64) LG_ARCH="arm64"  ;;
+      x86_64)  LG_ARCH="x86_64" ;;
+    esac
+
+    curl -Lo /tmp/lazygit.tar.gz \
+      "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_${LG_ARCH}.tar.gz"
     tar xf /tmp/lazygit.tar.gz -C /tmp lazygit
     sudo install /tmp/lazygit /usr/local/bin/
     rm -f /tmp/lazygit.tar.gz /tmp/lazygit
@@ -96,18 +123,26 @@ install_packages() {
   if ! command -v gum &>/dev/null; then
     section "Installing gum..."
     sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
+    curl -fsSL https://repo.charm.sh/apt/gpg.key \
+      | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+      | sudo tee /etc/apt/sources.list.d/charm.list
     sudo apt update
     sudo apt install -y gum
   fi
 
-  # fastfetch (not in Debian Bookworm repos; Pi 5 is aarch64)
+  # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
   if ! command -v fastfetch &>/dev/null; then
     section "Installing fastfetch..."
     local FF_VERSION
-    FF_VERSION=$(curl -s "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" | grep -Po '"tag_name": *"v\K[^"]*')
-    curl -Lo /tmp/fastfetch.deb "https://github.com/fastfetch-cli/fastfetch/releases/download/v${FF_VERSION}/fastfetch-linux-aarch64.deb"
+    FF_VERSION="$(curl -s "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" \
+      | grep -Po '"tag_name": *"v\K[^"]*')"
+
+    local FF_ARCH
+    FF_ARCH="$(detect_arch)"  # aarch64 or x86_64
+
+    curl -Lo /tmp/fastfetch.deb \
+      "https://github.com/fastfetch-cli/fastfetch/releases/download/v${FF_VERSION}/fastfetch-linux-${FF_ARCH}.deb"
     sudo dpkg -i /tmp/fastfetch.deb
     rm -f /tmp/fastfetch.deb
 
@@ -177,13 +212,14 @@ EOF
   fi
 
   # deno runtime
+  # Note: the installer adds ~/.deno/bin to shell rc files automatically.
+  # We also export it here so subsequent steps in this script can use deno.
   if ! command -v deno &>/dev/null; then
     section "Installing deno..."
     curl -fsSL https://deno.land/install.sh | sh -s -- -y
     export PATH="$HOME/.deno/bin:$PATH"
   fi
 }
-
 
 # See: https://docs.docker.com/engine/install/debian/ for docker install guidance
 install_docker() {
@@ -209,6 +245,7 @@ install_docker() {
   fi
 
   # Detect codename + arch once
+  local CODENAME ARCH
   CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
   ARCH="$(dpkg --print-architecture)"
 
@@ -235,6 +272,11 @@ install_optional_ai_tools() {
 
   if ! command -v deno &>/dev/null; then
     echo "Skipping AI assistants (deno not found)."
+    return
+  fi
+
+  if ! command -v gum &>/dev/null; then
+    echo "Skipping AI assistants (gum not found)."
     return
   fi
 
