@@ -102,6 +102,80 @@ install_packages() {
     sudo apt install -y gum
   fi
 
+  # fastfetch (not in Debian Bookworm repos; Pi 5 is aarch64)
+  if ! command -v fastfetch &>/dev/null; then
+    section "Installing fastfetch..."
+    local FF_VERSION
+    FF_VERSION=$(curl -s "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" | grep -Po '"tag_name": *"v\K[^"]*')
+    curl -Lo /tmp/fastfetch.deb "https://github.com/fastfetch-cli/fastfetch/releases/download/v${FF_VERSION}/fastfetch-linux-aarch64.deb"
+    sudo dpkg -i /tmp/fastfetch.deb
+    rm -f /tmp/fastfetch.deb
+
+    # Install neofetch.jsonc preset as the default config
+    local FF_CONFIG_DIR="$HOME/.config/fastfetch"
+    mkdir -p "$FF_CONFIG_DIR"
+    cat > "$FF_CONFIG_DIR/config.jsonc" << 'EOF'
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "display": {
+    "size": {
+      "maxPrefix": "MB",
+      "ndigits": 0,
+      "spaceBeforeUnit": "never"
+    },
+    "freq": {
+      "ndigits": 3,
+      "spaceBeforeUnit": "never"
+    }
+  },
+  "modules": [
+    "title",
+    "separator",
+    "os",
+    "host",
+    {
+      "type": "kernel",
+      "format": "{release}"
+    },
+    "uptime",
+    {
+      "type": "packages",
+      "combined": true
+    },
+    "shell",
+    {
+      "type": "display",
+      "compactType": "original",
+      "key": "Resolution"
+    },
+    "de",
+    "wm",
+    "wmtheme",
+    "theme",
+    "icons",
+    "terminal",
+    {
+      "type": "terminalfont",
+      "format": "{/name}{-}{/}{name}{?size} {size}{?}"
+    },
+    "cpu",
+    {
+      "type": "gpu",
+      "key": "GPU",
+      "format": "{name}"
+    },
+    {
+      "type": "memory",
+      "format": "{used} / {total}"
+    },
+    "break",
+    "colors"
+  ]
+}
+EOF
+    echo "✓ fastfetch installed with neofetch preset"
+  fi
+
   # deno runtime
   if ! command -v deno &>/dev/null; then
     section "Installing deno..."
