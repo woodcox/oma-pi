@@ -15,7 +15,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install | bash
+curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | bash
 
 ```
 
@@ -49,6 +49,10 @@ And you'll be offered to setup:
 
 ## Commands
 See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omaterm-manual/113/hotkeys) for using:
+
+ - omaterm-setup: Git name and email and github cli
+ - omaterm-refresh: Reinstall Oma-pi with initial configs
+ - omaterm-ssh: Add SSH key for remote access
 
  - opencode: `alias c=opencode`
  - Claude: `alias cx=printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permissions`
