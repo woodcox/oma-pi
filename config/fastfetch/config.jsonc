@@ -25,34 +25,39 @@
     },
     {
       "type": "cpu",
-      "key": "│ ├",
+      "key": "│ ├ CPU",
       "showPeCoreCount": true,
       "keyColor": "green"
     },
     {
       "type": "gpu",
-      "key": "│ ├",
+      "key": "│ ├ GPU",
       "detectionMethod": "pci",
       "keyColor": "green"
     },
     {
       "type": "display",
-      "key": "│ ├󱄄",
+      "key": "│ ├󱄄 Display",
       "keyColor": "green"
     },
     {
       "type": "disk",
-      "key": "│ ├󰋊",
+      "key": "│ ├󰋊 Disk",
       "keyColor": "green"
     },
     {
       "type": "memory",
-      "key": "│ ├",
+      "key": "│ ├ Memory",
       "keyColor": "green"
     },
     {
       "type": "swap",
-      "key": "└ └󰓡 ",
+      "key": "│ ├ Swap",
+      "keyColor": "green"
+    },
+    {
+      "type": "temperature",
+      "key": "└ └󰓡 Temp",
       "keyColor": "green"
     },
     {
@@ -129,6 +134,12 @@
       "keyColor": "magenta",
       "showIpv6": false,
       "namePrefix": "eth,wlan"
+    },
+    {
+      "type": "localip",
+      "key": "󱦟 Tailscale",
+      "keyColor": "magenta",
+      "namePrefix": "tailscale"
     },
     {
       "type": "command",
