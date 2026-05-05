@@ -11,6 +11,8 @@
     }
   },
   "modules": [
+    "title",
+    "separator",
     "break",
     {
       "type": "custom",
@@ -63,22 +65,9 @@
       "format": "\u001b[90m┌──────────────────────Software──────────────────────┐"
     },
     {
-      "type": "command",
-      "key": "\ue900 OS",
-      "keyColor": "blue",
-      "text": "version=$(omarchy-version); echo \"Omarchy $version\""
-    },
-    {
-      "type": "command",
-      "key": "│ ├󰘬",
-      "keyColor": "blue",
-      "text": "branch=$(omarchy-version-branch); echo \"$branch\""
-    },
-    {
-      "type": "command",
-      "key": "│ ├󰔫",
-      "keyColor": "blue",
-      "text": "channel=$(omarchy-version-channel); echo \"$channel\""
+      "type": "os",
+      "key": "│ ├",
+      "keyColor": "blue"
     },
     {
       "type": "kernel",
@@ -96,6 +85,11 @@
       "keyColor": "blue"
     },
     {
+      "type": "shell",
+      "key": "│ ├",
+      "keyColor": "blue"
+    },
+    {
       "type": "terminal",
       "key": "│ ├",
       "keyColor": "blue"
@@ -106,15 +100,14 @@
       "keyColor": "blue"
     },
     {
-      "type": "wmtheme",
-      "key": "│ ├󰉼",
+      "type": "icons",
+      "key": "│ ├󰀻",
       "keyColor": "blue"
     },
     {
-      "type": "command",
-      "key": "│ ├󰸌",
-      "keyColor": "blue",
-      "text": "theme=$(omarchy-theme-current); echo -e \"$theme \\e[38m●\\e[37m●\\e[36m●\\e[35m●\\e[34m●\\e[33m●\\e[32m●\\e[31m●\""
+      "type": "wmtheme",
+      "key": "│ ├󰉼",
+      "keyColor": "blue"
     },
     {
       "type": "terminalfont",
@@ -128,7 +121,14 @@
     "break",
     {
       "type": "custom",
-      "format": "\u001b[90m┌────────────────Age / Uptime / Update───────────────┐"
+      "format": "\u001b[90m┌────────────────Network / Age / Uptime───────────────┐"
+    },
+    {
+      "type": "localip",
+      "key": "󱦟 IP",
+      "keyColor": "magenta",
+      "showIpv6": false,
+      "namePrefix": "eth,wlan"
     },
     {
       "type": "command",
@@ -142,14 +142,12 @@
       "keyColor": "magenta"
     },
     {
-      "type": "command",
-      "key": " Update",
-      "keyColor": "magenta",
-      "text": "updated=$(omarchy-version-pkgs); echo \"$updated\""
-    },
-    {
       "type": "custom",
       "format": "\u001b[90m└────────────────────────────────────────────────────┘"
+    },
+    {
+      "type": "colors",
+      "symbol": "block"
     },
     "break"
   ]
