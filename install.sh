@@ -156,7 +156,7 @@ install_configs() {
     cat >>"$HOME/.bashrc" <<'BASHRC_TMUX'
 if [[ -z $TMUX ]]; then
   t
-else
+elif [[ $(tmux display-message -p '#I') == "0" ]] && [[ $(tmux display-message -p '#P') == "0" ]]; then
   fastfetch
 fi
 BASHRC_TMUX
