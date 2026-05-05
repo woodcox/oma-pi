@@ -157,7 +157,7 @@ install_configs() {
 if [[ -z $TMUX ]]; then
   t
 else
-  if [[ -z "$(tmux showenv FASTFETCH_SHOWN 2>/dev/null)" ]]; then
+  if [[ -z "$(tmux showenv FASTFETCH_SHOWN 2>/dev/null || true)" ]]; then
     tmux setenv FASTFETCH_SHOWN 1
     fastfetch
   fi
