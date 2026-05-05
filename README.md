@@ -54,23 +54,27 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - omaterm-refresh: Reinstall Oma-pi with initial configs
  - omaterm-ssh: Add SSH key for remote access
 
- - opencode: `alias c=opencode`
- - Claude: `alias cx=printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permissions`
- - Docker: `alias d=docker`
- - Lazydocker: `alias lzd=lazydocker`
- - Tmux: 
-      - `alias t=tmux attach || tmux new -s Work`
-      - `alias ic=tdl c`
-      - `alias ix=tdl cx`
-      - `alias icx=tdl c cx`
- - Github: `alias gh=github`
- - Git:   
-      - `alias g=git`
-      - `alias gcm=git commit -m`
-      - `alias gcam=git commit -a -m`
- - Fzf
- - Zoxide
- - Eza
- - Btop
- - tldr
+ - [opencode](https://opencode.ai/): alias `c`
+ - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permissions`
+ - Docker: alias `d`
+ - Lazydocker: alias `lzd`
+ - Tmux alias: 
+      - `t=tmux attach || tmux new -s Work`
+      - `ic=tdl c`
+      - `ix=tdl cx`
+      - `icx=tdl c cx`
+ - Github: alias `gh`
+ - Git alias:   
+      - `g=git`
+      - `gcm=git commit -m`
+      - `gcam=git commit -a -m`
+ - [Fzf](https://junegunn.github.io/fzf/): alias `ff`
+ - [Zoxide](https://github.com/ajeetdsouza/zoxide): alias `cd`
+ - [Eza](https://eza.rocks/) alias:
+      - `ls`
+      - `lt` for listing of two-deep levels of nesting
+      - `lsa` for listing including hidden files
+      -  `lta` for a nested listing with hidden files
+ - [Btop](https://github.com/aristocratos/btop)
+ - [tldr](https://tldr.sh/)
 
