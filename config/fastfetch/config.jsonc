@@ -145,14 +145,8 @@
       "type": "localip",
       "key": "󱦟 IP",
       "keyColor": "magenta",
-      "showIpv6": false
-    },
-    {
-      "type": "localip",
-      "key": "󱦟 Tailscale",
-      "keyColor": "magenta",
       "showIpv6": false,
-      "namePrefix": "tailscale0"
+      "showAllIps": true
     },
     {
       "type": "command",
