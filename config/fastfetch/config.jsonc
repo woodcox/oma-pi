@@ -11,8 +11,20 @@
     }
   },
   "modules": [
-    "title",
-    "separator",
+    "break",
+    {
+      "type": "custom",
+      "format": "\u001b[90m┌──────────────────────Name──────────────────────────┐"
+    },
+    {
+      "type": "title",
+      "key": "",
+      "keyColor": "red"
+    },
+    {
+      "type": "custom",
+      "format": "\u001b[90m└────────────────────────────────────────────────────┘"
+    },
     "break",
     {
       "type": "custom",
@@ -58,7 +70,8 @@
     {
       "type": "temperature",
       "key": "└ └󰓡 Temp",
-      "keyColor": "green"
+      "keyColor": "green",
+      "text": "vcgencmd measure_temp | sed 's/temp=//'"
     },
     {
       "type": "custom",
@@ -71,7 +84,7 @@
     },
     {
       "type": "os",
-      "key": "│ ├",
+      "key": " OS",
       "keyColor": "blue"
     },
     {
@@ -86,12 +99,12 @@
     },
     {
       "type": "de",
-      "key": " DE",
+      "key": "│ ├",
       "keyColor": "blue"
     },
     {
       "type": "shell",
-      "key": "│ ├",
+      "key": "│ ├",
       "keyColor": "blue"
     },
     {
@@ -126,20 +139,20 @@
     "break",
     {
       "type": "custom",
-      "format": "\u001b[90m┌────────────────Network / Age / Uptime───────────────┐"
+      "format": "\u001b[90m┌────────────────Network / Age / Uptime──────────────┐"
     },
     {
       "type": "localip",
       "key": "󱦟 IP",
       "keyColor": "magenta",
-      "showIpv6": false,
-      "namePrefix": "eth,wlan"
+      "showIpv6": false
     },
     {
       "type": "localip",
       "key": "󱦟 Tailscale",
       "keyColor": "magenta",
-      "namePrefix": "tailscale"
+      "showIpv6": false,
+      "namePrefix": "tailscale0"
     },
     {
       "type": "command",
