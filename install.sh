@@ -56,15 +56,6 @@ install_omadots() {
     echo "✓ $name"
   done
 
-  # Remove or neutralize nvim-specific defaults from copied shell config.
-  if [ -f "$HOME/.config/shell/envs" ]; then
-    sed -i 's/^export EDITOR="nvim"$/export EDITOR="hx"/' "$HOME/.config/shell/envs"
-  fi
-
-  if [ -f "$HOME/.config/shell/aliases" ]; then
-    sed -i '/nvim/d' "$HOME/.config/shell/aliases"
-  fi
-
   section "Configuring shell..."
   case "$(basename "${SHELL:-bash}")" in
     zsh)
@@ -83,6 +74,29 @@ EOF_ZSH
   esac
 
   trap - RETURN
+}
+
+patch_shell_config() {
+  section "Patching shell config for oma-pi..."
+
+  local SHELL_ENVS="$HOME/.config/shell/envs"
+  local SHELL_ALIASES="$HOME/.config/shell/aliases"
+
+  if [ -f "$SHELL_ENVS" ]; then
+    # Replace nvim with helix as default editor
+    sed -i 's/^export EDITOR="nvim"$/export EDITOR="hx"/' "$SHELL_ENVS"
+
+    # Add tool PATH entries if not already present
+    grep -q "deno" "$SHELL_ENVS"  || echo 'export PATH="$HOME/.deno/bin:$PATH"'       >>"$SHELL_ENVS"
+    grep -q "helix" "$SHELL_ENVS" || echo 'export PATH="$HOME/.local/bin:$PATH"'      >>"$SHELL_ENVS"
+  fi
+
+  if [ -f "$SHELL_ALIASES" ]; then
+    # Remove nvim aliases
+    sed -i '/nvim/d' "$SHELL_ALIASES"
+  fi
+
+  echo "✓ Shell config patched"
 }
 
 install_helix_binary() {
@@ -241,6 +255,7 @@ run_installation() {
 
   # Omadots
   install_omadots
+  patch_shell_config
 
   # Helix binary + runtime
   install_helix_binary
