@@ -218,6 +218,12 @@ EOF
     section "Installing deno..."
     curl -fsSL https://deno.land/install.sh | sh -s -- -y
     export PATH="$HOME/.deno/bin:$PATH"
+
+    # Add to managed shell config so it survives .bashrc rewrites
+    local SHELL_ENVS="$HOME/.config/shell/envs"
+    if [ -f "$SHELL_ENVS" ] && ! grep -q "deno" "$SHELL_ENVS"; then
+      echo 'export PATH="$HOME/.deno/bin:$PATH"' >>"$SHELL_ENVS"
+    fi
   fi
 }
 
