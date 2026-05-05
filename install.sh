@@ -175,6 +175,7 @@ install_bins() {
   chmod +x "$HOME/.local/bin/"*
   echo "✓ omaterm-ssh"
   echo "✓ omaterm-refresh"
+  echo "✓ omaterm-setup"
 }
 
 interactive_setup() {
