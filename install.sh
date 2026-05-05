@@ -142,9 +142,12 @@ install_configs() {
     cat >>"$HOME/.bashrc" <<'BASHRC_TMUX'
 if [[ -z $TMUX ]]; then
   t
+else
+  fastfetch
 fi
 BASHRC_TMUX
     echo "✓ Tmux auto-start"
+    echo "✓ fastfetch on tmux attach"
   fi
 }
 
