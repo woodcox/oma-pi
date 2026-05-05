@@ -136,13 +136,13 @@ install_packages() {
     section "Installing fastfetch..."
     local FF_VERSION
     FF_VERSION="$(curl -s "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" \
-      | grep -Po '"tag_name": *"v\K[^"]*')"
+      | grep -Po '"tag_name": *"\K[^"]*')"
 
     local FF_ARCH
     FF_ARCH="$(detect_arch)"  # aarch64 or x86_64
 
     curl -Lo /tmp/fastfetch.deb \
-      "https://github.com/fastfetch-cli/fastfetch/releases/download/v${FF_VERSION}/fastfetch-linux-${FF_ARCH}.deb"
+      "https://github.com/fastfetch-cli/fastfetch/releases/download/${FF_VERSION}/fastfetch-linux-${FF_ARCH}.deb"
     sudo dpkg -i /tmp/fastfetch.deb
     rm -f /tmp/fastfetch.deb
 
