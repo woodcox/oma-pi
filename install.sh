@@ -156,8 +156,11 @@ install_configs() {
     cat >>"$HOME/.bashrc" <<'BASHRC_TMUX'
 if [[ -z $TMUX ]]; then
   t
-elif [[ $(tmux display-message -p '#I') == "0" ]] && [[ $(tmux display-message -p '#P') == "0" ]]; then
-  fastfetch
+else
+  if [[ -z "$(tmux showenv FASTFETCH_SHOWN 2>/dev/null)" ]]; then
+    tmux setenv FASTFETCH_SHOWN 1
+    fastfetch
+  fi
 fi
 BASHRC_TMUX
     echo "✓ Tmux auto-start"
