@@ -1,0 +1,35 @@
+#!/bin/bash
+set -euo pipefail
+
+# Set the Helix colorscheme (takes effect on next hx launch)
+THEMES=(
+  default
+  catppuccin_dark
+  catppuccin_latte
+  catppuccin_mocha
+  everforest_dark
+  gruvbox
+  gruvbox_light
+  kanagawa
+  monokai_pro
+  nord
+  rose_pine
+  rose_pine_dawn
+  tokyonight
+  tokyonight_storm
+)
+
+CONFIG_FILE="$HOME/.config/helix/config.toml"
+CURRENT=$(grep '^theme' "$CONFIG_FILE" 2>/dev/null | sed 's/theme = "\(.*\)"/\1/' || echo "default")
+
+theme=$(gum choose --header "Helix theme (current: $CURRENT)" "${THEMES[@]}")
+
+# Update or insert the theme line
+if grep -q '^theme' "$CONFIG_FILE" 2>/dev/null; then
+  sed -i "s/^theme = .*/theme = \"$theme\"/" "$CONFIG_FILE"
+else
+  # Prepend to file if no theme line exists yet
+  sed -i "1s/^/theme = \"$theme\"\n/" "$CONFIG_FILE"
+fi
+
+echo "Helix theme set to $theme (restart hx to apply)"
