@@ -48,12 +48,12 @@ And you'll be offered to setup:
 > Security note: the installer asks whether you want to add your user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
 
 ## Commands
-See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omaterm-manual/113/hotkeys) for using:
+See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omapi-manual/113/hotkeys) for using:
 
- - `omaterm-setup`: Git name and email and github cli
- - `omaterm-refresh`: Reinstall Oma-pi with initial configs
- - `omaterm-ssh`: Add SSH key for remote access
- - `omaterm-theme`: Switch helix editor themes
+ - `omapi-setup`: Git name and email and github cli
+ - `omapi-refresh`: Reinstall Oma-pi with initial configs
+ - `omapi-ssh`: Add SSH key for remote access
+ - `omapi-theme`: Switch helix editor themes
 
  - [opencode](https://opencode.ai/): alias `c`
  - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permissions`

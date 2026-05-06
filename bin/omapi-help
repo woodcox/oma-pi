@@ -1,0 +1,194 @@
+#!/bin/bash
+set -euo pipefail
+
+if ! command -v gum &>/dev/null; then
+  echo "Error: gum is not installed or not on PATH"
+  exit 1
+fi
+
+# Colours
+RED="\e[38;2;197;26;74m"
+GREEN="\e[32m"
+BLUE="\e[34m"
+CYAN="\e[36m"
+YELLOW="\e[33m"
+MAGENTA="\e[35m"
+BOLD="\e[1m"
+DIM="\e[2m"
+RESET="\e[0m"
+
+
+# Helpers
+header() {
+  echo -e "${RED}${BOLD}  $1${RESET}"
+  echo -e "${DIM}  $(printf '─%.0s' {1..50})${RESET}"
+}
+
+section() {
+  echo ""
+  echo -e "${CYAN}${BOLD}  $1${RESET}"
+}
+
+cmd() {
+  # cmd "alias" "description"
+  printf "  ${GREEN}%-28s${RESET} %s\n" "$1" "$2"
+}
+
+hotkey() {
+  # hotkey "keys" "description"
+  printf "  ${YELLOW}%-28s${RESET} %s\n" "$1" "$2"
+}
+
+
+# Pages
+page_commands() {
+  clear
+  echo ""
+  header "Oma-Pi Commands"
+
+  section "Scripts"
+  cmd "omapi-help"    "Show this help"
+  cmd "omapi-refresh" "Reinstall Oma-Pi with initial configs"
+  cmd "omapi-setup"   "Set git name, email and GitHub CLI auth"
+  cmd "omapi-ssh"     "Add SSH key for remote access"
+  cmd "omapi-theme"   "Switch Helix editor theme"
+
+  section "AI Tools"
+  cmd "c"   "opencode (opencode.ai)"
+  cmd "cx"  "claude --allow-dangerously-skip-permissions"
+
+  section "Docker"
+  cmd "d"   "docker"
+  cmd "lzd" "lazydocker"
+
+  section "Tmux"
+  cmd "t"   "tmux attach || tmux new -s Work"
+  cmd "ic"  "tdl c"
+  cmd "ix"  "tdl cx"
+  cmd "icx" "tdl c cx"
+
+  section "Git"
+  cmd "g"    "git"
+  cmd "gcm"  "git commit -m"
+  cmd "gcam" "git commit -a -m"
+  cmd "gh"   "github cli"
+
+  section "File & Navigation"
+  cmd "ff"  "fzf fuzzy finder"
+  cmd "cd"  "zoxide (smart cd)"
+  cmd "ls"  "eza"
+  cmd "lt"  "eza tree (2 levels)"
+  cmd "lsa" "eza including hidden"
+  cmd "lta" "eza tree including hidden"
+
+  section "System"
+  cmd "btop" "resource monitor"
+  cmd "tldr" "simplified man pages"
+}
+
+page_tmux() {
+  clear
+  echo ""
+  header "Tmux Reference"
+  echo -e "  ${DIM}Prefix = Ctrl + B${RESET}"
+
+  section "Session"
+  hotkey "t"              "Start / attach session"
+  hotkey "Prefix D"       "Detach from session"
+  hotkey "Prefix Shift+C" "New session"
+  hotkey "Prefix Shift+X" "Kill session"
+  hotkey "Prefix Shift+R" "Rename session"
+  hotkey "Prefix S"       "Choose session from list"
+  hotkey "Prefix ( / )"   "Previous / next session"
+
+  section "Windows"
+  hotkey "Prefix C"   "New window"
+  hotkey "Prefix R"   "Rename window"
+  hotkey "Prefix &"   "Kill window"
+  hotkey "Prefix N/P" "Next / previous window"
+  hotkey "Prefix 0-9" "Go to window by number"
+  hotkey "Prefix W"   "Choose window from list"
+
+  section "Panes"
+  hotkey "Prefix |"          "Split horizontally"
+  hotkey "Prefix -"          "Split vertically"
+  hotkey "Prefix Arrow keys" "Navigate panes"
+  hotkey "Prefix Z"          "Toggle pane zoom"
+  hotkey "Prefix X"          "Kill pane"
+  hotkey "Prefix Q"          "Show pane numbers"
+  hotkey "Prefix Space"      "Cycle pane layouts"
+  hotkey "Prefix Shift+←/→"  "Resize pane left / right"
+  hotkey "Prefix Shift+↑/↓"  "Resize pane up / down"
+
+  section "Copy Mode"
+  hotkey "Prefix ["  "Enter copy mode"
+  hotkey "V"         "Begin selection"
+  hotkey "Y"         "Copy selection and exit"
+  hotkey "Prefix ]"  "Paste from buffer"
+
+  section "Other"
+  hotkey "Prefix :"  "Open command prompt"
+  hotkey "Prefix ?"  "List all key bindings"
+  hotkey "Alt + R"   "Reload tmux config"
+}
+
+page_helix() {
+  clear
+  echo ""
+  header "Helix Reference"
+
+  section "Navigation"
+  hotkey "Space"         "Show command options"
+  hotkey "Space Space"   "Open file via fuzzy search"
+  hotkey "Space E"       "Toggle file sidebar"
+  hotkey "Space G G"     "Show git controls"
+  hotkey "Space S G"     "Search file content"
+  hotkey "Ctrl+W W"      "Jump between sidebar and editor"
+  hotkey "Ctrl+←/→"      "Resize sidebar"
+  hotkey "Shift+H / L"   "Left / right file tab"
+  hotkey "Space B D"     "Close file tab"
+
+  section "Sidebar"
+  hotkey "A"       "New file in parent dir"
+  hotkey "Shift+A" "New subdirectory"
+  hotkey "D"       "Delete file/dir"
+  hotkey "M"       "Move file/dir"
+  hotkey "R"       "Rename file/dir"
+  hotkey "?"       "Show all sidebar commands"
+}
+
+
+# Main menu
+while true; do
+  clear
+  echo ""
+  echo -e "${RED}   
+ ▄██████▄    ▄▄▄▄███▄▄▄▄      ▄████████    ▄████████ ▄██
+███    ███ ▄██▀▀▀███▀▀▀██▄   ███    ███   ███    ███ █▀
+███    ███ ███   ███   ███   ███    ███   ███    ███   ▄
+███    ███ ███   ███   ███   ███    ███   ███    ███ ▄██
+███    ███ ███   ███   ███ ▀███████████ ▀█████████▀  ███
+███    ███ ███   ███   ███   ███    ███   ███        ███
+███    ███ ███   ███   ███   ███    ███   ███        ███
+ ▀██████▀   ▀█   ███   █▀    ███    █▀    ███        ███
+                                          █▀         █▀
+  ${RESET}"
+
+  CHOICE=$(gum choose \
+    --header "  What would you like to view?" \
+    --header.foreground="240" \
+    "Commands & Aliases" \
+    "Tmux Reference" \
+    "Helix Reference" \
+    "Quit")
+
+  case "$CHOICE" in
+    "Commands & Aliases") page_commands ;;
+    "Tmux Reference")     page_tmux     ;;
+    "Helix Reference")    page_helix    ;;
+    "Quit"|"")            clear; exit 0 ;;
+  esac
+
+  echo ""
+  gum confirm "Back to menu?" && continue || { clear; exit 0; }
+done
