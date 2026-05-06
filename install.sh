@@ -173,9 +173,11 @@ install_bins() {
   mkdir -p "$HOME/.local/bin"
   cp -Rf "$INSTALLER_DIR/bin/"* "$HOME/.local/bin/"
   chmod +x "$HOME/.local/bin/"*
-  echo "✓ omaterm-ssh"
-  echo "✓ omaterm-refresh"
-  echo "✓ omaterm-setup"
+  echo "✓ omapi-ssh"
+  echo "✓ omapi-refresh"
+  echo "✓ omapi-setup"
+  echo "✓ omapi-theme"
+  echo "✓ omapi-help"
 }
 
 interactive_setup() {
