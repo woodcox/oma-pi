@@ -66,12 +66,25 @@ page_commands() {
   cmd "ic"  "tdl c"
   cmd "ix"  "tdl cx"
   cmd "icx" "tdl c cx"
+  cmd "tdl <ai> [ai2]"               "Dev layout: editor + AI pane(s) + terminal"
+  cmd "tdl c"                        "Editor + opencode"
+  cmd "tdl cx"                       "Editor + claude"
+  cmd "tdl c cx"                     "Editor + opencode + claude"
+  cmd "tdlm <ai> [ai2]"              "One tdl window per subdirectory"
+  cmd "tsl <count> <command>"        "Swarm layout: N panes running same command"
 
   section "Git"
   cmd "g"    "git"
   cmd "gcm"  "git commit -m"
   cmd "gcam" "git commit -a -m"
+  cmd "g co" "git checkout"
+  cmd "g br" "git branch"
+  cmd "g ci" "git commit"
+  cmd "g st" "git status"
   cmd "gh"   "github cli"
+  cmd "ga <branch>"                  "Create worktree + branch, cd into it"
+  cmd "gd"                           "Remove current worktree + branch"
+  cmd "git-id"                       "Set global git user.name and user.email"
 
   section "File & Navigation"
   cmd "ff"  "fzf fuzzy finder"
@@ -85,6 +98,11 @@ page_commands() {
   cmd "lsa" "eza including hidden"
   cmd "lta" "eza tree including hidden"
 
+  section "SSH Port Forwarding"
+  cmd "fip <host> <port...>"           "Forward port(s) from remote host"
+  cmd "dip <port...>"                  "Stop forwarding port(s)"
+  cmd "lip"                            "List active port forwards"
+
   section "System"
   cmd "btop" "resource monitor"
   cmd "tldr" "simplified man pages"
@@ -94,16 +112,16 @@ page_tmux() {
   clear
   echo ""
   header "Tmux Reference"
-  echo -e "  ${DIM}Prefix = Ctrl + B${RESET}"
+  echo -e "  ${DIM}Prefix = Ctrl + Space (Ctrl + B also works)${RESET}"
 
   section "Session"
-  hotkey "t"              "Start / attach session"
-  hotkey "Prefix D"       "Detach from session"
-  hotkey "Prefix Shift+C" "New session"
-  hotkey "Prefix Shift+X" "Kill session"
-  hotkey "Prefix Shift+R" "Rename session"
-  hotkey "Prefix S"       "Choose session from list"
-  hotkey "Prefix ( / )"   "Previous / next session"
+  hotkey "t"                "Start / attach session"
+  hotkey "Prefix D"         "Detach from session"
+  hotkey "Prefix Shift + C" "New session"
+  hotkey "Prefix Shift + X" "Kill session"
+  hotkey "Prefix Shift + R" "Rename session"
+  hotkey "Prefix S"         "Choose session from list"
+  hotkey "Prefix ( / )"     "Previous / next session"
 
   section "Windows"
   hotkey "Prefix C"   "New window"
@@ -114,15 +132,15 @@ page_tmux() {
   hotkey "Prefix W"   "Choose window from list"
 
   section "Panes"
-  hotkey "Prefix |"          "Split horizontally"
-  hotkey "Prefix -"          "Split vertically"
-  hotkey "Prefix Arrow keys" "Navigate panes"
-  hotkey "Prefix Z"          "Toggle pane zoom"
-  hotkey "Prefix X"          "Kill pane"
-  hotkey "Prefix Q"          "Show pane numbers"
-  hotkey "Prefix Space"      "Cycle pane layouts"
-  hotkey "Prefix Shift+←/→"  "Resize pane left / right"
-  hotkey "Prefix Shift+↑/↓"  "Resize pane up / down"
+  hotkey "Prefix |"            "Split horizontally (same directory)"
+  hotkey "Prefix -"            "Split vertically (same directory)"
+  hotkey "Prefix Arrow keys"   "Navigate panes"
+  hotkey "Prefix Z"            "Toggle pane zoom"
+  hotkey "Prefix X"            "Kill pane"
+  hotkey "Prefix Q"            "Show pane numbers"
+  hotkey "Prefix Space"        "Cycle pane layouts"
+  hotkey "Prefix Shift + ←/→"  "Resize pane left / right (by 10)"
+  hotkey "Prefix Shift + ↑/↓"  "Resize pane up / down (by 10)"
 
   section "Copy Mode"
   hotkey "Prefix ["  "Enter copy mode"
@@ -161,6 +179,24 @@ page_helix() {
   hotkey "?"       "Show all sidebar commands"
 }
 
+page_functions() {
+  clear
+  echo ""
+  header "Functions"
+
+  section "Media"
+  cmd "iso2sd <iso> <device>"          "Write ISO to SD card / USB drive"
+  cmd "format-drive <device> <name>"   "Wipe and format drive as exFAT"
+  cmd "transcode-video-1080p <file>"   "Encode video to 1080p H.264"
+  cmd "transcode-video-4K <file>"      "Encode video to 4K H.265"
+  cmd "img2jpg <file>"                 "Convert image to high-quality JPG"
+  cmd "img2jpg-small <file>"           "Convert image to JPG, max 1080px wide"
+  cmd "img2jpg-medium <file>"          "Convert image to JPG, max 1800px wide"
+  cmd "img2png <file>"                 "Convert image to compressed PNG"
+  
+}
+
+
 
 # Main menu
 while true; do
@@ -182,12 +218,14 @@ while true; do
     --header "  What would you like to view?" \
     --header.foreground="240" \
     "Commands & Aliases" \
+    "Functions" \
     "Tmux Reference" \
     "Helix Reference" \
     "Quit")
 
   case "$CHOICE" in
     "Commands & Aliases") page_commands ;;
+    "Functions")          page_functions ;;
     "Tmux Reference")     page_tmux     ;;
     "Helix Reference")    page_helix    ;;
     "Quit"|"")            clear; exit 0 ;;
