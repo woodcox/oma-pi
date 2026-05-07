@@ -78,4 +78,3 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
       -  `lta` for a nested listing with hidden files
  - [Btop](https://github.com/aristocratos/btop)
  - [tldr](https://tldr.sh/)
-
