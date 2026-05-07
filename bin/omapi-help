@@ -66,11 +66,11 @@ page_commands() {
   cmd "ic"  "tdl c"
   cmd "ix"  "tdl cx"
   cmd "icx" "tdl c cx"
-  cmd "tdl <ai> [ai2]"               "Dev layout: editor + AI pane(s) + terminal"
+  cmd "tdl [ai] [ai2]"               "Dev layout: editor + AI pane(s) + terminal"
   cmd "tdl c"                        "Editor + opencode"
   cmd "tdl cx"                       "Editor + claude"
   cmd "tdl c cx"                     "Editor + opencode + claude"
-  cmd "tdlm <ai> [ai2]"              "One tdl window per subdirectory"
+  cmd "tdlm [ai] [ai2]"              "One tdl window per subdirectory"
   cmd "tsl <count> <command>"        "Swarm layout: N panes running same command"
 
   section "Git"
