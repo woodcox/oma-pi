@@ -54,7 +54,7 @@ page_commands() {
   cmd "omapi-theme"   "Switch Helix editor theme"
 
   section "AI Tools"
-  cmd "c"   "opencode (opencode.ai)"
+  cmd "c"   "opencode"
   cmd "cx"  "claude --allow-dangerously-skip-permissions"
 
   section "Docker"
@@ -75,7 +75,11 @@ page_commands() {
 
   section "File & Navigation"
   cmd "ff"  "fzf fuzzy finder"
+  cmd "eff"  "fzf fuzzy finder in editor (Helix)"
   cmd "cd"  "zoxide (smart cd)"
+  cmd ".."  "cd .."
+  cmd "..."  "cd ../.."
+  cmd "...."  "cd ../../.."
   cmd "ls"  "eza"
   cmd "lt"  "eza tree (2 levels)"
   cmd "lsa" "eza including hidden"
@@ -190,5 +194,5 @@ while true; do
   esac
 
   echo ""
-  gum confirm "Back to menu?" && continue || { clear; exit 0; }
+  gum choose "Back to menu" "Quit" | grep -q "Back to menu" && continue || { clear; exit 0; }
 done
