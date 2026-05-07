@@ -4,7 +4,7 @@ An Omakase Terminal Setup For Arch/Debian/Ubuntu/Fedora by DHH
 
 ## Requirements
 
-- Base Arch Linux installation
+- Base Arch/Debian/Ubuntu/Fedora Linux installation
 - Internet connection
 - `sudo` privileges
 
