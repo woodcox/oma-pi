@@ -28,52 +28,37 @@ section() {
 
 install_omadots() {
   section "Installing Omadots configs..."
-  
-  local repo
-  local tmpdir
-  local skipped
 
-  repo="https://github.com/omacom-io/omadots.git"
-  tmpdir="$(mktemp -d)"
-  skipped=(nvim mise)
+  git clone --depth 1 "$REPO" "$TMPDIR"
 
-  trap 'rm -rf "${tmpdir:-}"' RETURN
-
-  git clone --depth 1 "$repo" "$tmpdir"
-
+  section "Copying dots to ~/.config..."
   mkdir -p "$HOME/.config"
-
-  for dir in "$tmpdir/config"/*/; do
-    local name
-    name="$(basename "$dir")"
-
-    if [[ " ${skipped[*]} " == *" $name "* ]]; then
-      echo "- Skipping $name"
-      continue
-    fi
-
-    cp -rf "$dir" "$HOME/.config/"
-    echo "✓ $name"
-  done
+  cp -rf "$TMPDIR/config/." "$HOME/.config/"
+  echo "✓ Configs"
 
   section "Configuring shell..."
   case "$(basename "${SHELL:-bash}")" in
     zsh)
       cat >"$HOME/.zshrc" <<'EOF_ZSH'
+[[ $- != *i* ]] && return
+
 source ~/.config/shell/all
 EOF_ZSH
       echo '. ~/.zshrc' >"$HOME/.zprofile"
       echo "✓ Zsh"
       ;;
+
     bash)
-      echo 'source ~/.config/shell/all' >"$HOME/.bashrc"
+      cat >"$HOME/.bashrc" <<'EOF_BASH'
+[[ $- != *i* ]] && return
+
+source ~/.config/shell/all
+EOF_BASH
       echo '. ~/.bashrc' >"$HOME/.bash_profile"
       ln -snf "$HOME/.config/shell/inputrc" "$HOME/.inputrc"
       echo "✓ Bash"
       ;;
   esac
-
-  trap - RETURN
 }
 
 patch_shell_config() {
