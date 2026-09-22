@@ -29,11 +29,9 @@ section() {
 install_omadots() {
   section "Installing Omadots configs..."
 
-  git clone --depth 1 "$REPO" "$TMPDIR"
-
   section "Copying dots to ~/.config..."
   mkdir -p "$HOME/.config"
-  cp -rf "$TMPDIR/config/." "$HOME/.config/"
+  cp -rf "$INSTALLER_DIR/config/." "$HOME/.config/"
   echo "✓ Configs"
 
   section "Configuring shell..."
