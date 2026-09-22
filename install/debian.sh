@@ -219,15 +219,16 @@ install_optional_ai_tools() {
   fi
 
   if gum confirm "Install opencode?" </dev/tty; then
-    deno install -g -A --name opencode npm:opencode-ai || true
+    deno approve-scripts npm:opencode-ai
+    deno install -g -A --name opencode npm:opencode-ai
   fi
 
   if gum confirm "Install claude-code?" </dev/tty; then
-    deno install -g -A --name claude-code npm:@anthropic-ai/claude-code || true
+    deno install -g -A --name claude-code npm:@anthropic-ai/claude-code
   fi
 
-  if gum confirm "Install Openai Codex?" </dev/tty; then
-    deno install -g -A --name codex npm:@openai/codex || true
+  if gum confirm "Install Hermes Agent?" </dev/tty; then
+    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
   fi
 }
 
