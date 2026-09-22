@@ -221,7 +221,7 @@ install_optional_ai_tools() {
   if gum confirm "Install opencode?" </dev/tty; then
     deno approve-scripts npm:opencode-ai
     deno install -g -A --config --name opencode npm:opencode-ai || true
-  f
+  fi
 
   if gum confirm "Install claude-code?" </dev/tty; then
     deno install -g -A --name claude-code npm:@anthropic-ai/claude-code || true
