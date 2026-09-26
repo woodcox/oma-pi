@@ -29,7 +29,7 @@ echo
 if ! git config --global user.name &>/dev/null || ! git config --global user.email &>/dev/null; then
   if gum confirm "Identify for Git?"; then
     source ~/.config/shell/functions
-    git-id
+    git-id || true
   fi
 fi
 
