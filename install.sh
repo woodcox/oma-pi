@@ -28,8 +28,10 @@ section() {
 
 # Fetch the latest release tag from the GitHub API.
 # Prefers the authenticated gh CLI so we don't burn the 60/hr anonymous rate
-# limit; a rate-limited or empty response yields an empty tag, which under
-# `set -e` would otherwise abort the installer part-way through.
+# limit. Returns non-zero for every failure mode, because callers turn the
+# result straight into a download URL: a rate limit, an offline host or a
+# repo without releases would otherwise install a tarball named after the
+# error response.
 github_latest_tag() {
   local repo="$1"
   local url tag
@@ -37,13 +39,16 @@ github_latest_tag() {
   url="https://api.github.com/repos/${repo}/releases/latest"
 
   if command -v gh &>/dev/null && gh auth status &>/dev/null; then
-    tag="$(gh api -q '.tag_name' "$url" 2>/dev/null || true)"
+    tag="$(gh api -q '.tag_name' "$url" 2>/dev/null)" || return 1
   else
     tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null \
       | grep -Po '"tag_name": *"\K[^"]+' || true)"
   fi
 
-  [[ -n $tag ]] || return 1
+  # gh echoes the raw response body on an HTTP error, so a plausible-looking
+  # but non-scalar result still has to be rejected.
+  [[ -n $tag && $tag != '{'* && $tag != '['* ]] || return 1
+
   printf '%s\n' "$tag"
 }
 
@@ -260,7 +265,7 @@ finish() {
   section "Almost Finished!"
 
   echo "Cleaning up unused packages..."
-  sudo apt autoremove --purge
+  sudo apt autoremove --purge -y
 
   echo "Now logout and back in for everything to take effect"
 }
