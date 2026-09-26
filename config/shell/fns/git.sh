@@ -22,7 +22,15 @@ git-id() {
     return 1
   fi
 
-  git config --global user.name "$name"
-  git config --global user.email "$email"
+  if ! git config --global user.name "$name"; then
+    echo "Failed to set git user.name" >&2
+    return 1
+  fi
+
+  if ! git config --global user.email "$email"; then
+    echo "Failed to set git user.email" >&2
+    return 1
+  fi
+
   echo "✓ Git identity set to $name <$email>"
 }
