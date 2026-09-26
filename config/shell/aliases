@@ -7,7 +7,18 @@ if command -v eza &> /dev/null; then
 fi
 
 # Fuzzy find (https://junegunn.github.io/fzf/)
-alias ff="fzf --preview 'bat --style=numbers --color=always {}'"
+# Debian ships the binary as `batcat`; Arch and Trixie+ provide `bat`. fzf
+# runs the preview under `sh -c`, where aliases are not expanded, so the
+# resolved path is handed over in the environment and quoted there instead of
+# being spliced into the preview command text, which breaks on any path
+# containing a space.
+BAT_BIN="$(command -v bat || command -v batcat || true)"
+if [[ -n $BAT_BIN ]]; then
+  export BAT_BIN
+  alias ff="fzf --preview '\"\$BAT_BIN\" --style=numbers --color=always {}'"
+else
+  alias ff="fzf --preview 'cat {}'"
+fi
 alias eff='$EDITOR "$(ff)"'
 sff() { if [ $# -eq 0 ]; then echo "Usage: sff <destination> (e.g. sff host:/tmp/)"; return 1; fi; local file; file=$(find . -type f -printf '%T@\t%p\n' | sort -rn | cut -f2- | ff) && [ -n "$file" ] && scp "$file" "$1"; }
 
@@ -49,7 +60,6 @@ alias t='tmux attach || tmux new -s Work'
 alias ic='tdl c'
 alias ix='tdl cx'
 alias icx='tdl c cx'
-n() { if [ "$#" -eq 0 ]; then command nvim . ; else command nvim "$@"; fi; }
 
 # Git
 alias g='git'

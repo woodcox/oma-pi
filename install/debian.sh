@@ -18,6 +18,10 @@ install_packages() {
     fzf zoxide tmux btop jq
     gpg kitty-terminfo
     unzip fontconfig
+    # bat backs the `ff`/`sff` fuzzy finders, parted + exfatprogs back
+    # `format-drive`. Debian installs the bat binary as `batcat`, which
+    # config/shell/aliases resolves for.
+    bat parted exfatprogs
   )
 
   section "Updating system packages..."
@@ -41,7 +45,7 @@ install_packages() {
   fi
 
   # tldr: Debian Trixie+ ships tealdeer instead of tldr
-  if apt-cache show tealdeer &>/dev/null; then
+  if apt-cache show tealdeer >/dev/null 2>&1; then
     sudo apt install -y tealdeer
   else
     sudo apt install -y tldr
@@ -95,8 +99,11 @@ install_packages() {
   if ! command -v lazygit &>/dev/null; then
     section "Installing lazygit..."
     local LAZYGIT_VERSION
-    LAZYGIT_VERSION="$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" \
-      | grep -Po '"tag_name": *"v\K[^"]*')"
+    LAZYGIT_VERSION="$(github_latest_tag jesseduffield/lazygit)" || {
+      echo "Error: could not determine the latest lazygit release (GitHub API unreachable or rate limited)" >&2
+      return 1
+    }
+    LAZYGIT_VERSION="${LAZYGIT_VERSION#v}"   # release tag is v0.x.y, filenames are not
 
     # lazygit uses "arm64" not "aarch64" in its release filenames
     local ARCH LG_ARCH
@@ -135,8 +142,10 @@ install_packages() {
   if ! command -v fastfetch &>/dev/null; then
     section "Installing fastfetch..."
     local FF_VERSION
-    FF_VERSION="$(curl -s "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" \
-      | grep -Po '"tag_name": *"\K[^"]*')"
+    FF_VERSION="$(github_latest_tag fastfetch-cli/fastfetch)" || {
+      echo "Error: could not determine the latest fastfetch release (GitHub API unreachable or rate limited)" >&2
+      return 1
+    }
 
     local FF_ARCH
     FF_ARCH="$(detect_arch)"  # aarch64 or x86_64
@@ -205,6 +214,23 @@ EOF
   echo "Docker installation complete ✅"
 }
 
+# Deno treats a deno.json in the working directory (or any parent) as the
+# project config for the install, and writes deno.lock next to it. Running
+# from wherever the user happened to invoke the installer therefore created
+# ~/deno.json and ~/deno.lock in their home directory. Install from the
+# throwaway clone instead, which has no deno.json above it.
+deno_global_install() {
+  local name="$1"
+  local package="$2"
+
+  # Not fatal: a failure here should not skip the remaining optional tools,
+  # docker and the service setup that follow. Report it rather than letting
+  # the `|| true` that used to be here hide it completely.
+  if ! (cd "$INSTALLER_DIR" && deno install -g -A --name "$name" "$package"); then
+    echo "Error: failed to install $name" >&2
+  fi
+}
+
 install_optional_ai_tools() {
   section "Optional AI coding assistants..."
 
@@ -219,11 +245,11 @@ install_optional_ai_tools() {
   fi
 
   if gum confirm "Install opencode?" </dev/tty; then
-    deno install -g -A --name opencode npm:opencode-ai || true
+    deno_global_install opencode npm:opencode-ai
   fi
 
   if gum confirm "Install claude-code?" </dev/tty; then
-    deno install -g -A --name claude-code npm:@anthropic-ai/claude-code || true
+    deno_global_install claude-code npm:@anthropic-ai/claude-code
   fi
 
   if gum confirm "Install Hermes Agent?" </dev/tty; then

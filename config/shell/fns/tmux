@@ -42,6 +42,10 @@ tdl() {
 tds() {
   [[ -n $1 ]] && { echo "Usage: tds"; return 1; }
   [[ -z $TMUX ]] && { echo "You must start tmux to use tds."; return 1; }
+  if ! command -v hunk &>/dev/null; then
+    echo "tds needs 'hunk' (https://github.com/jesseduffield/hunk), which is not installed."
+    return 1
+  fi
 
   local current_dir="${PWD}"
   local editor_pane diff_pane terminal_pane opencode_pane

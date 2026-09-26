@@ -2,3 +2,8 @@ source "$HOME/.config/shell/envs"
 source "$HOME/.config/shell/aliases"
 source "$HOME/.config/shell/functions"
 source "$HOME/.config/shell/inits"
+
+# zoptions is full of setopt/bindkey calls, which bash would reject.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  source "$HOME/.config/shell/zoptions"
+fi
