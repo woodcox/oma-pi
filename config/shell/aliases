@@ -7,12 +7,15 @@ if command -v eza &> /dev/null; then
 fi
 
 # Fuzzy find (https://junegunn.github.io/fzf/)
-# Debian ships the binary as `batcat`; Arch and Trixie+ provide `bat`. The
-# preview runs under `sh -c`, where aliases are not expanded, so the name has
-# to be resolved to a real path here.
+# Debian ships the binary as `batcat`; Arch and Trixie+ provide `bat`. fzf
+# runs the preview under `sh -c`, where aliases are not expanded, so the
+# resolved path is handed over in the environment and quoted there instead of
+# being spliced into the preview command text, which breaks on any path
+# containing a space.
 BAT_BIN="$(command -v bat || command -v batcat || true)"
 if [[ -n $BAT_BIN ]]; then
-  alias ff="fzf --preview '$BAT_BIN --style=numbers --color=always {}'"
+  export BAT_BIN
+  alias ff="fzf --preview '\"\$BAT_BIN\" --style=numbers --color=always {}'"
 else
   alias ff="fzf --preview 'cat {}'"
 fi
