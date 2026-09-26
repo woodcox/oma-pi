@@ -41,7 +41,7 @@ install_packages() {
   fi
 
   # tldr: Debian Trixie+ ships tealdeer instead of tldr
-  if apt-cache show tealdeer &>/dev/null; then
+  if apt-cache show tealdeer >/dev/null 2>&1; then
     sudo apt install -y tealdeer
   else
     sudo apt install -y tldr
@@ -95,8 +95,11 @@ install_packages() {
   if ! command -v lazygit &>/dev/null; then
     section "Installing lazygit..."
     local LAZYGIT_VERSION
-    LAZYGIT_VERSION="$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" \
-      | grep -Po '"tag_name": *"v\K[^"]*')"
+    LAZYGIT_VERSION="$(github_latest_tag jesseduffield/lazygit)" || {
+      echo "Error: could not determine the latest lazygit release (GitHub API unreachable or rate limited)" >&2
+      return 1
+    }
+    LAZYGIT_VERSION="${LAZYGIT_VERSION#v}"   # release tag is v0.x.y, filenames are not
 
     # lazygit uses "arm64" not "aarch64" in its release filenames
     local ARCH LG_ARCH
@@ -135,8 +138,10 @@ install_packages() {
   if ! command -v fastfetch &>/dev/null; then
     section "Installing fastfetch..."
     local FF_VERSION
-    FF_VERSION="$(curl -s "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" \
-      | grep -Po '"tag_name": *"\K[^"]*')"
+    FF_VERSION="$(github_latest_tag fastfetch-cli/fastfetch)" || {
+      echo "Error: could not determine the latest fastfetch release (GitHub API unreachable or rate limited)" >&2
+      return 1
+    }
 
     local FF_ARCH
     FF_ARCH="$(detect_arch)"  # aarch64 or x86_64

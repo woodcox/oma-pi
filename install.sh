@@ -26,6 +26,27 @@ section() {
   echo -e "\n==> $1"
 }
 
+# Fetch the latest release tag from the GitHub API.
+# Prefers the authenticated gh CLI so we don't burn the 60/hr anonymous rate
+# limit; a rate-limited or empty response yields an empty tag, which under
+# `set -e` would otherwise abort the installer part-way through.
+github_latest_tag() {
+  local repo="$1"
+  local url tag
+
+  url="https://api.github.com/repos/${repo}/releases/latest"
+
+  if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+    tag="$(gh api -q '.tag_name' "$url" 2>/dev/null || true)"
+  else
+    tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null \
+      | grep -Po '"tag_name": *"\K[^"]+' || true)"
+  fi
+
+  [[ -n $tag ]] || return 1
+  printf '%s\n' "$tag"
+}
+
 # Guard against `>>` concatenating onto a last line that has no trailing newline
 ensure_trailing_newline() {
   local file="$1"
@@ -44,8 +65,13 @@ install_omadots() {
   echo "✓ Configs"
 
   section "Configuring shell..."
+  # Tracked so later steps (tmux auto-start) patch the rc file this shell
+  # actually reads, rather than assuming bash.
+  SHELL_RC="$HOME/.bashrc"
+
   case "$(basename "${SHELL:-bash}")" in
     zsh)
+      SHELL_RC="$HOME/.zshrc"
       cat >"$HOME/.zshrc" <<'EOF_ZSH'
 [[ $- != *i* ]] && return
 
@@ -113,8 +139,11 @@ install_helix_binary() {
       ;;
   esac
 
-  version="$(curl -fsSL https://api.github.com/repos/helix-editor/helix/releases/latest | grep -Po '"tag_name": *"\K[^"]+')"
-  
+  version="$(github_latest_tag helix-editor/helix)" || {
+    echo "Error: could not determine the latest Helix release (GitHub API unreachable or rate limited)" >&2
+    return 1
+  }
+
   # Check current version of helix
   if command -v hx &>/dev/null; then
     current_version="$(hx --version 2>/dev/null | awk 'NR==1{print $2}')"
@@ -146,9 +175,9 @@ install_configs() {
   echo "✓ Helix"
   echo "✓ Starship"
 
-  if ! grep -q "if \[\[ -z \$TMUX \]\]" "$HOME/.bashrc" 2>/dev/null; then
-    ensure_trailing_newline "$HOME/.bashrc"
-    cat >>"$HOME/.bashrc" <<'BASHRC_TMUX'
+  if ! grep -q "if \[\[ -z \$TMUX \]\]" "$SHELL_RC" 2>/dev/null; then
+    ensure_trailing_newline "$SHELL_RC"
+    cat >>"$SHELL_RC" <<'BASHRC_TMUX'
 if [[ -z $TMUX ]]; then
   t
 else
@@ -256,7 +285,6 @@ run_installation() {
 
   # Omadots
   install_omadots
-  patch_shell_config
 
   # Helix binary + runtime
   install_helix_binary
@@ -264,6 +292,10 @@ run_installation() {
   # Configs and bins
   install_configs
   install_bins
+
+  # Patch last: every step above re-copies config/ over ~/.config, so running
+  # this earlier would silently discard the EDITOR/alias edits.
+  patch_shell_config
 
   # Optional tools
   install_optional_ai_tools
