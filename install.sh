@@ -26,6 +26,15 @@ section() {
   echo -e "\n==> $1"
 }
 
+# Guard against `>>` concatenating onto a last line that has no trailing newline
+ensure_trailing_newline() {
+  local file="$1"
+  [[ -s $file ]] || return 0
+  if [[ -n $(tail -c 1 "$file") ]]; then
+    printf '\n' >>"$file"
+  fi
+}
+
 install_omadots() {
   section "Installing Omadots configs..."
 
@@ -66,12 +75,14 @@ patch_shell_config() {
   local SHELL_ALIASES="$HOME/.config/shell/aliases"
 
   if [ -f "$SHELL_ENVS" ]; then
+    ensure_trailing_newline "$SHELL_ENVS"
+
     # Replace nvim with helix as default editor
     sed -i 's/^export EDITOR="nvim"$/export EDITOR="hx"/' "$SHELL_ENVS"
 
     # Add tool PATH entries if not already present
-    grep -q "deno" "$SHELL_ENVS"  || echo 'export PATH="$HOME/.deno/bin:$PATH"'       >>"$SHELL_ENVS"
-    grep -q "helix" "$SHELL_ENVS" || echo 'export PATH="$HOME/.local/bin:$PATH"'      >>"$SHELL_ENVS"
+    grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
+    grep -qF '.local/bin' "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >>"$SHELL_ENVS"
   fi
 
   if [ -f "$SHELL_ALIASES" ]; then
@@ -136,6 +147,7 @@ install_configs() {
   echo "✓ Starship"
 
   if ! grep -q "if \[\[ -z \$TMUX \]\]" "$HOME/.bashrc" 2>/dev/null; then
+    ensure_trailing_newline "$HOME/.bashrc"
     cat >>"$HOME/.bashrc" <<'BASHRC_TMUX'
 if [[ -z $TMUX ]]; then
   t
