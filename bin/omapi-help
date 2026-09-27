@@ -147,8 +147,8 @@ page_tmux() {
   hotkey "Prefix K"            "Kill session"
   hotkey "Prefix s"            "Choose session from list"
   hotkey "Prefix d"            "Detach from session"
-  hotkey "Prefix N / P"        "Previous / next client"
-  hotkey "Alt+Up / Alt+Down"   "Previous / next client"
+  hotkey "Prefix P / N"        "Previous / next session"
+  hotkey "Alt+Up / Alt+Down"   "Previous / next session"
 
   section "Copy Mode"
   hotkey "Prefix ["  "Enter copy mode (vi keys)"
