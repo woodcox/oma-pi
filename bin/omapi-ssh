@@ -8,8 +8,6 @@ if gum confirm "Add SSH public key for remote access?"; then
   chmod 700 "$HOME/.ssh"
 
   AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
-  touch "$AUTHORIZED_KEYS"
-  chmod 600 "$AUTHORIZED_KEYS"
 
   SSH_KEY=$(gum input --placeholder "ssh-ed25519 AAAAC3..." --prompt "SSH key: ")
 
@@ -29,6 +27,13 @@ if gum confirm "Add SSH public key for remote access?"; then
     exit 1
   fi
   rm -f "$KEY_FILE"
+
+  # The key is known good, so create the file if it is not there yet and take
+  # care that it is not group or world readable. Doing this any earlier left an
+  # empty authorized_keys behind on the rejected paths above, which is not the
+  # "left unchanged" those paths claim.
+  touch "$AUTHORIZED_KEYS"
+  chmod 600 "$AUTHORIZED_KEYS"
 
   if grep -qxF "$SSH_KEY" "$AUTHORIZED_KEYS"; then
     echo "That key is already in authorized_keys."
