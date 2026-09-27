@@ -61,6 +61,36 @@ ensure_trailing_newline() {
   fi
 }
 
+# Keep the git identity out of the file this installer owns.
+# When ~/.gitconfig does not exist, `git config --global` (which git-id runs)
+# writes into ~/.config/git/config instead, and the config copies below
+# overwrite that file, so a refresh silently discarded the identity. Seed
+# ~/.gitconfig so it has a home the installer never touches, and rescue a
+# [user] block an earlier install left behind. Runs before the copies.
+ensure_git_config() {
+  section "Protecting git identity..."
+
+  local managed="$HOME/.config/git/config"
+  local user_config="$HOME/.gitconfig"
+  local key value
+
+  touch "$user_config"
+
+  for key in user.name user.email; do
+    # Never clobber a value that is already set where git prefers it.
+    if git config --file "$user_config" --get "$key" >/dev/null 2>&1; then
+      continue
+    fi
+    value="$(git config --file "$managed" --get "$key" 2>/dev/null || true)"
+    if [[ -n $value ]]; then
+      git config --file "$user_config" "$key" "$value"
+      echo "✓ Recovered $key from the managed config"
+    fi
+  done
+
+  echo "✓ Git identity lives in ~/.gitconfig, which reinstalls do not overwrite"
+}
+
 install_omadots() {
   section "Installing Omadots configs..."
 
@@ -287,6 +317,10 @@ run_installation() {
 
   # OS-specific package installation
   install_packages
+
+  # Before any config copy, so a previous identity can be recovered from the
+  # managed file and future ones have somewhere durable to live.
+  ensure_git_config
 
   # Omadots
   install_omadots
