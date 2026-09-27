@@ -7,8 +7,6 @@ if gum confirm "Add SSH public key for remote access?"; then
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
 
-  AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
-
   SSH_KEY=$(gum input --placeholder "ssh-ed25519 AAAAC3..." --prompt "SSH key: ")
 
   if [[ -z $SSH_KEY ]]; then
@@ -32,6 +30,7 @@ if gum confirm "Add SSH public key for remote access?"; then
   # care that it is not group or world readable. Doing this any earlier left an
   # empty authorized_keys behind on the rejected paths above, which is not the
   # "left unchanged" those paths claim.
+  AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
   touch "$AUTHORIZED_KEYS"
   chmod 600 "$AUTHORIZED_KEYS"
 
