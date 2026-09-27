@@ -147,8 +147,19 @@ install_packages() {
       return 1
     }
 
+    # fastfetch names its amd64 build after the Debian architecture, not the
+    # kernel one, so detect_arch's x86_64 has to be translated. detect_arch
+    # exits inside the command substitution for anything else, which leaves
+    # the value empty rather than failing the case, so catch that here.
     local FF_ARCH
-    FF_ARCH="$(detect_arch)"  # aarch64 or x86_64
+    case "$(detect_arch)" in
+      aarch64) FF_ARCH="aarch64" ;;
+      x86_64)  FF_ARCH="amd64"   ;;
+      *)
+        echo "Error: unsupported architecture for the fastfetch package" >&2
+        return 1
+        ;;
+    esac
 
     curl -Lo /tmp/fastfetch.deb \
       "https://github.com/fastfetch-cli/fastfetch/releases/download/${FF_VERSION}/fastfetch-linux-${FF_ARCH}.deb"
@@ -181,10 +192,22 @@ install_docker() {
   # Create keyrings dir if it doesn't exist
   sudo install -m 0755 -d /etc/apt/keyrings
 
+  # Docker publishes separately for Debian and Ubuntu, and each carries only
+  # its own distribution's release names: Ubuntu's VERSION_CODENAME (jammy,
+  # noble) has no match in the Debian repo, so pointing an Ubuntu box at
+  # linux/debian left apt with an unknown suite and failed the install.
+  # Ubuntu also has /etc/debian_version, so this is the one place the
+  # Debian-only assumption does not hold.
+  local DOCKER_DISTRO
+  case "$(. /etc/os-release && echo "${ID:-debian}")" in
+    ubuntu) DOCKER_DISTRO="ubuntu" ;;
+    *)      DOCKER_DISTRO="debian" ;;
+  esac
+
   # Add Docker GPG key (only if missing)
   if [ ! -f /etc/apt/keyrings/docker.asc ]; then
     echo "Adding Docker GPG key..."
-    sudo curl -fsSL https://download.docker.com/linux/debian/gpg \
+    sudo curl -fsSL "https://download.docker.com/linux/${DOCKER_DISTRO}/gpg" \
       -o /etc/apt/keyrings/docker.asc
     sudo chmod a+r /etc/apt/keyrings/docker.asc
   else
@@ -197,10 +220,10 @@ install_docker() {
   ARCH="$(dpkg --print-architecture)"
 
   # Add repo (overwrite safely every time)
-  echo "Setting up Docker repository..."
+  echo "Setting up Docker repository (${DOCKER_DISTRO} ${CODENAME})..."
   sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF
 Types: deb
-URIs: https://download.docker.com/linux/debian
+URIs: https://download.docker.com/linux/${DOCKER_DISTRO}
 Suites: ${CODENAME}
 Components: stable
 Architectures: ${ARCH}
