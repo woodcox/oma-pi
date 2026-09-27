@@ -4,8 +4,8 @@ set -euo pipefail
 # Set the Helix colorscheme (takes effect on next hx launch)
 THEMES=(
   default
-  catppuccin_dark
   catppuccin_latte
+  catppuccin_macchiato
   catppuccin_mocha
   everforest_dark
   gruvbox
@@ -22,7 +22,22 @@ THEMES=(
 CONFIG_FILE="$HOME/.config/helix/config.toml"
 CURRENT=$(grep '^theme' "$CONFIG_FILE" 2>/dev/null | sed 's/theme = "\(.*\)"/\1/' || echo "default")
 
-theme=$(gum choose --header "Helix theme (current: $CURRENT)" "${THEMES[@]}")
+# Drop any curated theme this Helix runtime does not ship. Helix renamed
+# catppuccin_dark to the four flavours and the list had not kept up, so
+# choosing it wrote a theme Helix cannot load.
+RUNTIME_THEMES="$HOME/.config/helix/runtime/themes"
+AVAILABLE=()
+for t in "${THEMES[@]}"; do
+  if [[ $t == default || -f "$RUNTIME_THEMES/$t.toml" ]]; then
+    AVAILABLE+=("$t")
+  fi
+done
+if [[ ${#AVAILABLE[@]} -eq 0 ]]; then
+  echo "No Helix runtime found at $RUNTIME_THEMES" >&2
+  exit 1
+fi
+
+theme=$(gum choose --header "Helix theme (current: $CURRENT)" "${AVAILABLE[@]}")
 
 # Update or insert the theme line
 if grep -q '^theme' "$CONFIG_FILE" 2>/dev/null; then
