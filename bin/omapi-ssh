@@ -38,7 +38,14 @@ if gum confirm "Add SSH public key for remote access?"; then
     echo "That key is already in authorized_keys."
   else
     # Append. The usual case is one key per device, and overwriting the file
-    # locks every other one of them out.
+    # locks every other one of them out. An authorized_keys with no final
+    # newline would have the new key concatenated onto its last line, turning
+    # that entry into rubbish and quietly revoking it, so close the file off
+    # first. Only when it is not already newline terminated, so this does not
+    # leave a blank line behind.
+    if [[ -s $AUTHORIZED_KEYS ]] && [[ -n $(tail -c 1 "$AUTHORIZED_KEYS") ]]; then
+      printf '\n' >>"$AUTHORIZED_KEYS"
+    fi
     printf '%s\n' "$SSH_KEY" >>"$AUTHORIZED_KEYS"
     echo "SSH key added to authorized_keys ($(grep -c . "$AUTHORIZED_KEYS") total)."
   fi
