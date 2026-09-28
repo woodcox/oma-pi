@@ -857,17 +857,26 @@ test_ssh_port_change_handles_socket_activated_units() {
   # confirmation - answering that "no" returns straight out of the function
   # before the port logic ever runs, so the socket path was never reached.
   stub ask
-  ask() {
-    case "$1" in
-      *"move sshd off port"*) printf '2222\n' ;;   # accept the port change
-      *) printf 'y\n' ;;                          # anything else: proceed
-    esac
-  }
+  ask() { printf 'y\n'; }   # accept the move and proceed past the key-only check
+  # The new port is read with a separate `gum input`, not through ask, and
+  # gum IS installed on this box with a working /dev/tty - so without this
+  # stub the test really invoked gum, which either blocked on a terminal or
+  # came back empty and only passed because of the `:-2222` fallback. Assert
+  # the port explicitly so the fallback cannot carry the test.
+  stub have
+  have() { [[ $1 == gum ]] && return 1; return 0; }
+  stub gum
+  gum() { printf '2222\n'; }
+
   DRY_RUN=1
   local out
   out="$(harden_ssh 2>&1)"
   DRY_RUN=0
 
+  if ! grep -q 'sshd will move to port 2222' <<<"$out"; then
+    printf '        harden_ssh never confirmed the move to port 2222\n'
+    rc=1
+  fi
   if ! grep -q 'ssh.socket' <<<"$out"; then
     printf '        the dry run never mentioned ssh.socket on a socket-activated host\n'
     rc=1
