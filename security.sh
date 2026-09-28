@@ -310,25 +310,36 @@ replace_managed_block() {
     # adjacent to the managed block is touched, so blank lines the user put
     # elsewhere in their own config are preserved.
     if [[ $where == bottom ]]; then
-      # Block is last: collapse the run immediately BEFORE it, and only that
-      # run. The `blank` flag has to be reset on every non-blank line, or it
-      # stays set and collapses EVERY blank run in the file - which silently
-      # reformatting a user's own after.rules is exactly what this whole
-      # function is supposed to avoid doing.
+      # Block is last: collapse ONLY the run of blank lines immediately before
+      # the block - that run is the join this function created, and leaving it
+      # to grow is what made the file gain a blank line per run.
+      #
+      # Every OTHER run of blanks belongs to the user's own after.rules and is
+      # copied through untouched. An earlier version reset a `blank` flag on
+      # each non-blank line, which stopped separate runs merging but still
+      # collapsed every one of them to a single line: a file with three
+      # deliberate blank lines between rules came back with one, in a
+      # function whose entire job is to preserve the user's file.
       awk -v b1="$b1" '
         { lines[NR] = $0 }
         END {
           start = 0
           for (i = 1; i <= NR; i++) if (lines[i] == b1) { start = i; break }
-          blank = 0
+
+          # First line of the trailing run of blanks directly before `start`.
+          # Walk back from start-1 while the lines are blank.
+          join = start
+          if (join > 1) {
+            k = join - 1
+            while (k >= 1 && lines[k] == "") k--
+            join = k + 1
+          }
+
           for (i = 1; i <= NR; i++) {
-            if (start > 0 && i < start && lines[i] == "") {
-              if (blank) continue          # drop the extra separators
-              blank = 1
-              print ""
+            if (join > 1 && i >= join && i < start) {
+              if (i == join) print ""   # one separator, then skip the rest
               continue
             }
-            blank = 0                       # a real line re-arms the collapse
             print lines[i]
           }
         }
@@ -349,20 +360,25 @@ replace_managed_block() {
     rm -f "$body.trim"
   fi
 
-  install -d -m 0755 "$(dirname "$target")" 2>/dev/null || true
-
   if ((DRY_RUN)); then
     # Print just the managed block, not the whole file. Echoing back a
     # 200-line stock sshd_config to say "these 10 lines would be added" buries
     # the useful part.
+    #
+    # Nothing above this point may touch the filesystem. `install -d` used to
+    # run just above this check, so a dry run created /etc/ssh (and /etc/ufw on
+    # a box that lacked it) - a real mutation, and the one guarantee a dry run
+    # exists to provide.
     printf '  %s•%s would write %s (managed block on top, rest untouched):%s\n' \
       "$C_DIM" "$C_OFF" "$path" "$C_OFF"
     if [[ -f $block ]]; then
       sed 's/^/      /' "$block"
     fi
-    rm -f "$body" "$body.tail"
+    rm -f "$body" "$body.tail" "$body.trim"
     return 0
   fi
+
+  install -d -m 0755 "$(dirname "$target")" 2>/dev/null || true
 
   cat "$body" >"$target"
   rm -f "$body"
@@ -603,6 +619,16 @@ harden_ssh() {
       warn "--lockdown-ssh needs a real non-root user; run it as 'sudo -u \$USER -E ./security.sh --lockdown-ssh' or from a root shell with SUDO_USER set"
       warn "refusing to write AllowUsers root: it would lock out every account"
       LOCKDOWN_SSH=0
+    elif ! have_usable_key "$(key_files_for_user "$target_user")"; then
+      # The backdoor check above only proves that SOME non-root account has a
+      # key. This flag names one specific account, and if that is not the one
+      # with the key then AllowUsers <target_user> + PasswordAuthentication no
+      # + PermitRootLogin no strands the box with no prompt at all. On the
+      # --yes path there is no prompt to notice, because there is no prompt.
+      warn "--lockdown-ssh would set AllowUsers ${target_user}, but that account has no usable authorized_keys"
+      warn "the key check passed for a different account; refusing to lock down to a keyless user"
+      note "put an authorized_keys file in ~${target_user} first, or drop --lockdown-ssh"
+      LOCKDOWN_SSH=0
     else
       note "--lockdown-ssh: AllowUsers will be set to ${target_user}"
     fi
@@ -816,8 +842,11 @@ DOCKER_UFW_BEGIN="# BEGIN UFW AND DOCKER"
 DOCKER_UFW_END="# END UFW AND DOCKER"
 
 docker_ufw_installed() {
-  [[ -r /etc/ufw/after.rules ]] &&
-    grep -qF "$DOCKER_UFW_BEGIN" /etc/ufw/after.rules 2>/dev/null
+  # Through CONF_DEST, not a hardcoded /etc. configure_docker_uff says it
+  # checks here so a test destdir cannot make the script read the real host
+  # file; that was only true of the caller, not of this function.
+  local f="${CONF_DEST}/etc/ufw/after.rules"
+  [[ -r $f ]] && grep -qF "$DOCKER_UFW_BEGIN" "$f" 2>/dev/null
 }
 
 # Every subnet Docker currently has, so the rules cover custom networks and
@@ -853,7 +882,13 @@ docker_port_is_loopback_only() {
     [[ $e == *"->"* ]] || continue
     local rest="${e##*->}"
     local target="${rest%%/*}" eproto="${rest##*/}"
-    [[ $eproto == */* ]] && eproto="tcp"
+    # Test $rest, not $eproto: eproto is everything after the last "/", so it
+    # can never itself contain one and the check never fired. docker omits the
+    # protocol on some `docker ps` output, giving eproto="80" for "->80", which
+    # then matched neither tcp nor udp - so a loopback-only port was reported
+    # as publicly reachable and a pointless `ufw route allow` was demanded for
+    # something nothing outside the box can reach.
+    [[ $rest == */* ]] || eproto="tcp"
     # Per protocol: a port published on loopback for tcp and on 0.0.0.0 for
     # udp is publicly reachable over udp, and the tcp result must not mask it.
     [[ $target == "$cport" && $eproto == "$proto" ]] || continue
@@ -954,9 +989,12 @@ validate_docker_ufw_rules() {
       case "$line" in
         '*filter' | 'COMMIT') continue ;;
         ':'*)
-          # :CHAINNAME - [0:0]
-          declared+="${line#:}"
-          declared+=" "
+          # :CHAINNAME - [0:0] - take the NAME only. ${line#:} would give
+          # "ufw-user-forward - [0:0]", which never matches the " ${chain} "
+          # lookup and so silently defeats the undeclared-jump check the
+          # moment a chain is not in the pre-listed set.
+          local cname="${line#:}"
+          declared+=" ${cname%% *} "
           continue
           ;;
         '-A'*)

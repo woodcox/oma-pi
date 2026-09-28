@@ -35,16 +35,57 @@ setup_destdir() {
   _SAVED_RUN_ROOT="$(declare -f run_root)"
   _SAVED_PRIV="$(declare -f priv)"
   _SAVED_PEEK="$(declare -f peek)"
+  stub have
   have() { return 0; }
+  stub run_root
   run_root() { printf '  [stub] run_root %s\n' "$*" >&2; return 0; }
+  stub priv
   priv() { printf '  [stub] priv %s\n' "$*" >&2; return 0; }
   # peek returns 1 (not found) for existence checks, so configure_updates
   # does not bail early on a box without unattended-upgrades installed, and
   # runs its own post-write checks.
+  stub peek
   peek() { return 1; }
 }
 
+# Every function name a test stubs is recorded here so teardown_destdir can
+# put the originals back. Set by `stub`, which tests should use instead of
+# defining a function bare.
+_STUBBED_FUNCS=()
+
+stub() {
+  # Save the current definition, then let the caller install the new one.
+  local name="$1"
+  # Indirect expansion like ${_STUB_SAVED_$name} is a bad substitution in bash;
+  # the name has to be built and dereferenced with eval.
+  eval "[[ -n \${_STUB_SAVED_$name:-} ]] || _STUB_SAVED_$name=\"\$(declare -f $name 2>/dev/null || true)\""
+  local seen=0 f
+  for f in "${_STUBBED_FUNCS[@]}"; do
+    [[ $f == "$name" ]] && { seen=1; break; }
+  done
+  ((seen)) || _STUBBED_FUNCS+=("$name")
+}
+
 teardown_destdir() {
+  # Restore EVERY stubbed function, not just the original four. A test that
+  # defines `docker()` without unsetting it leaks into whatever runs next, and
+  # the failure surfaces as an assertion on empty output in a completely
+  # different test. That is exactly how test_docker_subnets_always_includes_rfc1918
+  # broke test_docker_published_pairs_keeps_udp.
+  local fn
+  for fn in "${_STUBBED_FUNCS[@]}"; do
+    unset -f "$fn"
+  done
+  for fn in "${_STUBBED_FUNCS[@]}"; do
+    # Same bash limitation as in `stub`: ${_STUB_SAVED_$fn} is a bad
+    # substitution, so the variable is dereferenced through eval. It is
+    # expanded as a VARIABLE, not run as a command - the saved body is
+    # already `name () { ...; }`, so `eval "$saved"` defines the function.
+    eval "[[ -n \${_STUB_SAVED_$fn:-} ]] && eval \"\$_STUB_SAVED_$fn\""
+    unset "_STUB_SAVED_$fn"
+  done
+  _STUBBED_FUNCS=()
+
   [[ -n ${_SAVED_HAVE:-} ]] && eval "$_SAVED_HAVE"
   [[ -n ${_SAVED_RUN_ROOT:-} ]] && eval "$_SAVED_RUN_ROOT"
   [[ -n ${_SAVED_PRIV:-} ]] && eval "$_SAVED_PRIV"
@@ -390,6 +431,7 @@ test_rpi_archive_is_allowed_when_this_box_has_it() {
     /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || return 0
   setup_destdir
   local release='     release o=Raspberry Pi Foundation,a=oldstable,n=bookworm,l=Raspberry Pi Foundation,c=main,b=armhf'
+  stub peek
   peek() {
     [[ "$*" == *'apt-cache policy'* ]] || return 1
     printf ' 500 http://archive.raspberrypi.com/debian bookworm/main arm64 Packages\n%s\n' "$release"
@@ -422,6 +464,7 @@ test_held_back_packages_are_named() {
   # print an empty list and the warning would never fire - so feed it output
   # with something to get wrong on both sides.
   setup_destdir
+  stub peek
   peek() {
     [[ "$*" == *'apt-get -s upgrade'* ]] || return 1
     cat <<'OUT'
@@ -446,6 +489,7 @@ test_held_back_warning_reaches_the_output() {
   # apt upgrade declined it, unattended-upgrades was green, and no code
   # anywhere said so.
   setup_destdir
+  stub peek
   peek() {
     if [[ "$*" == *'apt-get -s upgrade'* ]]; then
       printf 'The following packages have been kept back:\n  rpi-eeprom\n0 upgraded, 0 newly installed.\n'
@@ -564,6 +608,7 @@ test_dry_run_never_restarts_a_service() {
   # A systemctl stub that fails the test if it is ever asked to restart.
   local _orig_systemctl
   _orig_systemctl="$(declare -f systemctl 2>/dev/null || true)"
+  stub systemctl
   systemctl() {
     case "$*" in
       *restart*|*reload*|*try-restart*)
@@ -597,6 +642,7 @@ test_docker_published_pairs_keeps_udp() {
   # that answered `{{.Names}}` and `{{.Ports}}` separately matched the first
   # case arm every time and returned a name with no ports, so this test was
   # asserting on empty output and only appeared to be about udp.
+  stub docker
   docker() { printf 'dns|0.0.0.0:53->53/udp, 0.0.0.0:53->53/tcp\n'; }
   out="$(docker_published_pairs)"
   unset -f docker
@@ -643,6 +689,7 @@ test_docker_port_is_loopback_only_is_per_protocol() {
   # the tcp answer must not mask it.
   setup_destdir
   local rc=0
+  stub docker
   docker() {
     case "$*" in
       *'{{.Names}}'*) printf 'mixed\n' ;;
@@ -688,10 +735,98 @@ test_force_flag_is_not_accepted() {
   # --force was parsed and never read, while its help text promised it
   # overrides the "you have another way in" prompts - the one override the
   # script must never offer. It has been removed, so it must now be rejected.
+  #
+  # Uses `bash "$SCRIPT"` and the same rc-then-assert shape as
+  # test_unknown_option_rejected: the earlier version ran ./security.sh with
+  # `|| rc=1` under a test-local `local rc=0`, so the non-zero exit it saw
+  # from the rejection and the non-zero exit it expected were indistinguishable.
+  local out rc
+  out="$(bash "$SCRIPT" --force 2>&1)"; rc=$?
+  [[ $rc -ne 0 ]] && assert_contains "$out" "unknown option"
+}
+
+test_lockdown_ssh_refuses_a_keyless_target_user() {
+  # The backdoor check only proves SOME non-root account has a key, but
+  # --lockdown-ssh names one specific account in AllowUsers. If that account
+  # has no key: PasswordAuthentication no + PermitRootLogin no +
+  # AllowUsers <keyless> strands the box, and on the --yes path there is no
+  # prompt in which to notice.
+  #
+  # The stub is per-user, not a blanket failure: a global `have_usable_key {
+  # return 1; }` makes the earlier backdoor check bail out first, so
+  # harden_ssh returns before ever reaching the --lockdown-ssh guard and the
+  # test passes or fails for the wrong reason.
   setup_destdir
-  local out rc=0
-  out="$(DRY_RUN=1 ./security.sh --force 2>&1)" || rc=1
-  grep -qi 'unknown option' <<<"$out" || rc=1
+  local rc=0
+  LOCKDOWN_SSH=1
+  SUDO_USER="keyless-user"
+  have_usable_key() {
+    [[ $1 == *keyless-user* ]] && return 1
+    return 0   # the backdoor account has a key
+  }
+  key_files_for_user() { printf '%s\n' "/home/$1/.ssh/authorized_keys"; }
+  # The backdoor check enumerates accounts through non_root_sudoer_with_key,
+  # which reads /etc/passwd via peek. Stub the helper itself: leaving peek
+  # stubbed to fail means the list is empty, the check reports "no account has
+  # a key", and harden_ssh returns before the --lockdown-ssh guard is reached.
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf '%s\n' "keyful-user"; }
+  stub ask
+  ask() { return 1; }   # decline the port move and the key-only override
+
+  harden_ssh >/dev/null 2>&1
+
+  if ((LOCKDOWN_SSH)); then
+    printf '        --lockdown-ssh survived a keyless target user\n'
+    rc=1
+  fi
+  local f="$CONF_DEST/etc/ssh/sshd_config"
+  if [[ -f $f ]] && grep -q "AllowUsers.*keyless-user" "$f"; then
+    printf '        AllowUsers was written for a keyless user\n'
+    rc=1
+  fi
+
+  teardown_destdir
+  return $rc
+}
+
+test_docker_loopback_survives_a_missing_protocol_suffix() {
+  # `->80` with no /tcp: eproto becomes "80", matching neither tcp nor udp, so a
+  # loopback-only port was reported public and a pointless ufw route allow was
+  # demanded. The guard tested $eproto (which can never contain "/") instead of
+  # $rest, so it never fired.
+  setup_destdir
+  local rc=0
+  stub docker
+  docker() {
+    case "$*" in
+      *'{{.Names}}'*) printf 'web\n' ;;
+      *'{{.Ports}}'*)  printf '127.0.0.1:8080->80\n' ;;   # no /tcp
+    esac
+    return 0
+  }
+  if docker_port_is_loopback_only 80 tcp; then :; else rc=1; fi
+  teardown_destdir
+  return $rc
+}
+
+test_dry_run_does_not_create_directories() {
+  # `install -d` used to run before the dry-run return in
+  # replace_managed_block, so `./security.sh --dry-run` created /etc/ssh and
+  # /etc/ufw. A dry run that mutates the filesystem is not a dry run.
+  setup_destdir
+  local rc=0 d="$CONF_DEST/etc/brand-new-dir"
+  DRY_RUN=1
+  local block; block="$(mktemp)"
+  printf '# BEGIN OMAPI MANAGED\nx\n# END OMAPI MANAGED\n' >"$block"
+  replace_managed_block "$block" /etc/brand-new-dir/file.conf \
+    '# BEGIN OMAPI MANAGED' '# END OMAPI MANAGED' >/dev/null 2>&1
+  rm -f "$block"
+  DRY_RUN=0
+  if [[ -d $d ]]; then
+    printf '        dry run created %s\n' "$d"
+    rc=1
+  fi
   teardown_destdir
   return $rc
 }
@@ -995,7 +1130,9 @@ test_firewall_loop_visits_every_port() {
   listening_process() { printf 'nginx\n'; }
   docker_present() { return 1; }
   docker_published_by() { printf ''; }
+  stub have
   have() { return 0; }
+  stub ask
   ask() { asked+=("$1"); return 1; }   # answer no to everything
 
   configure_firewall >/dev/null 2>&1
@@ -1031,7 +1168,9 @@ test_firewall_skips_the_ssh_port() {
   listening_process() { printf 'sshd\n'; }
   docker_present() { return 1; }
   docker_published_by() { printf ''; }
+  stub have
   have() { return 0; }
+  stub ask
   ask() { asked+=("$1"); return 1; }
 
   configure_firewall >/dev/null 2>&1
@@ -1050,6 +1189,9 @@ test_docker_port_is_loopback_only() {
   # `ufw route allow` for a port nothing outside the box can reach.
   local rc=0
 
+  stub docker
+
+  stub docker
   docker() {
     case "$*" in
       *'{{.Ports}}'*) printf '127.0.0.1:8080->80/tcp\n' ;;
@@ -1068,6 +1210,7 @@ test_docker_port_public_and_loopback_is_not_loopback_only() {
   # the once-proxy container on the test machine (0.0.0.0:1318 no - it is
   # 127.0.0.1:1318, but 80 and 443 are on 0.0.0.0).
   local rc=0
+  stub docker
   docker() {
     case "$*" in
       *'{{.Ports}}'*) printf '0.0.0.0:8080->80/tcp, 127.0.0.1:9090->80/tcp\n' ;;
@@ -1087,7 +1230,9 @@ test_docker_subnets_always_includes_rfc1918() {
   # The DOCKER-USER rules must cover private ranges even with no custom
   # docker networks, or the RETURN/drop pairs are wrong.
   local out rc=0
+  stub docker
   docker() { return 1; }
+  stub have
   have() { return 1; }   # pretend docker is absent
   out="$(docker_subnets)"
   [[ $out == *"10.0.0.0/8"* ]] || rc=1
@@ -1111,6 +1256,11 @@ test_docker_ufw_rules_parse_as_iptables() {
   # A syntax error in after.rules stops ufw restoring its ENTIRE ruleset, which
   # means no firewall at all rather than a slightly wrong one. So the generated
   # fragment is fed to iptables-restore --test as a complete ruleset.
+  #
+  # This previously only grepped the file, which is exactly the check a
+  # syntactically broken block containing the expected lines would pass. It now
+  # calls the real validator as well, and asserts the validator accepts what
+  # the generator produced.
   if ! have iptables-restore; then
     return 0
   fi
@@ -1129,10 +1279,40 @@ test_docker_ufw_rules_parse_as_iptables() {
     [[ $(grep -cF "$DOCKER_UFW_BEGIN" "$f") -eq 1 ]] || rc=1
     grep -q 'DOCKER-USER -j ufw-user-forward' "$f" || rc=1
     # The drop must be the last thing in the chain, or an approved port never
-    # gets a chance to match.
-    [[ $(grep -n 'ufw-docker-logging-deny -j DROP' "$f" | tail -1) -gt \
-       $(grep -n 'DOCKER-USER -j RETURN' "$f" | tail -1) ]] || rc=1
+    # gets a chance to match. Compared as strings rather than with -gt: the
+    # grep -n forms can both come back empty, and `[[ "" -gt "" ]]` is a
+    # syntax error that aborts the whole test rather than failing an
+    # assertion, which is how this check was silently not checking anything.
+    local drop_line return_line
+    drop_line="$(grep -n 'ufw-docker-logging-deny -j DROP' "$f" | tail -1 | cut -d: -f1)"
+    return_line="$(grep -n 'DOCKER-USER -j RETURN' "$f" | tail -1 | cut -d: -f1)"
+    if [[ -z $drop_line || -z $return_line ]]; then
+      printf '        could not locate the terminal DROP or RETURN rule\n'
+      rc=1
+    elif ((drop_line <= return_line)); then
+      printf '        the terminal DROP (line %s) must come after the last RETURN (line %s)\n' \
+        "$drop_line" "$return_line"
+      rc=1
+    fi
+
+    # And the real validator must accept it. Force the unprivileged path so the
+    # result does not depend on whether this box has passwordless sudo; rc 0
+    # (validated) and rc 2 (structurally sound, parser unavailable) both pass,
+    # rc 1 (malformed) does not.
+    stub sudo
+    sudo() { return 1; }
+    stub id
+    id() { [[ $1 == -u ]] && { echo 1000; return 0; }; builtin id "$@"; }
+    local vrc=0
+    validate_docker_ufw_rules "$f" >/dev/null 2>&1 || vrc=$?
+    if [[ $vrc -eq 1 ]]; then
+      printf '        the validator rejected our own generated rules (rc=1)\n'
+      rc=1
+    fi
   fi
+  # teardown must be OUTSIDE the else: an earlier version left it inside, so
+  # the "file was not written" path returned rc=1 while leaving CONF_DEST and
+  # every stub in place, poisoning the next test.
   teardown_destdir
   return $rc
 }
@@ -1159,7 +1339,9 @@ test_docker_ufw_validator_detects_bad_jump_target() {
   local f="$CONF_DEST/etc/ufw/after.rules" rc=0
   install_docker_ufw_rules >/dev/null 2>&1
   # Force the unprivileged path.
+  stub sudo
   sudo() { return 1; }
+  stub id
   id() { [[ $1 == -u ]] && { echo 1000; return 0; }; builtin id "$@"; }
 
   validate_docker_ufw_rules "$f" >/dev/null 2>&1
@@ -1185,7 +1367,9 @@ test_docker_ufw_validator_accepts_builtin_targets() {
   setup_destdir
   local f="$CONF_DEST/etc/ufw/after.rules" rc=0
   install_docker_ufw_rules >/dev/null 2>&1
+  stub sudo
   sudo() { return 1; }
+  stub id
   id() { [[ $1 == -u ]] && { echo 1000; return 0; }; builtin id "$@"; }
 
   validate_docker_ufw_rules "$f" >/dev/null 2>&1
@@ -1261,6 +1445,7 @@ test_docker_ufw6_only_written_when_ipv6_enabled() {
   mkdir -p "$CONF_DEST/etc/ufw" "$CONF_DEST/etc/default"
   printf '*filter\n-A ufw6-before-input -j ACCEPT\nCOMMIT\n' >"$f"
   printf 'IPV6=no\n' >"$CONF_DEST/etc/default/ufw"
+  stub have
   have() { return 0; }
 
   install_docker_ufw6_rules "10.0.0.0/8" >/dev/null 2>&1
@@ -1332,6 +1517,9 @@ t 'the port prompt is still callable'                   test_docker_offer_publis
 t 'loopback test is per protocol'                      test_docker_port_is_loopback_only_is_per_protocol
 t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
 t '--force is not accepted'                             test_force_flag_is_not_accepted
+t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
+t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
+t 'dry run does not create directories'               test_dry_run_does_not_create_directories
 t 'dry run never restarts a service'                   test_dry_run_never_restarts_a_service
 t 'validator catches a bad jump target'                test_docker_ufw_validator_detects_bad_jump_target
 t 'validator accepts iptables builtin targets'         test_docker_ufw_validator_accepts_builtin_targets
