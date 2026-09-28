@@ -40,7 +40,6 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 ASSUME_YES=0
 DRY_RUN=0
-FORCE=0
 LOCKDOWN_SSH=0
 WANT_REPORT=0
 RUN_AUDIT=1
@@ -717,7 +716,14 @@ EOF
   # does not come back, and on a headless Pi that is the whole session.
   if ((DRY_RUN)); then
     note "would validate with: sshd -t -f ${conf}"
-    note "would run: systemctl restart ssh"
+    # Report the right unit: on Ubuntu 22.10+ ssh.socket owns the port, and
+    # telling the user to restart `ssh` when that is masked by the socket is
+    # how a port change ends up silently not applied.
+    if peek systemctl is-active --quiet ssh.socket; then
+      note "would run: systemctl daemon-reload && systemctl restart ssh.socket (ssh.socket is active)"
+    else
+      note "would run: systemctl restart ssh"
+    fi
     [[ $change_port -eq 1 ]] && note "firewall rules must follow the move to port ${new_port}"
     return 0
   fi
@@ -738,8 +744,45 @@ EOF
     return 0
   fi
 
-  if peek systemctl restart ssh; then
-    ok "ssh restarted on port ${new_port}"
+  # On Ubuntu 22.10 and later sshd is socket-activated: ssh.socket owns the
+  # listening port and passes connections to sshd@.service per connection.
+  # In that setup a `Port` change in sshd_config has no effect until the unit
+  # definition is reloaded and the socket restarted - so the script would
+  # report "ssh restarted on port N" while sshd was still listening on the old
+  # one. Detect it rather than assuming either layout.
+  local socket_activated=0
+  if peek systemctl is-active --quiet ssh.socket; then
+    socket_activated=1
+    if ((change_port)); then
+      note "ssh.socket is active: reloading the unit and restarting the socket"
+      # daemon-reload picks up the port the socket template was generated
+      # with; without it the socket keeps the old ListenStream=.
+      peek systemctl daemon-reload || warn "systemctl daemon-reload failed"
+    fi
+  fi
+
+  local restart_ok=1
+  if ((socket_activated)); then
+    if ! peek systemctl restart ssh.socket; then
+      warn "ssh.socket failed to restart, rolling back"
+      [[ -n $backup ]] && peek cp -p "$backup" "$conf" || true
+      peek systemctl daemon-reload || true
+      peek systemctl restart ssh.socket || true
+      return 1
+    fi
+    # The socket hands connections to sshd@.service, which reads sshd_config
+    # per connection, so the service itself does not need restarting - but a
+    # plain `systemctl restart ssh` would be masked by the socket anyway.
+    ok "ssh.socket restarted; sshd picks up the config per connection"
+  else
+    if peek systemctl restart ssh; then
+      ok "ssh restarted on port ${new_port}"
+    else
+      restart_ok=0
+    fi
+  fi
+
+  if ((restart_ok)); then
     printf '\n  %sKeep this session open and open a second one before you rely on it.%s\n' "$C_BOLD" "$C_OFF"
   else
     warn "ssh failed to restart, rolling back"

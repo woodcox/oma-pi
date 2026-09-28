@@ -831,6 +831,55 @@ test_dry_run_does_not_create_directories() {
   return $rc
 }
 
+test_ssh_port_change_handles_socket_activated_units() {
+  # On Ubuntu 22.10+ ssh.socket owns the listening port and sshd runs as
+  # sshd@.service per connection. Restarting `ssh` there is masked by the
+  # socket, so a `Port` change silently does not take effect while the script
+  # still reports success. The socket path needs daemon-reload plus a socket
+  # restart.
+  setup_destdir
+  local rc=0
+  stub peek
+  peek() {
+    case "$*" in
+      # socket-activated host
+      *"is-active --quiet ssh.socket"*) return 0 ;;
+      *"sshd -t"*) return 0 ;;                     # config validates
+      *restart*) return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  # The daemon-reload note only fires when the port is actually moving, so the
+  # test has to accept the move.
+  #
+  # Every OTHER question is answered "yes" with a value. An earlier version
+  # returned 1 for them, and the first one harden_ssh asks is the key-only
+  # confirmation - answering that "no" returns straight out of the function
+  # before the port logic ever runs, so the socket path was never reached.
+  stub ask
+  ask() {
+    case "$1" in
+      *"move sshd off port"*) printf '2222\n' ;;   # accept the port change
+      *) printf 'y\n' ;;                          # anything else: proceed
+    esac
+  }
+  DRY_RUN=1
+  local out
+  out="$(harden_ssh 2>&1)"
+  DRY_RUN=0
+
+  if ! grep -q 'ssh.socket' <<<"$out"; then
+    printf '        the dry run never mentioned ssh.socket on a socket-activated host\n'
+    rc=1
+  fi
+  if ! grep -q 'daemon-reload' <<<"$out"; then
+    printf '        the dry run did not mention daemon-reload, so the port change would not apply\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1520,6 +1569,7 @@ t '--force is not accepted'                             test_force_flag_is_not_a
 t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
 t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
 t 'dry run does not create directories'               test_dry_run_does_not_create_directories
+t 'ssh port change handles socket activation'          test_ssh_port_change_handles_socket_activated_units
 t 'dry run never restarts a service'                   test_dry_run_never_restarts_a_service
 t 'validator catches a bad jump target'                test_docker_ufw_validator_detects_bad_jump_target
 t 'validator accepts iptables builtin targets'         test_docker_ufw_validator_accepts_builtin_targets
