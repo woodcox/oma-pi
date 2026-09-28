@@ -907,6 +907,96 @@ test_docker_ufw_validator_accepts_builtin_targets() {
   return $rc
 }
 
+test_docker_ufw_block_is_appended_not_prepended() {
+  # ufw feeds the whole of after.rules to iptables-restore as ONE ruleset. A
+  # managed block that opened *filter at the top and COMMITted in the middle
+  # would leave everything ufw itself appends after it outside any table, and
+  # ufw would then refuse to restore its ruleset at all - no firewall rather
+  # than a slightly wrong one. This is why the placement argument exists.
+  setup_destdir
+  local f="$CONF_DEST/etc/ufw/after.rules" rc=0
+  mkdir -p "$(dirname "$f")"
+  printf '*filter\n-A ufw-before-input -j ACCEPT\nCOMMIT\n' >"$f"
+
+  install_docker_ufw_rules >/dev/null 2>&1
+
+  # ufw's own content must still be ahead of the managed block.
+  local ufw_line block_line
+  ufw_line="$(grep -n 'ufw-before-input' "$f" | head -1 | cut -d: -f1)"
+  block_line="$(grep -nF "$DOCKER_UFW_BEGIN" "$f" | head -1 | cut -d: -f1)"
+  if [[ -z $ufw_line || -z $block_line ]]; then
+    printf '        expected both ufw content and the managed block\n'
+    rc=1
+  elif ((ufw_line >= block_line)); then
+    printf '        managed block landed at line %s, ufw content at %s: it was prepended\n' \
+      "$block_line" "$ufw_line"
+    rc=1
+  fi
+  # And the user's own rules must survive.
+  grep -q 'ufw-before-input' "$f" || rc=1
+
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw_repeated_installs_do_not_grow_the_file() {
+  # Blank-line growth was a real bug once already. Appending makes it easier to
+  # reintroduce, because the join is at the end of the file now.
+  setup_destdir
+  local f="$CONF_DEST/etc/ufw/after.rules" rc=0
+  mkdir -p "$(dirname "$f")"
+  printf '*filter\n-A ufw-before-input -j ACCEPT\nCOMMIT\n' >"$f"
+
+  install_docker_ufw_rules >/dev/null 2>&1
+  local after_one; after_one="$(wc -c <"$f")"
+  install_docker_ufw_rules >/dev/null 2>&1
+  install_docker_ufw_rules >/dev/null 2>&1
+  local after_three; after_three="$(wc -c <"$f")"
+
+  if [[ $after_one != "$after_three" ]]; then
+    printf '        file grew across repeated installs: %s -> %s bytes\n' "$after_one" "$after_three"
+    rc=1
+  fi
+  [[ $(grep -cF "$DOCKER_UFW_BEGIN" "$f") -eq 1 ]] || rc=1
+
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw6_only_written_when_ipv6_enabled() {
+  # Writing to after6.rules on a host with no IPv6 ruleset would make ufw fail
+  # to restore its ENTIRE ruleset - no firewall at all. So the IPv6 block must
+  # be conditional on ufw actually having IPv6 enabled.
+  setup_destdir
+  local f="$CONF_DEST/etc/ufw/after6.rules" rc=0
+  mkdir -p "$CONF_DEST/etc/ufw" "$CONF_DEST/etc/default"
+  printf '*filter\n-A ufw6-before-input -j ACCEPT\nCOMMIT\n' >"$f"
+  printf 'IPV6=no\n' >"$CONF_DEST/etc/default/ufw"
+  have() { return 0; }
+
+  install_docker_ufw6_rules "10.0.0.0/8" >/dev/null 2>&1
+  if grep -qF "$DOCKER_UFW_BEGIN" "$f"; then
+    printf '        after6.rules was written even though IPV6=no\n'
+    rc=1
+  fi
+
+  # Now enable IPv6 and the same call must produce the block.
+  printf 'IPV6=yes\n' >"$CONF_DEST/etc/default/ufw"
+  install_docker_ufw6_rules "10.0.0.0/8" >/dev/null 2>&1
+  grep -qF "$DOCKER_UFW_BEGIN" "$f" || {
+    printf '        after6.rules was not written with IPV6=yes\n'
+    rc=1
+  }
+  # The v6 chain names must be the 6 ones, not the v4 ones: both files use the
+  # same block markers, so a stale v4 block left in after6.rules would declare
+  # ufw-user-forward in the v6 ruleset.
+  grep -q 'ufw6-user-forward' "$f" || rc=1
+  grep -q 'ufw6-docker-logging-deny' "$f" || rc=1
+
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nrunning\n'
 
@@ -949,6 +1039,9 @@ t 'DOCKER-USER rules are valid iptables'                test_docker_ufw_rules_pa
 t 'DOCKER-USER rules are idempotent'                    test_docker_ufw_rules_are_idempotent
 t 'validator catches a bad jump target'                test_docker_ufw_validator_detects_bad_jump_target
 t 'validator accepts iptables builtin targets'         test_docker_ufw_validator_accepts_builtin_targets
+t 'DOCKER-USER block is appended, not prepended'       test_docker_ufw_block_is_appended_not_prepended
+t 'repeated installs do not grow after.rules'          test_docker_ufw_repeated_installs_do_not_grow_the_file
+t 'after6.rules only when IPv6 is enabled'             test_docker_ufw6_only_written_when_ipv6_enabled
 
 t 'unknown task is rejected'                            test_unknown_task_rejected
 t 'unknown option is rejected'                          test_unknown_option_rejected

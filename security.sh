@@ -247,28 +247,32 @@ write_conf() {
 }
 
 # Replace the managed block in the file named by $2 with the contents of $1,
-# creating the file when it is not there yet. A file that has no managed block
-# gets the block on top, which is the point: sshd honours the first value it
-# reads, so anything below is a comment waiting to be overridden by an
-# Include drop-in.
+# or APPEND it when the file has no such block yet.
+#
+# Append, not prepend, and that distinction is load-bearing for
+# /etc/ufw/after.rules: ufw feeds the whole file to iptables-restore as one
+# ruleset, and a *filter table opened at the top and COMMITted in the middle
+# would leave everything ufw itself appends after it outside any table -
+# which stops ufw restoring its ruleset at all. This mirrors
+# chaifeng/ufw-docker, which deletes the block and appends it back at the end.
+# It is still prepended for /etc/ssh/sshd_config, where first-value-wins is
+# what makes the managed settings authoritative; so placement is per file.
+#
+# $3/$4 are the begin/end markers, defaulting to the sshd block's.
 #
 # Written back with `cat >` rather than `mv`ed from a temp file, so the
-# original mode, owner and inode survive. sshd and apt both care, and a
-# replaced /etc/ssh/sshd_config with the wrong ownership is a bad afternoon.
+# original mode, owner and inode survive. Both files care, and a replaced
+# sshd_config or after.rules with the wrong ownership is a bad afternoon.
 replace_managed_block() {
   # Three separate `local` statements, not one. Bash expands every word on a
   # `local` line before it assigns any of them, so a single line reading
   # `local block=$1 path=$2 target=${CONF_DEST}${path}` would look up `path`
   # in the global scope, where it does not exist, and die under `set -u`.
-  #
-  # $3/$4 are the begin/end markers, defaulting to the sshd block's. They are
-  # parameters because this also manages a second file with different markers
-  # (/etc/ufw/after.rules), and a second copy of ufw's chain declarations would
-  # make ufw fail to restore at all.
   local block="$1"
   local path="$2"
   local b1="${3:-$MANAGED_BEGIN}"
   local b2="${4:-$MANAGED_END}"
+  local where="${5:-top}"
   local target="${CONF_DEST}${path}"
   local body
   body="$(mktemp)"
@@ -284,32 +288,59 @@ replace_managed_block() {
       inblock != 1 { print }
     ' "$target" >"$body.tail"
 
-    # Managed block first, then whatever was already in the file outside any
-    # previous block. awk drops a trailing newline on the last line it
-    # printed, so the concatenation below is what puts one back.
-    printf '\n' >>"$body"
-    cat "$body.tail" >>"$body"
+    if [[ $where == bottom ]]; then
+      # Existing content first, then the block.
+      cat "$body.tail" >"$body"
+      printf '\n' >>"$body"
+      if [[ -f $block ]]; then
+        cat "$block" >>"$body"
+      fi
+    else
+      # Managed block first, then whatever was already in the file outside
+      # any previous block. awk drops a trailing newline on the last line it
+      # printed, so the concatenation below is what puts one back.
+      printf '\n' >>"$body"
+      cat "$body.tail" >>"$body"
+    fi
     rm -f "$body.tail"
 
-    # Normalise the blank-line run immediately after the managed block to
-    # exactly one. Without this, every re-run appended another newline and the
-    # file grew by one blank line per run, forever - which is what "idempotent"
-    # has to mean here. Only the run directly after MANAGED_END is touched, so
-    # blank lines the user put elsewhere in their own config are preserved.
-    #
-    # The `next` after the MANAGED_END match is what stops the end-marker line
-    # being printed twice; the guard is re-armed per line, not per run, so the
-    # suppression only lasts while the lines are still blank.
-    awk -v b2="$b2" '
-      {
-        if (after == 1) {
-          if ($0 == "") next      # swallow extra separators
-          after = 0               # first real line: resume normal output
+    # Normalise blank lines at the join to exactly one. Without this, every
+    # re-run appends another newline and the file grows by one blank line per
+    # run, forever - which is what "idempotent" has to mean here. Only the run
+    # adjacent to the managed block is touched, so blank lines the user put
+    # elsewhere in their own config are preserved.
+    if [[ $where == bottom ]]; then
+      # Block is last: collapse the run immediately BEFORE it.
+      awk -v b1="$b1" '
+        { lines[NR] = $0 }
+        END {
+          n = 0
+          # Find where the block starts.
+          start = 0
+          for (i = 1; i <= NR; i++) if (lines[i] == b1) { start = i; break }
+          for (i = 1; i <= NR; i++) {
+            if (start > 0 && i < start && lines[i] == "") {
+              if (blank) continue
+              blank = 1
+              print ""
+              continue
+            }
+            print lines[i]
+          }
         }
-        print
-        if ($0 == b2) after = 1
-      }
-    ' "$body" >"$body.trim"
+      ' "$body" >"$body.trim"
+    else
+      awk -v b2="$b2" '
+        {
+          if (after == 1) {
+            if ($0 == "") next      # swallow extra separators
+            after = 0               # first real line: resume normal output
+          }
+          print
+          if ($0 == b2) after = 1
+        }
+      ' "$body" >"$body.trim"
+    fi
     cat "$body.trim" >"$body"
     rm -f "$body.trim"
   fi
@@ -971,26 +1002,13 @@ validate_docker_ufw_rules() {
 
 install_docker_ufw_rules() {
   if ((DRY_RUN)); then
-    printf '  %s•%s would write the DOCKER-USER rules to /etc/ufw/after.rules\n' "$C_DIM" "$C_OFF"
+    printf '  %s•%s would write the DOCKER-USER rules to /etc/ufw/after.rules (and after6.rules if IPv6 is enabled)\n' "$C_DIM" "$C_OFF"
     return 0
   fi
 
-  local subnets ret accept block
+  local subnets block
   block="$(mktemp)"
   subnets="$(docker_subnets | sort -u)"
-
-  # RETURN for traffic coming FROM a private network (internal hosts reaching
-  # a container), and a logged DROP for NEW connections going TO one (the
-  # public internet reaching a published port, after DNAT has rewritten the
-  # destination to the container address). Indentation matches the static
-  # rules above, because the sed that extracts this block for validation must
-  # not depend on leading whitespace.
-  ret=""; accept=""
-  while read -r s; do
-    [[ -n $s ]] || continue
-    ret+="-A DOCKER-USER -j RETURN -s ${s}"$'\n'
-    accept+="-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d ${s}"$'\n'
-  done <<<"$subnets"
 
   {
     printf '%s\n' "$DOCKER_UFW_BEGIN"
@@ -1001,6 +1019,10 @@ install_docker_ufw_rules() {
 # published port is reachable from the internet regardless of ufw.
 # With them, published container ports are blocked by default and are opened
 # only by an explicit `ufw route allow` rule.
+#
+# This block must stay at the END of this file: ufw feeds the whole file to
+# iptables-restore as a single ruleset, and a *filter table that COMMITs
+# before ufw's own rules would leave those rules outside any table.
 *filter
 :ufw-user-forward - [0:0]
 :ufw-docker-logging-deny - [0:0]
@@ -1012,24 +1034,108 @@ install_docker_ufw_rules() {
 -A DOCKER-USER -m conntrack --ctstate INVALID -j DROP
 -A DOCKER-USER -i docker0 -o docker0 -j ACCEPT
 EOF
-    printf '%s' "$ret"
-    printf '%s' "$accept"
+    # RETURN for traffic coming FROM a private network (internal hosts reaching
+    # a container), and a logged DROP for NEW connections going TO one (the
+    # public internet reaching a published port, after DNAT has rewritten the
+    # destination to the container address). No indentation, because the
+    # extractor that validates this block must not depend on it.
+    local s
+    while read -r s; do
+      [[ -n $s ]] || continue
+      printf -- '-A DOCKER-USER -j RETURN -s %s\n' "$s"
+    done <<<"$subnets"
+    while read -r s; do
+      [[ -n $s ]] || continue
+      printf -- '-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d %s\n' "$s"
+    done <<<"$subnets"
     cat <<'EOF'
+
 -A DOCKER-USER -j RETURN
 -A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
 -A ufw-docker-logging-deny -j DROP
+
 COMMIT
 EOF
     printf '%s\n' "$DOCKER_UFW_END"
   } >"$block"
 
-  # Replace, not append: a second copy of the chain declarations would make
-  # ufw fail to restore entirely.
+  # Replace, not append blindly: a second copy of the chain declarations would
+  # make ufw fail to restore entirely. Placed at the bottom, matching upstream.
   replace_managed_block "$block" /etc/ufw/after.rules \
-    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END"
-  rm -f "$block"
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
   ok "DOCKER-USER rules written to /etc/ufw/after.rules"
+
+  # ufw has two rule files: after.rules for IPv4 and after6.rules for IPv6.
+  # Leaving after6.rules alone means an IPv6 client can reach a published port
+  # that the IPv4 rules just closed - the same bypass, through the other door.
+  install_docker_ufw6_rules "$subnets"
+
   note "published container ports are now blocked until a 'ufw route allow' rule permits them"
+}
+
+# The IPv6 twin. Only written when ufw actually has IPv6 enabled, because
+# writing to after6.rules on a host with no IPv6 ruleset would make ufw fail
+# to restore - with no firewall at all, which is the failure mode this whole
+# block of code exists to avoid.
+install_docker_ufw6_rules() {
+  local subnets="$1"
+  local ufw_default="${CONF_DEST}/etc/default/ufw"
+  local after6="${CONF_DEST}/etc/ufw/after6.rules"
+
+  # Read through CONF_DEST so this is testable against a temporary tree rather
+  # than the live host's /etc.
+  [[ -r $ufw_default ]] || return 0
+  grep -qE '^IPV6=yes' "$ufw_default" 2>/dev/null || return 0
+  [[ -f $after6 ]] || return 0
+  have docker || return 0
+
+  # Docker network subnets, IPv6 only. The v6 tailnet and ULA ranges are
+  # included so a published port is not reachable from the local network either.
+  local v6 subnets6="" s
+  v6="$(docker network ls -q 2>/dev/null | while read -r n; do
+    docker network inspect "$n" --format \
+      '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null
+  done | tr ' ' '\n' | grep -iE '^[0-9a-f]+:[0-9a-f:]+/[0-9]+$' || true)"
+  subnets6="fd00::/8 fd00:115c:a1e0::/48"
+  subnets6+=" ${v6// /$' '}"
+
+  local block; block="$(mktemp)"
+  {
+    printf '%s\n' "$DOCKER_UFW_BEGIN"
+    cat <<'EOF'
+# Managed by oma-pi security.sh. IPv6 twin of the after.rules block.
+*filter
+:ufw6-user-forward - [0:0]
+:ufw6-docker-logging-deny - [0:0]
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -j ufw6-user-forward
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -m conntrack --ctstate INVALID -j DROP
+-A DOCKER-USER -i docker0 -o docker0 -j ACCEPT
+EOF
+    while read -r s; do
+      [[ -n $s ]] || continue
+      printf -- '-A DOCKER-USER -j RETURN -s %s\n' "$s"
+    done <<<"$(printf '%s\n' $subnets6 | sort -u)"
+    while read -r s; do
+      [[ -n $s ]] || continue
+      printf -- '-A DOCKER-USER -j ufw6-docker-logging-deny -m conntrack --ctstate NEW -d %s\n' "$s"
+    done <<<"$(printf '%s\n' $subnets6 | sort -u)"
+    cat <<'EOF'
+
+-A DOCKER-USER -j RETURN
+-A ufw6-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
+-A ufw6-docker-logging-deny -j DROP
+
+COMMIT
+EOF
+    printf '%s\n' "$DOCKER_UFW_END"
+  } >"$block"
+
+  replace_managed_block "$block" /etc/ufw/after6.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
+  rm -f "$block"
+  ok "DOCKER-USER rules written to /etc/ufw/after6.rules (IPv6)"
 }
 
 # Docker's published ports are owned by docker-proxy, not by your container,
