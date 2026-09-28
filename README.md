@@ -41,7 +41,7 @@ filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 ./security.sh --list                 # available tasks
 sudo ./security.sh ssh firewall      # just these two
 sudo ./security.sh --yes             # take the recommended defaults
-./test/security-test.sh              # 45 tests, no root needed
+./test/security-test.sh              # 65 tests, no root needed
 ```
 
 Some deliberate choices worth knowing before you run it:
@@ -63,14 +63,37 @@ Some deliberate choices worth knowing before you run it:
   chaifeng/ufw-docker](https://github.com/chaifeng/ufw-docker) into
   `/etc/ufw/after.rules`, which closes every published port by default, then
   offers each one by container name. Opening one takes a `ufw route allow`
-  rule, which matches on the **container** port, not the host port. The rules
-  are written inline rather than by installing the upstream script — it is a
+  rule, which matches on the **container** port, not the host port. The
+  block is appended to the file rather than prepended, because ufw restores
+  `after.rules` as a single ruleset and a `COMMIT` in the middle would leave
+  ufw's own rules outside any table. `after6.rules` gets the same treatment
+  when ufw has IPv6 enabled, so the bypass is not just closed on one family.
+  The rules are written inline rather than by installing the upstream script — it is a
   handful of static iptables lines, and fetching and running a third-party
   script as root on every hardened box is a supply-chain risk. The upstream
   block markers are used verbatim, so `ufw-docker check` and `ufw-docker
   uninstall` still recognise it if you install the real tool later.
   See [this write-up](https://blog.jarrousse.org/2023/03/18/how-to-use-ufw-firewall-with-docker-containers/)
   for the background.
+- **Automatic updates reach the kernel too.** `Allowed-Origins` normally gets
+  `debian:bookworm-security` and nothing else, but on a Pi the kernel, the
+  bootloader and the EEPROM are not Debian packages — they come from
+  `archive.raspberrypi.com`, which publishes no `-security` suite at all, only
+  `bookworm` main. Omitting it means `linux-image-*`, `rpi-eeprom` and
+  `raspi-firmware` never get a patch, unattended-upgrades stays green, and
+  nothing anywhere says so. So the archive is added when it is configured, with
+  its Origin and Suite read out of apt rather than hardcoded — a wrong value
+  produces a config that looks right and matches nothing. Docker, tailscale,
+  github-cli, charm and gierens are deliberately **not** added; auto-upgrading
+  those unattended is how a working stack dies at 3am, and they are not where
+  this box's kernel-level exposure lives. Anything `apt upgrade` defers because
+  it needs a new dependency is named out loud, because that class of hold is
+  silent by nature. `--report` also flags a kernel image in `/boot` that no
+  package owns — the signature of `rpi-update`, which installs a kernel outside
+  apt's management so it quietly stops receiving patches. That check is scoped
+  to kernel images: a Pi's `initrd.img-*`, `cmdline.txt` and `overlays` are
+  untracked by design, and a check that fires on every machine is one nobody
+  reads.
 - **`net.ipv4.ip_forward` is left alone** when the Docker service is *running*,
   since the container bridge needs it. If Docker is installed but stopped when
   you run the script, forwarding is turned off; start Docker and re-run if that
