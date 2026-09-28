@@ -41,7 +41,7 @@ filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 ./security.sh --list                 # available tasks
 sudo ./security.sh ssh firewall      # just these two
 sudo ./security.sh --yes             # take the recommended defaults
-./test/security-test.sh              # 65 tests, no root needed
+./test/security-test.sh              # 69 tests, no root needed
 ```
 
 Some deliberate choices worth knowing before you run it:
