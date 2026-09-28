@@ -33,14 +33,15 @@ sudo ./security.sh           # do it
 
 `security.sh` applies the advice from the three hardening guides linked under Requirements:
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
-security updates, AppArmor, kernel and network sysctls, and a file-integrity baseline.
-Add `--report` to save the resulting audit to `~/security-audit/`.
+security updates, AppArmor, and kernel and network sysctls. File-integrity monitoring
+(aide) is opt-in — ask for it by name, since building the baseline reads the whole
+filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 
 ```bash
 ./security.sh --list                 # available tasks
 sudo ./security.sh ssh firewall      # just these two
 sudo ./security.sh --yes             # take the recommended defaults
-./test/security-test.sh              # 27 tests, no root needed
+./test/security-test.sh              # 35 tests, no root needed
 ```
 
 Some deliberate choices worth knowing before you run it:
@@ -49,13 +50,19 @@ Some deliberate choices worth knowing before you run it:
   non-root account with an `authorized_keys` entry that `ssh-keygen` actually
   accepts. An empty file, a truncated paste or a private key pasted in all look
   like a key to a naive check, and the result is a headless Pi you cannot reach.
-  With no usable key it stops and asks. Every config is validated before its
-  service restarts, and rolled back if it fails.
+  With no usable key it stops and asks — and that question defaults to *no*, so
+  neither `--yes` nor `--force` can talk its way past it. Every config is
+  validated before its service restarts, and rolled back if it fails.
+- **Prompts use `gum`**, reading `/dev/tty` directly, so they still appear when
+  the script is iterating over ports or accounts. Without a terminal at all it
+  says so and takes the documented default rather than silently guessing.
 - **Docker ports are detected.** Published container ports bypass ufw through
   the `DOCKER-USER` chain. The script identifies them via `docker ps`, offers
   them to you by name, and warns that ufw does not cover them.
-- **`net.ipv4.ip_forward` is left alone** when Docker is installed, since the
-  container bridge needs it. There is a test that fails if that ever regresses.
+- **`net.ipv4.ip_forward` is left alone** when the Docker service is *running*,
+  since the container bridge needs it. If Docker is installed but stopped when
+  you run the script, forwarding is turned off; start Docker and re-run if that
+  matters. There is a test that fails if this ever regresses.
 - **`AllowTcpForwarding` stays on**, because `config/shell/fns/ssh-port-forwarding`
   depends on it.
 - **Wi-Fi and Bluetooth are not disabled.** That needs a `/boot/config.txt`

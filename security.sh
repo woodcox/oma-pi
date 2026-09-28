@@ -195,25 +195,39 @@ ask() {
     [[ $default == y ]]
     return
   fi
-  if [[ -t 0 ]]; then
-    if have gum; then
-      if [[ $default == y ]]; then
-        gum confirm "$question"
-      else
-        gum confirm "$question" --default-no
-      fi
-      return
-    fi
+
+  # gum reads /dev/tty rather than stdin, so it still works when stdin is a
+  # pipe - which is exactly the situation inside the per-port and per-account
+  # loops, where the loop list occupies fd 0. Gating this on `[[ -t 0 ]]` was
+  # wrong twice over: it skipped gum entirely inside those loops, and it also
+  # reported "no tty" on a perfectly good terminal. </dev/tty is the same
+  # pattern install.sh and bin/omapi-* already use.
+  if have gum && [[ -e /dev/tty ]] && [[ -r /dev/tty ]]; then
     if [[ $default == y ]]; then
-      read -r -p "  $question [Y/n] " answer
+      gum confirm "$question" </dev/tty
+    else
+      gum confirm "$question" --default-no </dev/tty
+    fi
+    return
+  fi
+
+  # No gum. read from the tty explicitly for the same reason, falling back to
+  # stdin only when there is genuinely no terminal to read from.
+  if [[ -e /dev/tty && -r /dev/tty ]]; then
+    if [[ $default == y ]]; then
+      read -r -p "  $question [Y/n] " answer </dev/tty
       [[ -z $answer || $answer =~ ^[Yy] ]]
     else
-      read -r -p "  $question [y/N] " answer
+      read -r -p "  $question [y/N] " answer </dev/tty
       [[ $answer =~ ^[Yy] ]]
     fi
     return
   fi
-  warn "no tty, taking the default ($default) for: $question"
+
+  # Genuinely headless: a pipe, cron, CI. Take the default and say so loudly,
+  # because silently locking accounts or closing ports here is exactly the
+  # failure mode this script is supposed to avoid.
+  warn "no terminal to ask on, taking the default ($default) for: $question"
   [[ $default == y ]]
 }
 
@@ -269,6 +283,28 @@ replace_managed_block() {
     printf '\n' >>"$body"
     cat "$body.tail" >>"$body"
     rm -f "$body.tail"
+
+    # Normalise the blank-line run immediately after the managed block to
+    # exactly one. Without this, every re-run appended another newline and the
+    # file grew by one blank line per run, forever - which is what "idempotent"
+    # has to mean here. Only the run directly after MANAGED_END is touched, so
+    # blank lines the user put elsewhere in their own config are preserved.
+    #
+    # The `next` after the MANAGED_END match is what stops the end-marker line
+    # being printed twice; the guard is re-armed per line, not per run, so the
+    # suppression only lasts while the lines are still blank.
+    awk -v b2="$MANAGED_END" '
+      {
+        if (after == 1) {
+          if ($0 == "") next      # swallow extra separators
+          after = 0               # first real line: resume normal output
+        }
+        print
+        if ($0 == b2) after = 1
+      }
+    ' "$body" >"$body.trim"
+    cat "$body.trim" >"$body"
+    rm -f "$body.trim"
   fi
 
   install -d -m 0755 "$(dirname "$target")" 2>/dev/null || true
@@ -293,22 +329,53 @@ replace_managed_block() {
 # At least one key sshd would actually accept. A truncated paste or a private
 # key in authorized_keys is silently ignored by sshd, and that is exactly the
 # case where turning off passwords strands you.
+#
+# $1 is a newline-separated list of paths, so it has to be read line by line.
+# `for f in "$keys"` word-splits on nothing and the loop body runs once with
+# both paths glued into a single non-existent filename, which made this report
+# "no usable key" on a box that had a perfectly good authorized_keys.
 have_usable_key() {
-  local keys="$1" found=1 f
-  for f in "$keys"; do
-    [[ -s $f ]] || continue
+  local found=1 f
+  while IFS= read -r f; do
+    [[ -n $f && -s $f ]] || continue
+    # A private key is not a usable authorized_keys entry. ssh-keygen -l will
+    # happily print a fingerprint for one, because it can read the public half
+    # embedded in it, so it has to be rejected explicitly.
+    if grep -q -- 'PRIVATE KEY-----' "$f" 2>/dev/null; then
+      continue
+    fi
     if grep -qvE '^\s*(#|$)' "$f" 2>/dev/null &&
       ssh-keygen -l -f "$f" &>/dev/null; then
       found=0
       break
     fi
-  done
+  done <<<"$1"
   return $found
 }
 
+# Resolve the real home directory rather than assuming /home/$user, and honour
+# the AuthorizedKeysFile setting if sshd has been told to use something else.
 key_files_for_user() {
-  local user="${1:-$(id -un)}"
-  printf '%s\n' "/home/$user/.ssh/authorized_keys" "/home/$user/.ssh/authorized_keys2"
+  local user="${1:-$(id -un)}" home auth
+  home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"
+  if [[ -z $home ]]; then
+    # No passwd entry, or no getent. Fall back to the convention rather than
+    # silently checking nothing.
+    home="/home/$user"
+  fi
+  # Read the effective setting from sshd itself where possible; a drop-in can
+  # have moved it away from the default.
+  auth="$(peek sshd -T -C "user=$user,host=localhost,addr=127.0.0.1" 2>/dev/null |
+    awk '/^authorizedkeysfile /{ $1=""; sub(/^ +/, ""); print; exit }' || true)"
+  if [[ -n $auth ]]; then
+    local f
+    while IFS= read -r f; do
+      [[ -n $f ]] || continue
+      printf '%s\n' "$f" | sed "s|^%[hHd]|$home|; s|^%[uU]|$user|"
+    done <<<"$auth"
+  else
+    printf '%s\n' "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -360,8 +427,16 @@ check_users() {
   # into with no secret at all, and on a device that is scanned within
   # minutes of being online it will be tried first.
   local empty
-  if empty="$(peek awk -F: '($2 == "") { print $1 }' /etc/shadow 2>/dev/null)" && [[ -n $empty ]]; then
-    while read -r account; do
+  empty="$(peek awk -F: '($2 == "") { print $1 }' /etc/shadow 2>/dev/null || true)"
+  # The loop reads from fd 3, not stdin, so that `ask` inside it can still see
+  # a tty on stdin and prompt. With the list on stdin, `[[ -t 0 ]]` was false
+  # inside ask and every question silently took its default: every
+  # passwordless account got locked and every unidentified port got closed
+  # without the user ever being asked.
+  if [[ -z $empty ]]; then
+    ok "no passwordless accounts"
+  else
+    while IFS= read -r account <&3; do
       [[ -n $account ]] || continue
       if ask "lock the passwordless account '$account'?"; then
         run_root passwd -l "$account"
@@ -370,9 +445,7 @@ check_users() {
       else
         skip "left $account alone"
       fi
-    done <<<"$empty"
-  else
-    ok "no passwordless accounts"
+    done 3<<<"$empty"
   fi
 
   # The factory `pi` account is the single most scanned username on the
@@ -464,7 +537,12 @@ harden_ssh() {
       note 'tailscale is up, so `tailscale ssh` is unaffected by sshd_config'
     fi
     warn "no non-root account with a usable authorized_keys entry was found"
-    if ! ((FORCE)) && ! ask "switch SSH to key-only anyway (make sure you can reach this box another way)?" y; then
+    # Default no, and deliberately not overridable by --yes/--force. Those
+    # flags take *defaults*, and defaulting this one to yes means every
+    # `sudo ./security.sh --yes` run turns passwords off on a box with no
+    # verified way back in, which is the exact failure this whole check
+    # exists to prevent. Continuing requires a deliberate interactive yes.
+    if ! ask "switch SSH to key-only anyway (make sure you can reach this box another way)?" n; then
       skip "leaving PasswordAuthentication as it is"
       return 0
     fi
@@ -474,28 +552,37 @@ harden_ssh() {
 
   local new_port="$port" change_port=0
   if ((LOCKDOWN_SSH)); then
-    note "--lockdown-ssh: AllowUsers will be set to $(id -un)"
+    # Under `sudo ./security.sh`, id -un is root. AllowUsers root alongside
+    # PermitRootLogin no is a config sshd accepts and that locks out every
+    # account, so the real invoking user has to be resolved, and root has to
+    # be refused outright.
+    local target_user="${SUDO_USER:-$(id -un)}"
+    if [[ -z $target_user || $target_user == root ]]; then
+      warn "--lockdown-ssh needs a real non-root user; run it as 'sudo -u \$USER -E ./security.sh --lockdown-ssh' or from a root shell with SUDO_USER set"
+      warn "refusing to write AllowUsers root: it would lock out every account"
+      LOCKDOWN_SSH=0
+    else
+      note "--lockdown-ssh: AllowUsers will be set to ${target_user}"
+    fi
   fi
 
   # Moving the port only removes noise from the logs; it is not a control.
   # Offered because it is in the guides and because it is harmless, but
   # never the reason a box is called secure.
   if ask "move sshd off port ${port}? (noise reduction only, not security)" n; then
-    local candidate
-    while read -r candidate; do
-      [[ -n $candidate ]] || continue
+    local candidate=""
+    # Read directly rather than through a process substitution: a `read` inside
+    # `< <(...)` runs in a subshell, so the value it captured was discarded and
+    # the port silently stayed where it was. gum's output is captured by
+    # command substitution, which does survive, but the read fallback did not.
+    if have gum && [[ -e /dev/tty && -r /dev/tty ]]; then
+      candidate="$(gum input --placeholder "e.g. 2222" --prompt "New SSH port: " </dev/tty || true)"
+    elif [[ -e /dev/tty && -r /dev/tty ]]; then
+      read -r -p "  New SSH port [2222]: " candidate </dev/tty || true
+    fi
+    candidate="${candidate:-2222}"
+    if [[ $candidate =~ ^[0-9]+$ ]] && ((candidate > 0 && candidate < 65535)) && ((candidate != port)); then
       new_port="$candidate"
-      break
-    done < <(
-      if have gum; then
-        printf '\n'
-        gum input --placeholder "e.g. 2222" --prompt "New SSH port: " </dev/tty || true
-      else
-        read -r -p "  New SSH port [2222]: " candidate || true
-        printf '%s\n' "${candidate:-2222}"
-      fi
-    )
-    if [[ $new_port =~ ^[0-9]+$ ]] && ((new_port > 0 && new_port < 65535)) && ((new_port != port)); then
       change_port=1
       note "sshd will move to port ${new_port}"
     else
@@ -531,7 +618,7 @@ ClientAliveCountMax 2
 # relies on it.
 EOF
     ((change_port)) && printf 'Port %s\n' "$new_port"
-    ((LOCKDOWN_SSH)) && printf 'AllowUsers %s\n' "$(id -un)"
+    ((LOCKDOWN_SSH)) && printf 'AllowUsers %s\n' "${SUDO_USER:-$(id -un)}"
     printf '%s\n' "$MANAGED_END"
   } >"$block"
 
@@ -543,6 +630,18 @@ EOF
   fi
 
   replace_managed_block "$block" "$conf"
+
+  # Port is additive in sshd: the first-value-wins rule that makes prepending
+  # work for everything else does NOT apply to it. A `Port 22` left further
+  # down the file means sshd ends up listening on both, so the old line has to
+  # be commented out rather than merely outranked. Done by sed on the whole
+  # file, outside the managed block, and only when we are actually moving.
+  if ((change_port)) && ((!DRY_RUN)); then
+    sed -i -E "s|^[[:space:]]*Port[[:space:]]+[0-9]+|# &|" "$target"
+    # Put back the one line that should still be live.
+    sed -i "s|^# Port ${new_port}\$|Port ${new_port}|" "$target"
+  fi
+
   rm -f "$block"
   ok "sshd_config hardened"
 
@@ -595,7 +694,13 @@ EOF
 # host:port avoids the whole problem.
 listening_ports() {
   local raw
-  if have ss; then
+  # ${1:-} lets a caller (the test suite) feed it captured `ss`/`netstat`
+  # output. Testing a hand-copied duplicate of the awk program is how the
+  # suite shipped a green test beside a parser that was dropping dual-stack
+  # wildcards; the tests now run this exact code.
+  if [[ -n ${1:-} ]]; then
+    raw="$1"
+  elif have ss; then
     raw="$(ss -H -tulnp 2>/dev/null || true)"
   elif have netstat; then
     raw="$(netstat -tulnp 2>/dev/null || true)"
@@ -611,7 +716,13 @@ listening_ports() {
       for (i = 2; i <= NF; i++) {
         # First address:port-shaped field is the local one, and it is the
         # only one on a listening socket (the peer is 0.0.0.0:* or :::*).
-        if ($i ~ /:/ && $i ~ /^\[?[0-9A-Fa-f.:%]+\]?:[0-9]+$/) { addr = $i; break }
+        #
+        # `*:PORT` has to be matched explicitly. That is how ss renders a
+        # dual-stack wildcard listener, which is what a Node listen(3000) or
+        # docker-proxy produces, and the address regex below does not match
+        # it - so those ports were being dropped and closed by omission.
+        if ($i ~ /^\*:[0-9]+$/ ||
+            ($i ~ /:/ && $i ~ /^\[?[0-9A-Fa-f.:%]+\]?:[0-9]+$/)) { addr = $i; break }
       }
       if (addr == "") next
       # Loopback-only. 127.x anywhere in the field, and either bracket form
@@ -711,7 +822,13 @@ configure_firewall() {
   # well after the hardening run that caused it. A prompt you can answer no
   # to costs one keystroke; a silently closed proxy costs an afternoon.
   local proto port owner
-  while read -r proto port; do
+  # Default IFS, deliberately. `IFS= read -r proto port` looks tidier but it
+  # disables word splitting entirely, so the whole "tcp 80" line lands in
+  # $proto and $port stays empty - every iteration then failed the
+  # `[[ -n $port ]]` guard and silently continued, so the script offered to
+  # open no ports at all and closed them all by omission. Reading on fd 3 is
+  # what matters here: it keeps stdin free for ask.
+  while read -r proto port <&3; do
     [[ -n $proto && -n $port ]] || continue
     [[ $port == "$ssh_port" ]] && continue
     owner="$(listening_process "$proto" "$port")"
@@ -736,7 +853,7 @@ configure_firewall() {
     else
       skip "left ${proto}/${port} closed"
     fi
-  done < <(listening_ports)
+  done 3< <(listening_ports)
 
   if docker_present; then
     warn "Docker installs its own DOCKER-USER chain and its published ports"
@@ -812,7 +929,18 @@ configure_fail2ban() {
     banaction="ufw"
   fi
 
-  write_conf /etc/fail2ban/jail.d/omapi-hardening.local <<EOF
+  local jail="/etc/fail2ban/jail.d/omapi-hardening.local"
+  # Snapshot the real file BEFORE write_conf truncates it, so a rejected jail
+  # can be rolled back. Claiming "leaving the previous config in place" while
+  # the overwrite has already happened is how a broken file ends up breaking
+  # the next fail2ban start.
+  local prev="" had_prev=0
+  if ((!DRY_RUN)) && [[ -f $jail ]]; then
+    prev="$(mktemp)"
+    cp -p "$jail" "$prev" && had_prev=1
+  fi
+
+  write_conf "$jail" <<EOF
 # Managed by oma-pi security.sh. Re-run the script to change these.
 [DEFAULT]
 usedns = no
@@ -841,14 +969,26 @@ EOF
 
   if ((DRY_RUN)); then
     note "would enable and start fail2ban, then run: fail2ban-client -t"
+    [[ -n $prev ]] && rm -f "$prev"
     return 0
   fi
 
   if ! peek fail2ban-client -t >/dev/null 2>&1; then
-    warn "fail2ban rejected the jail file, leaving the previous config in place"
-    peek fail2ban-client -t || true
+    warn "fail2ban rejected the jail file, rolling ${jail} back"
+    if ((had_prev)); then
+      peek cp -p "$prev" "$jail" || true
+      ok "previous jail file restored"
+    else
+      # There was no previous file, so the correct rollback is to remove the
+      # one we just wrote rather than leave fail2ban unable to start.
+      rm -f "$jail"
+      ok "no previous jail file existed, removed the rejected one"
+    fi
+    rm -f "$prev"
+    peek fail2ban-client -t 2>&1 | tail -3 >&2 || true
     return 1
   fi
+  [[ -n $prev ]] && rm -f "$prev"
   ok "fail2ban config accepted (banaction ${banaction})"
 
   run_root systemctl enable --now fail2ban
@@ -903,7 +1043,22 @@ configure_updates() {
 "
   done
 
-  write_conf /etc/apt/apt.conf.d/20auto-upgrades <<EOF
+  # 20auto-upgrades is the file `dpkg-reconfigure unattended-upgrades`
+  # manages, and on Debian it holds the two APT::Periodic keys that actually
+  # switch unattended-upgrades on. Overwriting it with only an Allowed-Origins
+  # block turned automatic security updates off while every check in this
+  # function still reported success - the worst possible failure for a
+  # hardening script, because it is silent. So: the Periodic keys go here, and
+  # the policy goes in the script's own file.
+  write_conf /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+// Managed by oma-pi security.sh. Re-run the script to change these.
+// These two keys are what actually enable unattended-upgrades. Without them
+// apt.systemd.daily defaults to 0 and no security patch is ever applied.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+
+  write_conf /etc/apt/apt.conf.d/51omapi-origins <<EOF
 // Managed by oma-pi security.sh. Re-run the script to change these.
 Unattended-Upgrade::Allowed-Origins {
 ${origin_block}};
@@ -1202,8 +1357,12 @@ audit() {
 
     printf '\n-- filesystem --\n'
     printf '  %s\n' "$(peek df -h / 2>/dev/null | tail -1 || true)"
+    # timeout must go inside peek, not around it: timeout execs an external
+    # program and cannot run a shell function, so `timeout 60 peek find ...`
+    # always failed with exit 127 and the audit reported "world-writable
+    # files: 0" on a box it never actually scanned.
     printf '  world-writable files: %s\n' \
-      "$(timeout 60 peek find / -xdev -type f -perm -002 2>/dev/null | wc -l || echo 'not scanned')"
+      "$(peek timeout 60 find / -xdev -type f -perm -002 2>/dev/null | wc -l || echo 'not scanned')"
 
     printf '\n-- disk space on the boot filesystem matters more than any of the above --\n'
   } 2>&1 | tee "$AUDIT_TMP"
