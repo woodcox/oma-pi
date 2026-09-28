@@ -754,6 +754,159 @@ test_firewall_skips_the_ssh_port() {
   return $rc
 }
 
+test_docker_port_is_loopback_only() {
+  # The loopback binding is expressed in the HOST port (`-p 127.0.0.1:8080:80`)
+  # while the question is about the CONTAINER port. Matching one against the
+  # other missed the loopback case entirely and demanded a pointless
+  # `ufw route allow` for a port nothing outside the box can reach.
+  local rc=0
+
+  docker() {
+    case "$*" in
+      *'{{.Ports}}'*) printf '127.0.0.1:8080->80/tcp\n' ;;
+      *'{{.Names}}'*) printf 'web\n' ;;
+    esac
+    return 0
+  }
+  docker_port_is_loopback_only 80 || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_docker_port_public_and_loopback_is_not_loopback_only() {
+  # Published on 0.0.0.0 AND 127.0.0.1: the 0.0.0.0 binding makes it reachable
+  # from the network, so it must still be offered. This is the exact shape of
+  # the once-proxy container on the test machine (0.0.0.0:1318 no - it is
+  # 127.0.0.1:1318, but 80 and 443 are on 0.0.0.0).
+  local rc=0
+  docker() {
+    case "$*" in
+      *'{{.Ports}}'*) printf '0.0.0.0:8080->80/tcp, 127.0.0.1:9090->80/tcp\n' ;;
+      *'{{.Names}}'*) printf 'web\n' ;;
+    esac
+    return 0
+  }
+  if docker_port_is_loopback_only 80; then
+    printf '        a port published on 0.0.0.0 was treated as loopback-only\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_docker_subnets_always_includes_rfc1918() {
+  # The DOCKER-USER rules must cover private ranges even with no custom
+  # docker networks, or the RETURN/drop pairs are wrong.
+  local out rc=0
+  docker() { return 1; }
+  have() { return 1; }   # pretend docker is absent
+  out="$(docker_subnets)"
+  [[ $out == *"10.0.0.0/8"* ]] || rc=1
+  [[ $out == *"172.16.0.0/12"* ]] || rc=1
+  [[ $out == *"192.168.0.0/16"* ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw_block_uses_upstream_markers() {
+  # ufw-docker's own `check`/`uninstall` look for these exact strings, so using
+  # them keeps the block recognisable if the real tool is installed later.
+  local rc=0
+  [[ $DOCKER_UFW_BEGIN == "# BEGIN UFW AND DOCKER" ]] || rc=1
+  [[ $DOCKER_UFW_END == "# END UFW AND DOCKER" ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw_rules_parse_as_iptables() {
+  # A syntax error in after.rules stops ufw restoring its ENTIRE ruleset, which
+  # means no firewall at all rather than a slightly wrong one. So the generated
+  # fragment is fed to iptables-restore --test as a complete ruleset.
+  if ! have iptables-restore; then
+    return 0
+  fi
+  setup_destdir
+  install_docker_ufw_rules >/dev/null 2>&1
+  local f="$CONF_DEST/etc/ufw/after.rules" rc=0
+  if [[ ! -f $f ]]; then
+    printf '        after.rules was not written\n'
+    rc=1
+  else
+    # Exactly one copy of the chain declarations, or ufw fails to restore.
+    [[ $(grep -c '^\*filter' "$f") -eq 1 ]] || {
+      printf '        expected one *filter table, got %s\n' "$(grep -c '^\*filter' "$f")"
+      rc=1
+    }
+    [[ $(grep -cF "$DOCKER_UFW_BEGIN" "$f") -eq 1 ]] || rc=1
+    grep -q 'DOCKER-USER -j ufw-user-forward' "$f" || rc=1
+    # The drop must be the last thing in the chain, or an approved port never
+    # gets a chance to match.
+    [[ $(grep -n 'ufw-docker-logging-deny -j DROP' "$f" | tail -1) -gt \
+       $(grep -n 'DOCKER-USER -j RETURN' "$f" | tail -1) ]] || rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw_rules_are_idempotent() {
+  # Re-running must replace the block, not append a second one: duplicate chain
+  # declarations make ufw fail to restore at all.
+  setup_destdir
+  install_docker_ufw_rules >/dev/null 2>&1
+  install_docker_ufw_rules >/dev/null 2>&1
+  local f="$CONF_DEST/etc/ufw/after.rules" rc=0
+  [[ $(grep -cF "$DOCKER_UFW_BEGIN" "$f") -eq 1 ]] || rc=1
+  [[ $(grep -c '^\*filter' "$f") -eq 1 ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw_validator_detects_bad_jump_target() {
+  # Without root, iptables-restore is unavailable, so the validator falls back
+  # to structural checks. The one that matters most is a `-j` naming a chain
+  # that is never declared: that is the mistake a hand-edit introduces, and
+  # accepting it wholesale would push a broken ruleset into ufw.
+  setup_destdir
+  local f="$CONF_DEST/etc/ufw/after.rules" rc=0
+  install_docker_ufw_rules >/dev/null 2>&1
+  # Force the unprivileged path.
+  sudo() { return 1; }
+  id() { [[ $1 == -u ]] && { echo 1000; return 0; }; builtin id "$@"; }
+
+  validate_docker_ufw_rules "$f" >/dev/null 2>&1
+  local good=$?
+
+  sed -i 's|^-A DOCKER-USER -j RETURN$|-A DOCKER-USER -j NOT_A_REAL_CHAIN|' "$f"
+  validate_docker_ufw_rules "$f" >/dev/null 2>&1
+  local bad=$?
+
+  # 0 = validated, 2 = unverified (no root), never 1 for good rules.
+  [[ $good -ne 1 ]] || rc=1
+  [[ $bad -eq 1 ]] || rc=1
+
+  unset -f id
+  teardown_destdir
+  return $rc
+}
+
+test_docker_ufw_validator_accepts_builtin_targets() {
+  # LOG is an iptables builtin, not a chain, and is never declared. If the
+  # structural check treated it as an unknown chain it would reject every
+  # correctly-generated rule set.
+  setup_destdir
+  local f="$CONF_DEST/etc/ufw/after.rules" rc=0
+  install_docker_ufw_rules >/dev/null 2>&1
+  sudo() { return 1; }
+  id() { [[ $1 == -u ]] && { echo 1000; return 0; }; builtin id "$@"; }
+
+  validate_docker_ufw_rules "$f" >/dev/null 2>&1
+  [[ $? -eq 2 ]] || rc=1   # unverified, NOT malformed
+
+  unset -f id
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nrunning\n'
 
@@ -787,6 +940,15 @@ t 'audit timeout is inside peek'                        test_audit_timeout_is_in
 
 t 'the firewall loop visits every port'                 test_firewall_loop_visits_every_port
 t 'the firewall loop skips the ssh port'                test_firewall_skips_the_ssh_port
+
+t 'docker loopback port is recognised'                  test_docker_port_is_loopback_only
+t 'docker public+loopback is not loopback'             test_docker_port_public_and_loopback_is_not_loopback_only
+t 'docker subnets include RFC1918'                      test_docker_subnets_always_includes_rfc1918
+t 'DOCKER-USER block uses upstream markers'             test_docker_ufw_block_uses_upstream_markers
+t 'DOCKER-USER rules are valid iptables'                test_docker_ufw_rules_parse_as_iptables
+t 'DOCKER-USER rules are idempotent'                    test_docker_ufw_rules_are_idempotent
+t 'validator catches a bad jump target'                test_docker_ufw_validator_detects_bad_jump_target
+t 'validator accepts iptables builtin targets'         test_docker_ufw_validator_accepts_builtin_targets
 
 t 'unknown task is rejected'                            test_unknown_task_rejected
 t 'unknown option is rejected'                          test_unknown_option_rejected

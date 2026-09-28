@@ -260,8 +260,15 @@ replace_managed_block() {
   # `local` line before it assigns any of them, so a single line reading
   # `local block=$1 path=$2 target=${CONF_DEST}${path}` would look up `path`
   # in the global scope, where it does not exist, and die under `set -u`.
+  #
+  # $3/$4 are the begin/end markers, defaulting to the sshd block's. They are
+  # parameters because this also manages a second file with different markers
+  # (/etc/ufw/after.rules), and a second copy of ufw's chain declarations would
+  # make ufw fail to restore at all.
   local block="$1"
   local path="$2"
+  local b1="${3:-$MANAGED_BEGIN}"
+  local b2="${4:-$MANAGED_END}"
   local target="${CONF_DEST}${path}"
   local body
   body="$(mktemp)"
@@ -271,7 +278,7 @@ replace_managed_block() {
   fi
 
   if [[ -f $target ]]; then
-    awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" '
+    awk -v b1="$b1" -v b2="$b2" '
       $0 == b1 { inblock = 1; next }
       $0 == b2 { inblock = 0; next }
       inblock != 1 { print }
@@ -293,7 +300,7 @@ replace_managed_block() {
     # The `next` after the MANAGED_END match is what stops the end-marker line
     # being printed twice; the guard is re-armed per line, not per run, so the
     # suppression only lasts while the lines are still blank.
-    awk -v b2="$MANAGED_END" '
+    awk -v b2="$b2" '
       {
         if (after == 1) {
           if ($0 == "") next      # swallow extra separators
@@ -754,6 +761,277 @@ docker_present() {
   have docker && systemctl is-active --quiet docker 2>/dev/null
 }
 
+# Docker inserts its DNAT and ACCEPT rules straight into iptables, ahead of
+# everything ufw manages. A published port is therefore reachable from the
+# internet no matter what ufw says - `ufw deny 8080` will not stop it. The
+# fix is the DOCKER-USER chain, which Docker routes all forwarded container
+# traffic through and which ufw does not otherwise touch.
+#
+# Rules are the ones published by chaifeng/ufw-docker (the de facto
+# reference, 6.8k stars) and described in
+# https://blog.jarrousse.org/2023/03/18/how-to-use-ufw-firewall-with-docker-containers/
+#
+# They are written inline rather than by curling ufw-docker into
+# /usr/local/bin: the install step is a handful of static iptables lines, and
+# fetching and executing a third-party script as root on every hardened box
+# is a supply-chain risk this script has no business adding. The upstream
+# markers are used verbatim so `ufw-docker check` and `ufw-docker uninstall`
+# still recognise the block if you later install the real tool.
+DOCKER_UFW_BEGIN="# BEGIN UFW AND DOCKER"
+DOCKER_UFW_END="# END UFW AND DOCKER"
+
+docker_ufw_installed() {
+  [[ -r /etc/ufw/after.rules ]] &&
+    grep -qF "$DOCKER_UFW_BEGIN" /etc/ufw/after.rules 2>/dev/null
+}
+
+# Every subnet Docker currently has, so the rules cover custom networks and
+# not just the default bridge. RFC1918 is always included.
+docker_subnets() {
+  printf '%s\n' "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"
+  if have docker; then
+    local n
+    for n in $(docker network ls -q 2>/dev/null || true); do
+      docker network inspect "$n" --format \
+        '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true
+    done | tr ' ' '\n' | grep -E '^[0-9a-fA-F:]+/[0-9]+$' || true
+  fi
+}
+
+# Map a published host port to the port inside the container. `ufw route
+# allow` matches on the container port, because by the time a packet reaches
+# DOCKER-USER it has already been DNAT'd. Getting this backwards is why
+# "allow 8080" appears to do nothing once the DOCKER-USER rules are in place.
+docker_container_port() {
+  local host_port="$1" out
+  out="$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null || true)"
+  [[ -n $out ]] || return 0
+  printf '%s\n' "$out" | awk -F'|' -v hp="$host_port" '
+    {
+      n = split($2, parts, ", ")
+      for (i = 1; i <= n; i++) {
+        p = parts[i]
+        gsub(/[][]/, "", p)
+        # forms: 0.0.0.0:8080->80/tcp   127.0.0.1:1318->1318/tcp   :::80->80/tcp
+        if (match(p, /:([0-9]+)->([0-9]+)\//, m)) {
+          if (m[1] == hp) { print $1 " " m[2]; exit }
+        }
+      }
+    }'
+}
+
+# True when every publication of this container port is bound to loopback
+# only, i.e. it is not reachable from off-box at all and needs no rule.
+#
+# The question is per CONTAINER port, but the loopback binding is expressed in
+# the HOST port (`-p 127.0.0.1:8080:80`), so a name that only appears on the
+# host side would be missed. The check therefore has to consider every
+# published binding that maps to this container port, and only report
+# loopback if all of them are loopback: a port published on both
+# 0.0.0.0 and 127.0.0.1 is publicly reachable via the first one.
+docker_port_is_loopback_only() {
+  local cport="$1" entries
+  entries="$(docker ps --format '{{.Ports}}' 2>/dev/null | tr ',' '\n')"
+  [[ -n $entries ]] || return 1
+
+  local saw=0 e
+  while read -r e; do
+    e="${e// /}"
+    [[ $e == *"->"* ]] || continue
+    local target="${e##*->}"
+    target="${target%%/*}"
+    [[ $target == "$cport" ]] || continue
+    saw=1
+    # 0.0.0.0, [::], or an explicit private address: reachable off-box.
+    if ! [[ $e =~ ^127\.0\.0\.1: ]]; then
+      return 1
+    fi
+  done <<<"$entries"
+
+  # No binding for this port at all: not loopback-only, just absent. Treated
+  # as "not loopback" so the caller still offers it rather than assuming.
+  [[ $saw -eq 1 ]]
+}
+
+# Syntax-check the fragment before it is allowed anywhere near the live
+# firewall. Extracted from the file we just wrote and fed to
+# iptables-restore --test as a complete ruleset.
+#
+# This has to distinguish "you are not root" from "this is malformed".
+# iptables-restore --test needs root even though it changes nothing, so on an
+# unprivileged run the honest answer is "could not check", not "looks fine" -
+# and a function that returns 0 unconditionally gates nothing at all.
+validate_docker_ufw_rules() {
+  local path="$1" tmp out rc=0
+  [[ -r $path ]] || return 1
+
+  tmp="$(mktemp)"
+  {
+    printf '*filter\n'
+    # awk rather than sed with the markers interpolated into a regex: the
+    # markers contain `#`, which is only safe inside a bracket expression, and
+    # building that expression by string surgery is how this quietly stopped
+    # matching. awk takes them as plain strings.
+    awk -v b1="$DOCKER_UFW_BEGIN" -v b2="$DOCKER_UFW_END" '
+      $0 == b1 { inside = 1 }
+      inside == 1 {
+        line = $0
+        sub(/^[[:space:]]+/, "", line)
+        if (line == b2) { inside = 0; next }
+        if (line ~ /^#/ || line == "*filter" || line == "COMMIT" || line == "") next
+        print line
+      }
+    ' "$path"
+    printf 'COMMIT\n'
+  } >"$tmp"
+
+  if ! have iptables-restore; then
+    warn "iptables-restore is not installed; cannot validate the DOCKER-USER rules"
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if [[ $(id -u) -eq 0 ]] || sudo -n true &>/dev/null; then
+    out="$(iptables-restore --test "$tmp" 2>&1)" && rc=0 || rc=1
+    if ((rc)); then
+      # "Permission denied" means the parse got as far as the COMMIT and was
+      # then refused for privilege, which is a pass as far as syntax goes.
+      if [[ $out == *"Permission denied"* && $out != *"Bad rule"* && $out != *"syntax error"* ]]; then
+        note "iptables-restore --test needs root; parsed the rules but could not apply the test"
+        rc=0
+      else
+        warn "iptables-restore rejected the DOCKER-USER rules: ${out##*: }"
+      fi
+    fi
+  else
+    # No privilege, so the real parser is unavailable. Two checks are possible
+    # without root, and they catch different things:
+    #   - a line that is not a valid iptables-restore directive
+    #   - a `-j TARGET` naming a chain this fragment never declares
+    # Neither can catch every error - iptables-restore is the only real parser
+    # - so an unverified result is reported as unverified, never as a pass.
+    local bad="" declared declared_target
+    # Chains this fragment declares, plus the ones ufw and Docker always
+    # provide. iptables has a fixed set of BUILTIN targets that are not
+    # chains and are not declared anywhere - LOG is the one this fragment
+    # uses - so they have to be listed explicitly or every rule is reported
+    # as jumping to a chain that does not exist.
+    declared=" ufw-user-forward ufw-docker-logging-deny DOCKER-USER DOCKER DOCKER-CT nat PREROUTING POSTROUTING OUTPUT INPUT FORWARD "
+    declared+=" ACCEPT DROP REJECT RETURN LOG QUEUE TRACE "
+    declared+=" DNAT SNAT MASQUERADE REDIRECT MIRROR NOTRACK CT "
+    while read -r line; do
+      [[ -z $line ]] && continue
+      case "$line" in
+        '*filter' | 'COMMIT') continue ;;
+        ':'*)
+          # :CHAINNAME - [0:0]
+          declared+="${line#:}"
+          declared+=" "
+          continue
+          ;;
+        '-A'*)
+          # Catch a jump to a chain that does not exist. A missing target is
+          # the mistake most likely to be introduced by hand-editing, and
+          # without this the fragment is accepted wholesale.
+          declared_target=""
+          read -r -a _words <<<"$line"
+          local w prev=""
+          for w in "${_words[@]}"; do
+            if [[ $prev == "-j" ]]; then
+              declared_target="$w"
+              break
+            fi
+            prev="$w"
+          done
+          if [[ -n $declared_target && $declared_target != *!* &&
+                $declared != *" ${declared_target} "* ]]; then
+            bad+="jump to undeclared chain: ${declared_target}"$'\n'
+          fi
+          continue
+          ;;
+        *) bad+="$line"$'\n' ;;
+      esac
+    done <"$tmp"
+    if [[ -n $bad ]]; then
+      warn "the DOCKER-USER rules contain lines iptables would not accept:"
+      while read -r l; do
+        [[ -n $l ]] && warn "  ${l}"
+      done <<<"$bad"
+      return 1
+    fi
+    # Unverified, not verified. The fragment is syntactically plausible but
+    # has not been through iptables, because iptables needs root.
+    note "could not run iptables-restore --test without root; the rules are unverified"
+    return 2
+  fi
+
+  rm -f "$tmp"
+  return $rc
+}
+
+install_docker_ufw_rules() {
+  if ((DRY_RUN)); then
+    printf '  %s•%s would write the DOCKER-USER rules to /etc/ufw/after.rules\n' "$C_DIM" "$C_OFF"
+    return 0
+  fi
+
+  local subnets ret accept block
+  block="$(mktemp)"
+  subnets="$(docker_subnets | sort -u)"
+
+  # RETURN for traffic coming FROM a private network (internal hosts reaching
+  # a container), and a logged DROP for NEW connections going TO one (the
+  # public internet reaching a published port, after DNAT has rewritten the
+  # destination to the container address). Indentation matches the static
+  # rules above, because the sed that extracts this block for validation must
+  # not depend on leading whitespace.
+  ret=""; accept=""
+  while read -r s; do
+    [[ -n $s ]] || continue
+    ret+="-A DOCKER-USER -j RETURN -s ${s}"$'\n'
+    accept+="-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d ${s}"$'\n'
+  done <<<"$subnets"
+
+  {
+    printf '%s\n' "$DOCKER_UFW_BEGIN"
+    cat <<'EOF'
+# Managed by oma-pi security.sh. Rules from chaifeng/ufw-docker.
+#
+# Without these, Docker's own DNAT/ACCEPT rules sit ahead of ufw's and a
+# published port is reachable from the internet regardless of ufw.
+# With them, published container ports are blocked by default and are opened
+# only by an explicit `ufw route allow` rule.
+*filter
+:ufw-user-forward - [0:0]
+:ufw-docker-logging-deny - [0:0]
+:DOCKER-USER - [0:0]
+# Jump to ufw's own forward rules first: this is where `ufw route allow`
+# lands, so an approved port is matched before anything below drops it.
+-A DOCKER-USER -j ufw-user-forward
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -m conntrack --ctstate INVALID -j DROP
+-A DOCKER-USER -i docker0 -o docker0 -j ACCEPT
+EOF
+    printf '%s' "$ret"
+    printf '%s' "$accept"
+    cat <<'EOF'
+-A DOCKER-USER -j RETURN
+-A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
+-A ufw-docker-logging-deny -j DROP
+COMMIT
+EOF
+    printf '%s\n' "$DOCKER_UFW_END"
+  } >"$block"
+
+  # Replace, not append: a second copy of the chain declarations would make
+  # ufw fail to restore entirely.
+  replace_managed_block "$block" /etc/ufw/after.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END"
+  rm -f "$block"
+  ok "DOCKER-USER rules written to /etc/ufw/after.rules"
+  note "published container ports are now blocked until a 'ufw route allow' rule permits them"
+}
+
 # Docker's published ports are owned by docker-proxy, not by your container,
 # and `ss -p` cannot attribute them to a name without a `docker ps` lookup.
 # This box runs a proxy publishing 80/443, so the question "do you run a
@@ -856,10 +1134,9 @@ configure_firewall() {
   done 3< <(listening_ports)
 
   if docker_present; then
-    warn "Docker installs its own DOCKER-USER chain and its published ports"
-    note "bypass ufw. ufw rules here do not cover container ports, and"
-    note "dockerd's iptables work will be lost if ufw is reconfigured by"
-    note "hand. Bound what containers publish with -p 127.0.0.1:PORT:PORT."
+    warn "Docker's published ports bypass ufw: Docker writes its own DNAT and"
+    note "ACCEPT rules ahead of ufw's, so 'ufw deny 8080' does not stop a"
+    note "published port. Fixing that now with the DOCKER-USER chain."
   fi
 
   # If the tailnet is the only way in, port 22 can go away entirely. This is
@@ -875,6 +1152,8 @@ configure_firewall() {
     fi
   fi
 
+  configure_docker_ufw
+
   if ((DRY_RUN)); then
     note "would enable: ufw enable"
     return 0
@@ -882,6 +1161,128 @@ configure_firewall() {
   run_root ufw enable
   ok "ufw enabled"
   note "$(ufw status 2>/dev/null | head -1 || true)"
+}
+
+# Make ufw actually govern Docker's published ports.
+#
+# Order matters here. The DOCKER-USER rules are installed and ufw reloaded
+# FIRST, which closes every published port by default. Only then is each
+# published port offered to the user. Doing it the other way round would mean
+# writing `ufw route allow` rules against a chain that is not installed yet,
+# and the reload that activates them is what closes the ports.
+configure_docker_ufw() {
+  if ! docker_present; then
+    return 0
+  fi
+  if ! have ufw; then
+    warn "Docker is running but ufw is not installed; cannot make ufw govern container ports"
+    note "bound what you publish to loopback instead: -p 127.0.0.1:PORT:PORT"
+    return 0
+  fi
+
+  if docker_ufw_installed; then
+    ok "DOCKER-USER rules already present in /etc/ufw/after.rules"
+  else
+    install_docker_ufw_rules
+  fi
+
+  if ((DRY_RUN)); then
+    note "would validate the rules, then run: ufw reload"
+  else
+    # Three outcomes, not two: verified, malformed, and - when not running as
+    # root - unverified, because iptables-restore needs privilege even for
+    # --test. Only a malformed fragment blocks the reload. An unverified one
+    # is the normal case for `security.sh` run as a normal user, and refusing
+    # to configure Docker at all there would be worse than proceeding with a
+    # loud warning; a real run of this script is `sudo ./security.sh`.
+    local vrc=0
+    validate_docker_ufw_rules /etc/ufw/after.rules || vrc=$?
+    case $vrc in
+      0)
+        ok "DOCKER-USER rules validated by iptables-restore"
+        ;;
+      1)
+        warn "the DOCKER-USER rules are malformed; not reloading ufw"
+        note "fix /etc/ufw/after.rules, or remove the block between the UFW AND DOCKER markers"
+        return 1
+        ;;
+      *)
+        warn "the DOCKER-USER rules could not be validated without root"
+        note "if ufw reload fails afterwards, run: sudo ufw-docker check"
+        ;;
+    esac
+
+    # Back up before reloading: a bad fragment stops ufw restoring its whole
+    # ruleset, which means no firewall at all.
+    local rules_backup=""
+    if [[ -f /etc/ufw/after.rules ]]; then
+      rules_backup="$(mktemp)"
+      cp -p /etc/ufw/after.rules "$rules_backup" || rules_backup=""
+    fi
+
+    if run_root ufw reload; then
+      ok "ufw reloaded with the DOCKER-USER chain in place"
+      [[ -n $rules_backup ]] && rm -f "$rules_backup"
+    else
+      warn "ufw reload failed; restoring the previous rules and reloading again"
+      if [[ -n $rules_backup ]]; then
+        run_root cp -p "$rules_backup" /etc/ufw/after.rules || true
+        run_root ufw reload || warn "ufw is still not reloading - check 'ufw status' and the journal"
+      fi
+      [[ -n $rules_backup ]] && rm -f "$rules_backup"
+      return 1
+    fi
+  fi
+
+  # Every published (container name, container port) pair, de-duplicated.
+  # A port published on both 0.0.0.0 and 127.0.0.1 appears once; whether it is
+  # public is decided per port by docker_port_is_loopback_only, not here.
+  #
+  # The `if` rather than `[[ ... ]] &&` matters: under `set -e` a trailing
+  # `&&` that evaluates false is the last command in a subshell, the subshell
+  # exits non-zero, and the whole pipeline is torn down mid-iteration. That
+  # silently dropped every port and the prompts never appeared.
+  docker_published_pairs() {
+    local n p entry cport
+    docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null |
+      while IFS='|' read -r n p; do
+        [[ -n $n && -n $p ]] || continue
+        while IFS= read -r entry; do
+          entry="${entry// /}"
+          if [[ $entry != *"->"* ]]; then
+            continue
+          fi
+          cport="${entry##*->}"
+          cport="${cport%%/*}"
+          if [[ -n $cport ]]; then
+            printf '%s %s\n' "$n" "$cport"
+          fi
+        done < <(printf '%s\n' "$p" | tr ',' '\n')
+      done | sort -u
+  }
+
+  local line name cport
+  while read -r name cport <&3; do
+    [[ -n $name && -n $cport ]] || continue
+    if docker_port_is_loopback_only "$cport"; then
+      ok "${name}: ${cport} is published on loopback only, unreachable from the network"
+      continue
+    fi
+    if ask "allow the internet to reach ${name} on container port ${cport}? (needed for 0.0.0.0:${cport} and [::]:${cport})" n; then
+      if ((DRY_RUN)); then
+        printf '  %s•%s would run: ufw route allow proto tcp from any to any port %s\n' \
+          "$C_DIM" "$C_OFF" "$cport"
+      else
+        run_root ufw route allow proto tcp from any to any port "$cport" \
+          comment "omapi: ${name}" || warn "could not add a route rule for ${name}:${cport}"
+        ok "${name}: container port ${cport} reachable from the network"
+      fi
+    else
+      warn "${name} publishes ${cport} on all interfaces and is now BLOCKED"
+      note "if something should reach it: sudo ufw route allow proto tcp from any to any port ${cport}"
+      note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}"
+    fi
+  done 3< <(docker_published_pairs)
 }
 
 listening_process() {

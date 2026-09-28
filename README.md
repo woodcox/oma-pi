@@ -41,7 +41,7 @@ filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 ./security.sh --list                 # available tasks
 sudo ./security.sh ssh firewall      # just these two
 sudo ./security.sh --yes             # take the recommended defaults
-./test/security-test.sh              # 35 tests, no root needed
+./test/security-test.sh              # 45 tests, no root needed
 ```
 
 Some deliberate choices worth knowing before you run it:
@@ -56,9 +56,21 @@ Some deliberate choices worth knowing before you run it:
 - **Prompts use `gum`**, reading `/dev/tty` directly, so they still appear when
   the script is iterating over ports or accounts. Without a terminal at all it
   says so and takes the documented default rather than silently guessing.
-- **Docker ports are detected.** Published container ports bypass ufw through
-  the `DOCKER-USER` chain. The script identifies them via `docker ps`, offers
-  them to you by name, and warns that ufw does not cover them.
+- **Docker and ufw are reconciled.** Docker writes its own DNAT and ACCEPT
+  rules ahead of ufw's, so a published port is reachable from the internet no
+  matter what ufw says — `ufw deny 8080` does not stop it. The script installs
+  the [`DOCKER-USER` rules from
+  chaifeng/ufw-docker](https://github.com/chaifeng/ufw-docker) into
+  `/etc/ufw/after.rules`, which closes every published port by default, then
+  offers each one by container name. Opening one takes a `ufw route allow`
+  rule, which matches on the **container** port, not the host port. The rules
+  are written inline rather than by installing the upstream script — it is a
+  handful of static iptables lines, and fetching and running a third-party
+  script as root on every hardened box is a supply-chain risk. The upstream
+  block markers are used verbatim, so `ufw-docker check` and `ufw-docker
+  uninstall` still recognise it if you install the real tool later.
+  See [this write-up](https://blog.jarrousse.org/2023/03/18/how-to-use-ufw-firewall-with-docker-containers/)
+  for the background.
 - **`net.ipv4.ip_forward` is left alone** when the Docker service is *running*,
   since the container bridge needs it. If Docker is installed but stopped when
   you run the script, forwarding is turned off; start Docker and re-run if that
