@@ -20,7 +20,9 @@
 #   * --dry-run prints the plan and runs only the read-only commands needed
 #     to decide it. Read the plan before agreeing to it.
 #   * --yes accepts the recommended defaults. It is not a licence to skip
-#     the key check, and neither is --force.
+#     the key check. There is deliberately no --force: the "you have
+#     another way in" questions are the ones that stop a run from locking
+#     you out, so no flag should be able to wave them through.
 #
 # Deliberate omissions, so they are not mistaken for oversights:
 #   * AllowTcpForwarding is left alone - config/shell/fns/ssh-port-forwarding
@@ -101,8 +103,6 @@ Tasks (default: all but aide):
 Options:
   -y, --yes         accept recommended defaults, do not prompt
   -n, --dry-run     print the plan, run only read-only commands
-      --force       proceed with the steps that normally need --yes (the
-                     "you have another way in" overrides)
       --lockdown-ssh additionally set `AllowUsers <you>` in sshd_config
       --report       also save the audit report to ~/security-audit/
       --no-audit     skip the final report
@@ -310,21 +310,25 @@ replace_managed_block() {
     # adjacent to the managed block is touched, so blank lines the user put
     # elsewhere in their own config are preserved.
     if [[ $where == bottom ]]; then
-      # Block is last: collapse the run immediately BEFORE it.
+      # Block is last: collapse the run immediately BEFORE it, and only that
+      # run. The `blank` flag has to be reset on every non-blank line, or it
+      # stays set and collapses EVERY blank run in the file - which silently
+      # reformatting a user's own after.rules is exactly what this whole
+      # function is supposed to avoid doing.
       awk -v b1="$b1" '
         { lines[NR] = $0 }
         END {
-          n = 0
-          # Find where the block starts.
           start = 0
           for (i = 1; i <= NR; i++) if (lines[i] == b1) { start = i; break }
+          blank = 0
           for (i = 1; i <= NR; i++) {
             if (start > 0 && i < start && lines[i] == "") {
-              if (blank) continue
+              if (blank) continue          # drop the extra separators
               blank = 1
               print ""
               continue
             }
+            blank = 0                       # a real line re-arms the collapse
             print lines[i]
           }
         }
@@ -829,28 +833,6 @@ docker_subnets() {
   fi
 }
 
-# Map a published host port to the port inside the container. `ufw route
-# allow` matches on the container port, because by the time a packet reaches
-# DOCKER-USER it has already been DNAT'd. Getting this backwards is why
-# "allow 8080" appears to do nothing once the DOCKER-USER rules are in place.
-docker_container_port() {
-  local host_port="$1" out
-  out="$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null || true)"
-  [[ -n $out ]] || return 0
-  printf '%s\n' "$out" | awk -F'|' -v hp="$host_port" '
-    {
-      n = split($2, parts, ", ")
-      for (i = 1; i <= n; i++) {
-        p = parts[i]
-        gsub(/[][]/, "", p)
-        # forms: 0.0.0.0:8080->80/tcp   127.0.0.1:1318->1318/tcp   :::80->80/tcp
-        if (match(p, /:([0-9]+)->([0-9]+)\//, m)) {
-          if (m[1] == hp) { print $1 " " m[2]; exit }
-        }
-      }
-    }'
-}
-
 # True when every publication of this container port is bound to loopback
 # only, i.e. it is not reachable from off-box at all and needs no rule.
 #
@@ -861,7 +843,7 @@ docker_container_port() {
 # loopback if all of them are loopback: a port published on both
 # 0.0.0.0 and 127.0.0.1 is publicly reachable via the first one.
 docker_port_is_loopback_only() {
-  local cport="$1" entries
+  local cport="$1" proto="${2:-tcp}" entries
   entries="$(docker ps --format '{{.Ports}}' 2>/dev/null | tr ',' '\n')"
   [[ -n $entries ]] || return 1
 
@@ -869,9 +851,12 @@ docker_port_is_loopback_only() {
   while read -r e; do
     e="${e// /}"
     [[ $e == *"->"* ]] || continue
-    local target="${e##*->}"
-    target="${target%%/*}"
-    [[ $target == "$cport" ]] || continue
+    local rest="${e##*->}"
+    local target="${rest%%/*}" eproto="${rest##*/}"
+    [[ $eproto == */* ]] && eproto="tcp"
+    # Per protocol: a port published on loopback for tcp and on 0.0.0.0 for
+    # udp is publicly reachable over udp, and the tcp result must not mask it.
+    [[ $target == "$cport" && $eproto == "$proto" ]] || continue
     saw=1
     # 0.0.0.0, [::], or an explicit private address: reachable off-box.
     if ! [[ $e =~ ^127\.0\.0\.1: ]]; then
@@ -922,17 +907,31 @@ validate_docker_ufw_rules() {
     return 1
   fi
 
-  if [[ $(id -u) -eq 0 ]] || sudo -n true &>/dev/null; then
-    out="$(iptables-restore --test "$tmp" 2>&1)" && rc=0 || rc=1
-    if ((rc)); then
-      # "Permission denied" means the parse got as far as the COMMIT and was
-      # then refused for privilege, which is a pass as far as syntax goes.
-      if [[ $out == *"Permission denied"* && $out != *"Bad rule"* && $out != *"syntax error"* ]]; then
-        note "iptables-restore --test needs root; parsed the rules but could not apply the test"
-        rc=0
-      else
-        warn "iptables-restore rejected the DOCKER-USER rules: ${out##*: }"
-      fi
+  # Decide how to invoke the real parser. An array-length test cannot
+  # distinguish "we are root, run it directly" from "we cannot run it at all",
+  # and conflating them sends root down the unprivileged structural path.
+  local use_restore=0
+  local -a run_restore=()
+  if [[ $(id -u) -eq 0 ]]; then
+    use_restore=1
+  elif sudo -n true &>/dev/null; then
+    # Passwordless sudo is available, so actually USE it. Running
+    # iptables-restore unprivileged and then interpreting its "Permission
+    # denied" as a pass means a rule naming a chain that does not exist is
+    # reported as verified, because iptables never got far enough to look.
+    use_restore=1
+    run_restore=(sudo -n)
+  fi
+
+  if ((use_restore)); then
+    out="$("${run_restore[@]}" iptables-restore --test "$tmp" 2>&1)" && rc=0 || rc=1
+    if ((rc)) && [[ $out == *"Permission denied"* ]]; then
+      # sudo was available but still refused. Not a syntax problem, but also
+      # not a verification - report it as unverified rather than as a pass.
+      note "iptables-restore --test could not be applied: ${out##*: }"
+      rc=2
+    elif ((rc)); then
+      warn "iptables-restore rejected the DOCKER-USER rules: ${out##*: }"
     fi
   else
     # No privilege, so the real parser is unavailable. Two checks are possible
@@ -988,11 +987,13 @@ validate_docker_ufw_rules() {
       while read -r l; do
         [[ -n $l ]] && warn "  ${l}"
       done <<<"$bad"
+      rm -f "$tmp"
       return 1
     fi
     # Unverified, not verified. The fragment is syntactically plausible but
     # has not been through iptables, because iptables needs root.
     note "could not run iptables-restore --test without root; the rules are unverified"
+    rm -f "$tmp"
     return 2
   fi
 
@@ -1070,6 +1071,7 @@ EOF
   # that the IPv4 rules just closed - the same bypass, through the other door.
   install_docker_ufw6_rules "$subnets"
 
+  rm -f "$block"
   note "published container ports are now blocked until a 'ufw route allow' rule permits them"
 }
 
@@ -1096,7 +1098,7 @@ install_docker_ufw6_rules() {
     docker network inspect "$n" --format \
       '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null
   done | tr ' ' '\n' | grep -iE '^[0-9a-f]+:[0-9a-f:]+/[0-9]+$' || true)"
-  subnets6="fd00::/8 fd00:115c:a1e0::/48"
+  subnets6="fd00::/8 fd7a:115c:a1e0::/48"
   subnets6+=" ${v6// /$' '}"
 
   local block; block="$(mktemp)"
@@ -1276,6 +1278,86 @@ configure_firewall() {
 # published port offered to the user. Doing it the other way round would mean
 # writing `ufw route allow` rules against a chain that is not installed yet,
 # and the reload that activates them is what closes the ports.
+#
+# Top level rather than nested inside configure_docker_ufw so the test suite
+# can reach these; a function defined inside another function is not callable
+# from anywhere else.
+#
+# Two functions, and they have to stay two. docker_published_pairs only emits
+# rows; docker_offer_published_ports only consumes them. Folding the loop back
+# into the producer put `done 3< <(docker_published_pairs)` inside
+# docker_published_pairs, so every call re-entered itself through a process
+# substitution and forked until the machine ran out of process slots - the
+# prompt loop was only ever reachable via that recursion, which also means
+# configure_docker_ufw had no way left to call it.
+#
+# Every published (container name, container port, protocol) triple,
+# de-duplicated.
+#
+# The protocol is carried because `sort -u` on (name, port) alone collapses a
+# tcp and a udp publication of the same port into one entry, and the only rule
+# ever emitted is `ufw route allow proto tcp`. A published UDP port - a DNS or
+# WireGuard container - therefore could never be opened and stayed blocked
+# with no way to reopen it from the prompt.
+docker_published_pairs() {
+  local n p entry cport proto
+  docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null |
+    while IFS='|' read -r n p; do
+      [[ -n $n && -n $p ]] || continue
+      while IFS= read -r entry; do
+        entry="${entry// /}"
+        if [[ $entry != *"->"* ]]; then
+          continue
+        fi
+        cport="${entry##*->}"
+        # ...->80/tcp: split the protocol off, defaulting to tcp for the
+        # forms docker omits it on.
+        if [[ $cport == */* ]]; then
+          proto="${cport#*/}"
+          cport="${cport%%/*}"
+        else
+          proto="tcp"
+        fi
+        if [[ -n $cport ]]; then
+          printf '%s %s %s\n' "$n" "$cport" "$proto"
+        fi
+      done < <(printf '%s\n' "$p" | tr ',' '\n')
+    done | sort -u
+}
+
+# Offer each published port for opening, after the chain is in place.
+#
+# fd 3 rather than stdin, as in the original: `docker ps` and `ask` both read,
+# and reading the pair list from stdin lets one of them swallow it, which
+# silently drops every port and the prompts never appear.
+docker_offer_published_ports() {
+  local name cport proto
+  while read -r name cport proto <&3; do
+    [[ -n $name && -n $cport ]] || continue
+    # A tcp and a udp publication of the same port are separate rules, and the
+    # loopback test is per protocol: a container published on 127.0.0.1 for tcp
+    # and 0.0.0.0 for udp is still publicly reachable over udp.
+    if docker_port_is_loopback_only "$cport" "$proto"; then
+      ok "${name}: ${cport}/${proto} is published on loopback only, unreachable from the network"
+      continue
+    fi
+    if ask "allow the internet to reach ${name} on container port ${cport}/${proto}? (needed for 0.0.0.0:${cport} and [::]:${cport})" n; then
+      if ((DRY_RUN)); then
+        printf '  %s•%s would run: ufw route allow proto %s from any to any port %s\n' \
+          "$C_DIM" "$C_OFF" "$proto" "$cport"
+      else
+        run_root ufw route allow proto "$proto" from any to any port "$cport" \
+          comment "omapi: ${name}" || warn "could not add a route rule for ${name}:${cport}/${proto}"
+        ok "${name}: container port ${cport}/${proto} reachable from the network"
+      fi
+    else
+      warn "${name} publishes ${cport}/${proto} on all interfaces and is now BLOCKED"
+      note "if something should reach it: sudo ufw route allow proto ${proto} from any to any port ${cport}"
+      note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+    fi
+  done 3< <(docker_published_pairs)
+}
+
 configure_docker_ufw() {
   if ! docker_present; then
     return 0
@@ -1286,8 +1368,37 @@ configure_docker_ufw() {
     return 0
   fi
 
+  # Snapshot BEFORE anything is written. Taking it after the install would
+  # back up the file we are trying to protect against, so a failed reload
+  # would "restore" the broken rules and leave ufw just as dead.
+  local rules_backup=""
+  if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after.rules ]]; then
+    rules_backup="$(mktemp)"
+    cp -p "${CONF_DEST}/etc/ufw/after.rules" "$rules_backup" || rules_backup=""
+  fi
+
+  # Restoring puts the pre-change file back and reloads, so it is used both
+  # when the fragment is malformed and when the reload itself fails.
+  restore_rules() {
+    if [[ -n $rules_backup ]]; then
+      run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || true
+    fi
+    rm -f "$rules_backup"
+    rules_backup=""
+  }
+
+  # Checked through CONF_DEST so this works against a temporary tree, and so
+  # OMAPI_SECURITY_DESTDIR cannot make the script inspect the real /etc.
   if docker_ufw_installed; then
-    ok "DOCKER-USER rules already present in /etc/ufw/after.rules"
+    ok "DOCKER-USER rules already present in ${CONF_DEST}/etc/ufw/after.rules"
+    # The v6 half is installed separately and independently. Skipping it just
+    # because the v4 block is present means enabling IPV6=yes after a run
+    # never gets an after6.rules block, and IPv6 clients reach published
+    # ports through the gap. install_docker_ufw6_rules is idempotent and
+    # checks its own preconditions.
+    if ((!DRY_RUN)) && grep -qE '^IPV6=yes' "${CONF_DEST}/etc/default/ufw" 2>/dev/null; then
+      install_docker_ufw6_rules "$(docker_subnets | sort -u)"
+    fi
   else
     install_docker_ufw_rules
   fi
@@ -1302,14 +1413,18 @@ configure_docker_ufw() {
     # to configure Docker at all there would be worse than proceeding with a
     # loud warning; a real run of this script is `sudo ./security.sh`.
     local vrc=0
-    validate_docker_ufw_rules /etc/ufw/after.rules || vrc=$?
+    validate_docker_ufw_rules "${CONF_DEST}/etc/ufw/after.rules" || vrc=$?
     case $vrc in
       0)
         ok "DOCKER-USER rules validated by iptables-restore"
         ;;
       1)
+        # Restore here too. Leaving a fragment we have just called malformed on
+        # disk means the next `ufw reload` by anything - including ufw's own
+        # boot-time restore - trips over it, and the user gets no firewall.
         warn "the DOCKER-USER rules are malformed; not reloading ufw"
-        note "fix /etc/ufw/after.rules, or remove the block between the UFW AND DOCKER markers"
+        restore_rules
+        note "the previous /etc/ufw/after.rules has been restored"
         return 1
         ;;
       *)
@@ -1318,77 +1433,21 @@ configure_docker_ufw() {
         ;;
     esac
 
-    # Back up before reloading: a bad fragment stops ufw restoring its whole
-    # ruleset, which means no firewall at all.
-    local rules_backup=""
-    if [[ -f /etc/ufw/after.rules ]]; then
-      rules_backup="$(mktemp)"
-      cp -p /etc/ufw/after.rules "$rules_backup" || rules_backup=""
-    fi
-
     if run_root ufw reload; then
       ok "ufw reloaded with the DOCKER-USER chain in place"
-      [[ -n $rules_backup ]] && rm -f "$rules_backup"
+      rm -f "$rules_backup"
     else
       warn "ufw reload failed; restoring the previous rules and reloading again"
-      if [[ -n $rules_backup ]]; then
-        run_root cp -p "$rules_backup" /etc/ufw/after.rules || true
-        run_root ufw reload || warn "ufw is still not reloading - check 'ufw status' and the journal"
-      fi
-      [[ -n $rules_backup ]] && rm -f "$rules_backup"
+      restore_rules
+      run_root ufw reload || warn "ufw is still not reloading - check 'ufw status' and the journal"
       return 1
     fi
   fi
 
-  # Every published (container name, container port) pair, de-duplicated.
-  # A port published on both 0.0.0.0 and 127.0.0.1 appears once; whether it is
-  # public is decided per port by docker_port_is_loopback_only, not here.
-  #
-  # The `if` rather than `[[ ... ]] &&` matters: under `set -e` a trailing
-  # `&&` that evaluates false is the last command in a subshell, the subshell
-  # exits non-zero, and the whole pipeline is torn down mid-iteration. That
-  # silently dropped every port and the prompts never appeared.
-  docker_published_pairs() {
-    local n p entry cport
-    docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null |
-      while IFS='|' read -r n p; do
-        [[ -n $n && -n $p ]] || continue
-        while IFS= read -r entry; do
-          entry="${entry// /}"
-          if [[ $entry != *"->"* ]]; then
-            continue
-          fi
-          cport="${entry##*->}"
-          cport="${cport%%/*}"
-          if [[ -n $cport ]]; then
-            printf '%s %s\n' "$n" "$cport"
-          fi
-        done < <(printf '%s\n' "$p" | tr ',' '\n')
-      done | sort -u
-  }
-
-  local line name cport
-  while read -r name cport <&3; do
-    [[ -n $name && -n $cport ]] || continue
-    if docker_port_is_loopback_only "$cport"; then
-      ok "${name}: ${cport} is published on loopback only, unreachable from the network"
-      continue
-    fi
-    if ask "allow the internet to reach ${name} on container port ${cport}? (needed for 0.0.0.0:${cport} and [::]:${cport})" n; then
-      if ((DRY_RUN)); then
-        printf '  %s•%s would run: ufw route allow proto tcp from any to any port %s\n' \
-          "$C_DIM" "$C_OFF" "$cport"
-      else
-        run_root ufw route allow proto tcp from any to any port "$cport" \
-          comment "omapi: ${name}" || warn "could not add a route rule for ${name}:${cport}"
-        ok "${name}: container port ${cport} reachable from the network"
-      fi
-    else
-      warn "${name} publishes ${cport} on all interfaces and is now BLOCKED"
-      note "if something should reach it: sudo ufw route allow proto tcp from any to any port ${cport}"
-      note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}"
-    fi
-  done 3< <(docker_published_pairs)
+  # Last, and only once the chain exists: every published port is closed by
+  # the rules installed above, so this is what offers each one back. Skipping
+  # it leaves a working container dark with no explanation anywhere.
+  docker_offer_published_ports
 }
 
 listening_process() {
@@ -1506,6 +1565,85 @@ EOF
 # ---------------------------------------------------------------------------
 # updates
 # ---------------------------------------------------------------------------
+
+# `origin:suite` for the first `apt-cache policy` release line belonging to a
+# repo whose Packages URLs contain $1, or nothing on stdout.
+#
+# Kept separate from configure_updates so the parsing can be tested against
+# known-good input instead of only against whatever this host happens to have
+# configured.
+apt_release_line_for() {
+  local needle="$1"
+  peek apt-cache policy 2>/dev/null | awk -v needle="$needle" '
+    index($0, needle) && $1 ~ /^(500|deb)$/ {w=1; next}
+    w && /^[[:space:]]+release[[:space:]]/ {print; exit}'
+}
+
+# "origin:suite" from an `apt-cache policy` release line. Returns 1 if either
+# half is missing rather than emitting a half-formed entry, because a partial
+# value in Allowed-Origins matches nothing while looking entirely reasonable.
+#
+# The Origin is "Raspberry Pi Foundation" - it contains spaces, so the value
+# runs to the next comma and cannot be recovered by splitting on whitespace,
+# which is the version that silently yielded "Raspberry" and matched nothing.
+apt_release_origin_combo() {
+  local release="${1:-}" origin suite
+  [[ -n $release ]] || return 1
+  origin="$(sed -n 's/.*[, ]o=\([^,]*\).*/\1/p' <<<"$release")"
+  suite="$(sed -n 's/.*[, ]n=\([^,]*\).*/\1/p' <<<"$release")"
+  [[ -n $origin && -n $suite ]] || return 1
+  printf '%s:%s\n' "$origin" "$suite"
+}
+
+# Kernel images in $1 (default /boot) that no package owns, space separated.
+# Empty when every image is tracked, which is the normal case, or when there
+# is no boot directory to look at.
+#
+# Scoped to kernel images on purpose. A Pi's /boot also holds cmdline.txt,
+# config.txt, overlays and the initrd.img-*, and the Pi initramfs is generated
+# on-device rather than shipped by any package, so every one of those is
+# untracked by design. Checking the whole directory would report all of them
+# on every single machine, and an audit that always has something to complain
+# about is an audit nobody reads.
+untracked_kernels() {
+  # dpkg -S only reads the package database. Called without peek's sudo
+  # fallback on purpose: an audit must never be able to stop on a password
+  # prompt, and this needs no privilege anyway.
+  have dpkg || return 0
+  local dir="${1:-/boot}" f out=""
+  [[ -d $dir ]] || return 0
+  for f in "$dir"/vmlinuz-* "$dir"/Image-* "$dir"/zImage-* "$dir"/vmlinux-*; do
+    [[ -f $f || -L $f ]] || continue
+    dpkg -S "$f" >/dev/null 2>&1 || out+="${f##*/} "
+  done
+  printf '%s' "$out"
+}
+
+# Package owning the kernel image for a given uname -r, or nothing. A box
+# that booted from somewhere other than the image named here - a netboot, an
+# initramfs that moved the real root, a container - has no answer, and
+# reporting "not tracked" for those would be a false alarm.
+running_kernel_owner() {
+  local rel="${1:-$(uname -r)}" img="/boot/vmlinuz-${1:-$(uname -r)}"
+  [[ -f $img || -L $img ]] || return 1
+  dpkg -S "$img" 2>/dev/null | cut -d: -f1
+}
+
+# Package names apt is holding back, one per line, or nothing on stdout.
+#
+# `apt upgrade` never installs a brand-new package, so an update that pulls in
+# a dependency which is not installed yet is deferred to `apt full-upgrade` -
+# and then never happens. Nothing errors, no timer notices, and the box reads
+# as fully patched. rpi-eeprom 28.13 -> 28.31 wanted a Recommends that no
+# configured repo carries and sat there indefinitely. A simulated upgrade is
+# the only way to see this without changing anything, hence -s.
+held_back_packages() {
+  peek apt-get -s upgrade 2>/dev/null | awk '
+    /^The following packages have been kept back:/ {f=1; next}
+    f && /^[[:space:]]+[^[:space:]]/ {print $1}
+    f && !/^[[:space:]]/ {exit}'
+}
+
 configure_updates() {
   section "Automatic security updates"
 
@@ -1539,6 +1677,32 @@ configure_updates() {
   )
   if [[ $id == ubuntu || $id == linuxmint || $id == pop ]]; then
     origins+=("\"${id}:${codename}-updates\"")
+  fi
+
+  # On a Pi the kernel, the bootloader and the EEPROM are not Debian packages.
+  # They come from archive.raspberrypi.com, whose Origin is "Raspberry Pi
+  # Foundation" and which publishes no -security suite at all - its dists/ are
+  # bookworm, trixie, forky and the fixes go out on the main branch. So
+  # `id:codename-security` above matches nothing for any RPi package and
+  # unattended-upgrades leaves linux-image-*, rpi-eeprom and raspi-firmware on
+  # whatever version they were installed at, indefinitely, with no warning.
+  # That is the gap that leaves `apt list --upgradable` sitting on rpi-eeprom
+  # forever while every check in this function reports success.
+  #
+  # Only the RPi archive is added. The docker, charm, tailscale, github-cli and
+  # gierens repos in sources.list.d are deliberately left out: auto-upgrading
+  # those unattended is how you take down a working stack at 3am, and they are
+  # not where this box's kernel-level exposure lives.
+  if grep -rqs 'archive\.raspberrypi\.com' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    local rpi_combo
+    rpi_combo="$(apt_release_origin_combo "$(apt_release_line_for archive.raspberrypi.com)")"
+    if [[ -n $rpi_combo ]]; then
+      origins+=("\"${rpi_combo}\"")
+    else
+      warn "Raspberry Pi archive is configured but its Origin/Suite could not be read;"
+      warn "RPi kernel, bootloader and EEPROM will not be auto-updated"
+    fi
   fi
 
   # Built with a plain newline rather than the heredoc below so no colour
@@ -1612,6 +1776,19 @@ EOF
   else
     warn "apt did not pick up the unattended-upgrades configuration"
   fi
+
+  # Say it out loud when apt is holding something back. See
+  # held_back_packages: this is a silent-failure class that nothing else in
+  # this script would ever surface, and naming the packages is the whole fix
+  # - it is a five second apt full-upgrade once somebody knows.
+  local kept_back
+  kept_back="$(held_back_packages)"
+  if [[ -n $kept_back ]]; then
+    warn "apt upgrade is holding back: ${kept_back//$'\n'/ }"
+    note "these need a new dependency; unattended-upgrades will not install them:"
+    note "  sudo apt full-upgrade"
+  fi
+
   note "$(peek systemctl list-timers apt-daily.timer apt-daily-upgrade.timer --no-pager 2>/dev/null |
     head -3 | tail -2 | tr -s ' ' | cut -d' ' -f2-5 | tr '\n' '|' || true)"
 }
@@ -1838,6 +2015,38 @@ audit() {
       grep -E 'Unattended-Upgrade::(Allowed-Origins|Automatic-Reboot|Package-Blacklist)' |
       sed 's/^/  /' || printf '  not configured\n'
     printf '  pending updates: %s\n' "$upgradable"
+    # Counted separately from the line above: these are the ones that will
+    # never be applied by unattended-upgrades and never raise an error, so
+    # "pending updates: 1" next to a silent 1 is the most misleading pair of
+    # numbers this report can print.
+    printf '  held back by apt upgrade: %s\n' \
+      "$(held_back_packages | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
+
+    printf '\n-- kernel patching --\n'
+    # A kernel image no package owns can never be upgraded, so it stops
+    # receiving security patches with nothing anywhere complaining: apt has no
+    # newer one to pull, so no timer fires and no report mentions it. The
+    # usual way in is rpi-update, which installs a kernel deliberately outside
+    # apt's package management - and that also drops the running kernel out of
+    # the RPi origin allowed above, so the origin fix stops covering it too.
+    # Read-only by design. The remedy is a reinstall from apt, which is a
+    # decision for a human with physical access, not something an audit
+    # should do behind their back on a headless box.
+    local kowner krel kbad
+    krel="$(uname -r 2>/dev/null || echo '?')"
+    if kowner="$(running_kernel_owner "$krel")" && [[ -n $kowner ]]; then
+      printf '  running kernel: %s (owned by %s)\n' "$krel" "$kowner"
+    else
+      printf '  running kernel: %s (no /boot image owned by a package)\n' "$krel"
+    fi
+    kbad="$(untracked_kernels)"
+    if [[ -n $kbad ]]; then
+      printf '  UNTRACKED kernel images: %s\n' "$kbad"
+      printf '  owned by no package, so apt can never upgrade them and they stop\n'
+      printf '  receiving security patches silently. Reinstall from apt to fix.\n'
+    else
+      printf '  every kernel image in /boot is owned by a package\n'
+    fi
 
     printf '\n-- apparmor --\n'
     peek aa-status 2>/dev/null | head -6 | sed 's/^/  /' || printf '  not installed\n'
@@ -1946,7 +2155,6 @@ main() {
     case "$1" in
       -y | --yes) ASSUME_YES=1 ;;
       -n | --dry-run) DRY_RUN=1 ;;
-      --force) FORCE=1 ;;
       --lockdown-ssh) LOCKDOWN_SSH=1 ;;
       --report) WANT_REPORT=1 ;;
       --no-audit) RUN_AUDIT=0 ;;

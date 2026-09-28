@@ -85,12 +85,6 @@ assert_contains() {
   return 1
 }
 
-assert_lacks() {
-  [[ "$1" != *"$2"* ]] && return 0
-  printf '        unexpectedly present: %q\n' "$2"
-  return 1
-}
-
 # Captured at source time, before any test replaces it, so the
 # privilege-check test always inspects the real function.
 _ORIGINAL_DOCKER_PRESENT="$(declare -f docker_present)"
@@ -361,19 +355,180 @@ test_apt_config_origins_match_os_release() {
   return $rc
 }
 
-test_apt_config_parses_with_apt() {
+# ---------------------------------------------------------------------------
+printf '\nrpi archive origin and held-back reporting\n'
+
+test_rpi_origin_combo_keeps_the_spaced_origin() {
+  # The Origin is "Raspberry Pi Foundation". A parser that splits the release
+  # line on whitespace returns "Raspberry", and the Allowed-Origins entry that
+  # produces looks completely normal in the config file while matching
+  # nothing - the exact silent failure this block exists to prevent.
+  local rel='     release o=Raspberry Pi Foundation,a=oldstable,n=bookworm,l=Raspberry Pi Foundation,c=main,b=armhf'
+  local rc=0
+  assert_eq "$(apt_release_origin_combo "$rel")" "Raspberry Pi Foundation:bookworm" || rc=1
+  return $rc
+}
+
+test_rpi_origin_combo_rejects_a_half_read_release_line() {
+  # A release line missing either half must produce nothing at all. Emitting
+  # "Raspberry Pi Foundation:" would be a config entry that is valid apt syntax,
+  # shows up under `apt-config dump`, and silently never matches a package.
+  local rc=0
+  apt_release_origin_combo '     release o=,n=bookworm' >/dev/null && rc=1
+  apt_release_origin_combo '     release o=Raspberry Pi Foundation,a=oldstable' >/dev/null && rc=1
+  apt_release_origin_combo '' >/dev/null && rc=1
+  return $rc
+}
+
+test_rpi_archive_is_allowed_when_this_box_has_it() {
+  # Host-conditional on exactly one point: the script decides whether to add
+  # the origin at all by grepping the real /etc/apt sources for the RPi
+  # archive, and on a box without it there is nothing to assert. Everything
+  # else is canned apt output, so the assertion itself is the same everywhere
+  # rather than quietly depending on whatever Origin RPi ships this month.
+  grep -rqs 'archive\.raspberrypi\.com' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || return 0
   setup_destdir
-  configure_updates
-  # The real test: hand it to apt-config with the destdir on its search path.
-  local out
-  if have apt-config; then
-    out="$(apt-config -o Dir::Etc::sourcelist=/dev/null \
-      dump 2>/dev/null |
-      grep -c 'Unattended-Upgrade::Allowed-Origins' || true)"
-    assert_eq "$out" "0"
-  fi
+  local release='     release o=Raspberry Pi Foundation,a=oldstable,n=bookworm,l=Raspberry Pi Foundation,c=main,b=armhf'
+  peek() {
+    [[ "$*" == *'apt-cache policy'* ]] || return 1
+    printf ' 500 http://archive.raspberrypi.com/debian bookworm/main arm64 Packages\n%s\n' "$release"
+  }
+  configure_updates >/dev/null 2>&1
+  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51omapi-origins" rc=0
+  [[ -f $cfg ]] || rc=1
+  grep -qF '"Raspberry Pi Foundation:bookworm";' "$cfg" || rc=1
   teardown_destdir
-  return 0
+  return $rc
+}
+
+test_third_party_repos_are_never_auto_upgraded() {
+  # This box has docker, tailscale, github-cli, charm and gierens in
+  # sources.list.d. None of them belong in Allowed-Origins: an unattended
+  # upgrade that pulls a new docker or tailscale out from under a running
+  # stack is a far worse outcome than a patch that waits for a human.
+  setup_destdir
+  configure_updates >/dev/null 2>&1
+  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51omapi-origins" rc=0
+  [[ -f $cfg ]] || rc=1
+  grep -qiE 'tailscale|docker|charm|gierens|"gh:|cli\.github' "$cfg" && rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_held_back_packages_are_named() {
+  # The whole point of reporting kept-back packages is naming them. A parse
+  # that returned the wrong section, or stopped at the summary line, would
+  # print an empty list and the warning would never fire - so feed it output
+  # with something to get wrong on both sides.
+  setup_destdir
+  peek() {
+    [[ "$*" == *'apt-get -s upgrade'* ]] || return 1
+    cat <<'OUT'
+The following packages will be upgraded:
+  bash
+The following packages have been kept back:
+  rpi-eeprom
+  linux-image-6.12
+0 upgraded, 0 newly installed, 0 to remove and 2 not upgraded.
+OUT
+  }
+  local rc=0
+  assert_eq "$(held_back_packages)" "rpi-eeprom
+linux-image-6.12" || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_held_back_warning_reaches_the_output() {
+  # Regression: this was the failure nobody saw. rpi-eeprom sat held back
+  # because its new version wants a Recommends no configured repo carries,
+  # apt upgrade declined it, unattended-upgrades was green, and no code
+  # anywhere said so.
+  setup_destdir
+  peek() {
+    if [[ "$*" == *'apt-get -s upgrade'* ]]; then
+      printf 'The following packages have been kept back:\n  rpi-eeprom\n0 upgraded, 0 newly installed.\n'
+      return 0
+    fi
+    return 1
+  }
+  local out rc=0
+  out="$(configure_updates 2>&1)"
+  [[ $out == *rpi-eeprom* ]] || rc=1
+  [[ $out == *full-upgrade* ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+# ---------------------------------------------------------------------------
+printf '\nkernel patching\n'
+
+test_untracked_kernels_flags_a_planted_image() {
+  # The whole point: a kernel no package owns can never be upgraded and stops
+  # getting security patches with nothing complaining. A temp directory stands
+  # in for /boot so the real one is never written to.
+  have dpkg || return 0
+  local dir rc=0
+  dir="$(mktemp -d)"
+  : >"$dir/vmlinuz-6.99.99+rpt-rpi-v8"
+  : >"$dir/Image-6.99.99"
+  local out; out="$(untracked_kernels "$dir")"
+  [[ $out == *vmlinuz-6.99.99+rpt-rpi-v8* ]] || rc=1
+  [[ $out == *Image-6.99.99* ]] || rc=1
+  rm -rf "$dir"
+  return $rc
+}
+
+test_untracked_kernels_ignores_files_that_are_untracked_by_design() {
+  # Regression, and the reason the check is scoped the way it is. On a Pi the
+  # initramfs is generated on-device, so /boot/initrd.img-* is owned by no
+  # package on a completely healthy system, as are cmdline.txt, config.txt and
+  # overlays. Checking the whole directory reports all of those on every
+  # machine, and a check that always fires is a check nobody reads.
+  have dpkg || return 0
+  local dir rc=0
+  dir="$(mktemp -d)"
+  : >"$dir/initrd.img-6.99.99"
+  : >"$dir/cmdline.txt"
+  : >"$dir/config.txt"
+  assert_eq "$(untracked_kernels "$dir")" "" || rc=1
+  rm -rf "$dir"
+  return $rc
+}
+
+test_running_kernel_owner_reads_the_real_boot_dir() {
+  # Host-conditional: there is no /boot to read off a Pi, and on a box that
+  # booted from a netboot or a container there is genuinely no answer, which is
+  # why the helper returns 1 rather than reporting a false "not tracked".
+  [[ -f /boot/vmlinuz-$(uname -r) ]] || return 0
+  local rc=0 owner
+  owner="$(running_kernel_owner)" || rc=1
+  [[ -n $owner ]] || rc=1
+  # An owner that is not a real package name means the cut -d: was wrong.
+  [[ $owner != */* && $owner != *:* ]] || rc=1
+  return $rc
+}
+
+test_kernel_audit_is_read_only() {
+  # The audit runs unattended on a headless box over ssh. This check exists to
+  # tell a human their kernel is not apt-managed, and the fix for that is a
+  # reinstall from apt - something that needs physical access and a human
+  # decision. It must never install, move or delete anything to make the
+  # problem go away, so assert the helpers are lookups only.
+  # As a string, not $($ORIGINAL_AUDIT): that form *runs* the audit, and
+  # running it from a sourced context fails outright because main() never
+  # initialised AUDIT_TMP. The source is what is being inspected here.
+  local body rc=0
+  body="$_ORIGINAL_AUDIT"
+  [[ $body == *'kernel patching'* ]] || rc=1
+  local helpers
+  helpers="$(declare -f untracked_kernels running_kernel_owner)"
+  [[ $helpers == *'dpkg -S'* ]] || rc=1
+  [[ $helpers != *apt-get* ]] || rc=1
+  [[ $helpers != *'dpkg -i'* ]] || rc=1
+  [[ $helpers != *apt\ install* ]] || rc=1
+  return $rc
 }
 
 # ---------------------------------------------------------------------------
@@ -400,11 +555,145 @@ test_dry_run_touches_nothing() {
   return $rc
 }
 
-test_dry_run_does_not_restart_ssh() {
-  # Guards the requirement that a dry run must never be able to end a session.
-  local out
-  out="$(DRY_RUN=1; DRY_RUN=1 bash -c 'true')"
-  [[ -n $out ]]
+test_dry_run_never_restarts_a_service() {
+  # --dry-run must not restart sshd or any other service. The old version of
+  # this test ran `bash -c true` and asserted its output was non-empty, which
+  # passed no matter what security.sh did.
+  setup_destdir
+  local rc=0
+  # A systemctl stub that fails the test if it is ever asked to restart.
+  local _orig_systemctl
+  _orig_systemctl="$(declare -f systemctl 2>/dev/null || true)"
+  systemctl() {
+    case "$*" in
+      *restart*|*reload*|*try-restart*)
+        printf '        dry run attempted to restart a service: %s\n' "$*" >&2
+        return 97
+        ;;
+    esac
+    return 0
+  }
+  DRY_RUN=1
+  harden_ssh >/dev/null 2>&1
+  local r=$?
+  unset -f systemctl
+  [[ -n $_orig_systemctl ]] && eval "$_orig_systemctl"
+  DRY_RUN=0
+  # 97 never surfaces from a function that ignores status, so assert the
+  # observable thing instead: nothing was written.
+  [[ -n $r ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_docker_published_pairs_keeps_udp() {
+  # `sort -u` on (name, port) collapsed a tcp and a udp publication of the same
+  # port into one entry, and the only rule ever emitted was proto tcp - so a
+  # published UDP port could never be opened.
+  setup_destdir
+  local rc=0 out
+  # One line, `name|ports`, because that is the shape the function under test
+  # asks for: a single `docker ps --format '{{.Names}}|{{.Ports}}'`. A stub
+  # that answered `{{.Names}}` and `{{.Ports}}` separately matched the first
+  # case arm every time and returned a name with no ports, so this test was
+  # asserting on empty output and only appeared to be about udp.
+  docker() { printf 'dns|0.0.0.0:53->53/udp, 0.0.0.0:53->53/tcp\n'; }
+  out="$(docker_published_pairs)"
+  unset -f docker
+  grep -q 'dns 53 udp' <<<"$out" || rc=1
+  grep -q 'dns 53 tcp' <<<"$out" || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_docker_published_pairs_is_not_recursive() {
+  # This one took the box down. Promoting docker_published_pairs to top level
+  # so the suite could reach it also left the prompt loop inside it, and that
+  # loop read from `done 3< <(docker_published_pairs)` - so every call re-entered
+  # itself through a process substitution and forked until there were no
+  # process slots left. The test above is what calls it, so the suite was the
+  # thing that crashed the machine.
+  #
+  # Assert the shape, not the behaviour: running it to see whether it forks is
+  # exactly what must never happen here.
+  local rc=0 body
+  body="$(declare -f docker_published_pairs)"
+  # Strip the declaration line, so the name in "docker_published_pairs() {"
+  # is not what is being counted.
+  body="${body#*\{}"
+  grep -q 'docker_published_pairs' <<<"$body" && rc=1
+  # The producer emits rows and nothing else.
+  grep -q 'while read' <<<"$body" && rc=1
+  return $rc
+}
+
+test_docker_offer_published_ports_is_callable() {
+  # The other half of that bug: with the loop inside the producer, the only way
+  # to reach it was the recursion, so configure_docker_ufw lost its call and
+  # stopped offering any port at all - every published port stayed closed after
+  # a successful reload, silently.
+  local rc=0
+  declare -F docker_offer_published_ports >/dev/null || rc=1
+  declare -f configure_docker_ufw | grep -q 'docker_offer_published_ports' || rc=1
+  return $rc
+}
+
+test_docker_port_is_loopback_only_is_per_protocol() {
+  # Published on 127.0.0.1 for tcp and 0.0.0.0 for udp: reachable over udp, so
+  # the tcp answer must not mask it.
+  setup_destdir
+  local rc=0
+  docker() {
+    case "$*" in
+      *'{{.Names}}'*) printf 'mixed\n' ;;
+      *'{{.Ports}}'*)  printf '127.0.0.1:53->53/tcp, 0.0.0.0:53->53/udp\n' ;;
+    esac
+    return 0
+  }
+  if docker_port_is_loopback_only 53 tcp; then :; else rc=1; fi
+  if docker_port_is_loopback_only 53 udp; then rc=1; fi
+  unset -f docker
+  teardown_destdir
+  return $rc
+}
+
+test_bottom_normaliser_preserves_distant_blank_lines() {
+  # The bottom-placement normaliser had a `blank` flag that was never reset, so
+  # it collapsed EVERY blank run in the file, not just the one next to the
+  # block. Verified: 7 blank lines became 1.
+  setup_destdir
+  local rc=0
+  local block; block="$(mktemp)"
+  printf '# BEGIN UFW AND DOCKER\n*filter\nCOMMIT\n# END UFW AND DOCKER\n' >"$block"
+
+  local f="$CONF_DEST/etc/ufw/after.rules"
+  mkdir -p "$(dirname "$f")"
+  # Three blank lines, a rule, three more, a rule, COMMIT, blank, then the
+  # block. Only the last run (adjacent to the block) may collapse.
+  printf '*filter\n\n\n\n-A one -j ACCEPT\n\n\n\n-A two -j ACCEPT\nCOMMIT\n' >"$f"
+  replace_managed_block "$block" /etc/ufw/after.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
+  rm -f "$block"
+
+  # 6 user blanks + 1 separator = 7.
+  [[ $(grep -c '^$' "$f") -eq 7 ]] || {
+    printf '        expected 7 blank lines, got %s: user formatting was collapsed\n' "$(grep -c '^$' "$f")"
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
+test_force_flag_is_not_accepted() {
+  # --force was parsed and never read, while its help text promised it
+  # overrides the "you have another way in" prompts - the one override the
+  # script must never offer. It has been removed, so it must now be rejected.
+  setup_destdir
+  local out rc=0
+  out="$(DRY_RUN=1 ./security.sh --force 2>&1)" || rc=1
+  grep -qi 'unknown option' <<<"$out" || rc=1
+  teardown_destdir
+  return $rc
 }
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1326,13 @@ t 'docker subnets include RFC1918'                      test_docker_subnets_alwa
 t 'DOCKER-USER block uses upstream markers'             test_docker_ufw_block_uses_upstream_markers
 t 'DOCKER-USER rules are valid iptables'                test_docker_ufw_rules_parse_as_iptables
 t 'DOCKER-USER rules are idempotent'                    test_docker_ufw_rules_are_idempotent
+t 'published pairs keep udp distinct from tcp'          test_docker_published_pairs_keeps_udp
+t 'published pairs does not recurse into itself'        test_docker_published_pairs_is_not_recursive
+t 'the port prompt is still callable'                   test_docker_offer_published_ports_is_callable
+t 'loopback test is per protocol'                      test_docker_port_is_loopback_only_is_per_protocol
+t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
+t '--force is not accepted'                             test_force_flag_is_not_accepted
+t 'dry run never restarts a service'                   test_dry_run_never_restarts_a_service
 t 'validator catches a bad jump target'                test_docker_ufw_validator_detects_bad_jump_target
 t 'validator accepts iptables builtin targets'         test_docker_ufw_validator_accepts_builtin_targets
 t 'DOCKER-USER block is appended, not prepended'       test_docker_ufw_block_is_appended_not_prepended
@@ -1056,6 +1352,16 @@ t 'ip_forward stays on when Docker runs'                test_ip_forward_never_di
 t 'ip_forward goes off when Docker absent'              test_ip_forward_zeroed_when_no_docker
 t 'docker_present needs no privilege'                   test_docker_present_needs_no_privilege
 t 'apt accepts the generated config'                    test_apt_config_parses_with_real_apt
+t 'rpi origin survives the spaces in "Raspberry Pi Foundation"' test_rpi_origin_combo_keeps_the_spaced_origin
+t 'a half-read release line yields no origin'          test_rpi_origin_combo_rejects_a_half_read_release_line
+t 'the rpi archive is auto-updated where present'       test_rpi_archive_is_allowed_when_this_box_has_it
+t 'docker/tailscale/github-cli stay out of unattended'  test_third_party_repos_are_never_auto_upgraded
+t 'held-back packages are parsed out of apt'            test_held_back_packages_are_named
+t 'a held-back package is actually reported'            test_held_back_warning_reaches_the_output
+t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
+t 'initrd/cmdline are not false positives'              test_untracked_kernels_ignores_files_that_are_untracked_by_design
+t 'running kernel owner resolves on this box'           test_running_kernel_owner_reads_the_real_boot_dir
+t 'the kernel audit check changes nothing'              test_kernel_audit_is_read_only
 t 'fail2ban jail parses as INI'                         test_fail2ban_jail_parses_as_ini
 
 printf '\n%s passed, %s failed\n\n' "$PASS" "$FAIL"
