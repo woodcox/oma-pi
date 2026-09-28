@@ -9,6 +9,8 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
   - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
   - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)
   - [Raspberry Pi hardening tips](https://raspberrytips.com/security-tips-raspberry-pi/)
+
+`security.sh` automates the hardening those three guides describe, if you would rather not do it by hand.
 - Internet connection
 - `sudo` privileges
 
@@ -18,6 +20,47 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
 curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | bash
 
 ```
+
+## Security hardening
+
+```bash
+git clone https://github.com/woodcox/oma-pi.git
+cd oma-pi
+
+./security.sh --dry-run     # read the plan, change nothing
+sudo ./security.sh           # do it
+```
+
+`security.sh` applies the advice from the three hardening guides linked under Requirements:
+sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
+security updates, AppArmor, kernel and network sysctls, and a file-integrity baseline.
+Add `--report` to save the resulting audit to `~/security-audit/`.
+
+```bash
+./security.sh --list                 # available tasks
+sudo ./security.sh ssh firewall      # just these two
+sudo ./security.sh --yes             # take the recommended defaults
+./test/security-test.sh              # 27 tests, no root needed
+```
+
+Some deliberate choices worth knowing before you run it:
+
+- **It will not lock you out.** Before disabling SSH passwords it looks for a
+  non-root account with an `authorized_keys` entry that `ssh-keygen` actually
+  accepts. An empty file, a truncated paste or a private key pasted in all look
+  like a key to a naive check, and the result is a headless Pi you cannot reach.
+  With no usable key it stops and asks. Every config is validated before its
+  service restarts, and rolled back if it fails.
+- **Docker ports are detected.** Published container ports bypass ufw through
+  the `DOCKER-USER` chain. The script identifies them via `docker ps`, offers
+  them to you by name, and warns that ufw does not cover them.
+- **`net.ipv4.ip_forward` is left alone** when Docker is installed, since the
+  container bridge needs it. There is a test that fails if that ever regresses.
+- **`AllowTcpForwarding` stays on**, because `config/shell/fns/ssh-port-forwarding`
+  depends on it.
+- **Wi-Fi and Bluetooth are not disabled.** That needs a `/boot/config.txt`
+  dtoverlay and a reboot, and getting it wrong drops the box off the network you
+  are managing it over. The exact lines are printed at the end of a run.
 
 ## What it sets up
 
