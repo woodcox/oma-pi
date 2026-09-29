@@ -31,6 +31,22 @@ install_packages() {
   section "Installing Debian packages..."
   sudo apt install -y "${core_pkgs[@]}"
 
+  # nnn is the interactive file manager. It reads NNN_EDITOR, which
+  # config/shell/envs points at $EDITOR.
+  #
+  # Not in core_pkgs: nnn ships in Debian's main but in Ubuntu's universe on
+  # every series, and this installer runs on both. A stock Ubuntu server image
+  # does not enable universe, so an unconditional `apt install nnn` there dies
+  # with "Unable to locate package" and, under `set -e`, takes every remaining
+  # install step down with it. Check it is actually a candidate first, and say
+  # so plainly rather than failing the whole run over a file manager.
+  if apt-cache show nnn >/dev/null 2>&1; then
+    sudo apt install -y nnn
+  else
+    echo "Skipping nnn: not available in the enabled apt components."
+    echo "  On Ubuntu, enable universe with: sudo add-apt-repository universe"
+  fi
+
   # eza (from deb.gierens.de)
   if ! command -v eza &>/dev/null; then
     section "Installing eza..."

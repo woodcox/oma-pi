@@ -1,6 +1,9 @@
-export EDITOR="hx"
+export EDITOR="msedit"
 export PATH="$PATH:$HOME/.local/bin"
 export SUDO_EDITOR="$EDITOR"
 export BAT_THEME=ansi
 export MANROFFOPT="-c"
 export PATH="$HOME/.deno/bin:$PATH"
+# nnn opens files with NNN_EDITOR, falling back to $EDITOR on its own. Named
+# explicitly so it tracks $EDITOR rather than a second hardcoded editor.
+export NNN_EDITOR="$EDITOR"

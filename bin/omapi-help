@@ -51,7 +51,6 @@ page_commands() {
   cmd "omapi-refresh" "Reinstall Oma-Pi with initial configs"
   cmd "omapi-setup"   "Set git name, email and GitHub CLI auth"
   cmd "omapi-ssh"     "Add SSH key for remote access"
-  cmd "omapi-theme"   "Switch Helix editor theme"
 
   section "AI Tools"
   cmd "c"   "opencode"
@@ -89,8 +88,9 @@ page_commands() {
   cmd "git-id"                       "Set global git user.name and user.email"
 
   section "File & Navigation"
+  cmd "nnn"  "file manager (nnn)"
   cmd "ff"  "fzf fuzzy finder"
-  cmd "eff"  "fzf fuzzy finder in editor (Helix)"
+  cmd "eff"  "fzf fuzzy finder in editor (MS Edit)"
   cmd "cd"  "zoxide (smart cd)"
   cmd ".."  "cd .."
   cmd "..."  "cd ../.."
@@ -162,31 +162,6 @@ page_tmux() {
   hotkey "Prefix :"   "Open command prompt"
 }
 
-page_helix() {
-  clear
-  echo ""
-  header "Helix Reference"
-
-  section "Navigation"
-  hotkey "Space"         "Show command options"
-  hotkey "Space Space"   "Open file via fuzzy search"
-  hotkey "Space E"       "Toggle file sidebar"
-  hotkey "Space G G"     "Show git controls"
-  hotkey "Space S G"     "Search file content"
-  hotkey "Ctrl+W W"      "Jump between sidebar and editor"
-  hotkey "Ctrl+←/→"      "Resize sidebar"
-  hotkey "Shift+H / L"   "Left / right file tab"
-  hotkey "Space B D"     "Close file tab"
-
-  section "Sidebar"
-  hotkey "A"       "New file in parent dir"
-  hotkey "Shift+A" "New subdirectory"
-  hotkey "D"       "Delete file/dir"
-  hotkey "M"       "Move file/dir"
-  hotkey "R"       "Rename file/dir"
-  hotkey "?"       "Show all sidebar commands"
-}
-
 page_functions() {
   clear
   echo ""
@@ -235,14 +210,12 @@ while true; do
     "Commands & Aliases" \
     "Functions" \
     "Tmux Reference" \
-    "Helix Reference" \
     "Quit")
 
   case "$CHOICE" in
     "Commands & Aliases") page_commands ;;
     "Functions")          page_functions ;;
     "Tmux Reference")     page_tmux     ;;
-    "Helix Reference")    page_helix    ;;
     "Quit"|"")            clear; exit 0 ;;
   esac
 
