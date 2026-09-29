@@ -933,6 +933,47 @@ OUT
   return $rc
 }
 
+test_audit_output_mentions_rc_packages_and_the_purge() {
+  # The previous test only exercised removed_config_kernel_packages, so the
+  # block in audit() that prints the warning and builds the purge command was
+  # never executed by anything. It could have been deleted outright and the
+  # suite would still have been green. This drives audit() itself and checks
+  # the two things it emits.
+  setup_destdir
+  local rc=0 out
+  stub have
+  have() { [[ $1 == dpkg ]] && return 0; return 1; }
+  stub dpkg
+  dpkg() {
+    printf '%s\n' \
+      'ii  linux-image-6.12.109+rpt-rpi-2712  1:6.12.109-1+rpt1' \
+      'rc  linux-image-6.12.25+rpt-rpi-2712  1:6.12.25-1+rpt1' \
+      'rc  linux-image-6.6.51+rpt-rpi-v8      1:6.6.51-1+rpt3'
+  }
+  stub untracked_kernels
+  untracked_kernels() { return 0; }   # no /boot noise in this test
+  stub peek
+  peek() { return 1; }
+
+  out="$(audit 2>&1)"
+
+  grep -q '6.12.25' <<<"$out" || {
+    printf '        audit did not report the rc kernel package\n'
+    rc=1
+  }
+  # The purge line is the actionable half, and it names every rc package.
+  if ! grep -q 'apt-get purge' <<<"$out"; then
+    printf '        audit printed no purge command\n'
+    rc=1
+  fi
+  if ! grep 'apt-get purge' <<<"$out" | grep -q '6.6.51'; then
+    printf '        the purge command omitted a package that was reported\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1651,6 +1692,7 @@ t 'held-back packages are parsed out of apt'            test_held_back_packages_
 t 'held-back packages are parsed out of apt'          test_held_back_packages_are_named
 t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
 t 'audit reports rc-state kernel packages'            test_audit_reports_removed_config_kernel_packages
+t 'audit output names rc packages and the purge'      test_audit_output_mentions_rc_packages_and_the_purge
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
 t 'initrd/cmdline are not false positives'              test_untracked_kernels_ignores_files_that_are_untracked_by_design
 t 'running kernel owner resolves on this box'           test_running_kernel_owner_reads_the_real_boot_dir
