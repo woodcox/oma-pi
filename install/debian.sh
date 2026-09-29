@@ -22,6 +22,12 @@ install_packages() {
     # `format-drive`. Debian installs the bat binary as `batcat`, which
     # config/shell/aliases resolves for.
     bat parted exfatprogs
+    # atool backs the nnn nuke plugin, which lists most archives through it
+    # and falls back to bsdtar only when atool is absent. Neither is a
+    # dependency of anything else here, so without this a box would install
+    # nuke and then be unable to list anything with it. 136K, and perl is
+    # already required by build-essential below.
+    atool
   )
 
   section "Updating system packages..."
@@ -31,8 +37,8 @@ install_packages() {
   section "Installing Debian packages..."
   sudo apt install -y "${core_pkgs[@]}"
 
-  # nnn is the interactive file manager. It reads NNN_EDITOR, which
-  # config/shell/envs points at $EDITOR.
+  # nnn is the interactive file manager. Its -e opens text files with $VISUAL,
+  # which config/shell/envs pins to $EDITOR.
   #
   # Not in core_pkgs: nnn ships in Debian's main but in Ubuntu's universe on
   # every series, and this installer runs on both. A stock Ubuntu server image
@@ -45,6 +51,71 @@ install_packages() {
   else
     echo "Skipping nnn: not available in the enabled apt components."
     echo "  On Ubuntu, enable universe with: sudo add-apt-repository universe"
+  fi
+
+  # nnn plugins: nuke browses and extracts archives, the rest add key bindings.
+  # config/shell/fns/nnn points NNN_OPENER at nuke, so a box that skips this
+  # has an opener path that resolves to nothing and archives stop opening.
+  #
+  # Upstream ships plugins/getplugs, but it cannot run here: when a plugin
+  # file already differs it opens nvim/vimdiff or blocks on `read`, and an
+  # installer that prompts halfway through is worse than one that skips. Fetch
+  # the release tarball for the installed nnn and copy the directory directly
+  # instead, so a run stays deterministic and re-runnable.
+  #
+  # Keyed on nnn's version because the tarball is per-release and nnn only
+  # loads plugins matching the running binary. A box upgraded to a new nnn
+  # gets a marker mismatch and refetches. The marker sits beside plugins/
+  # rather than inside it, so the plugin directory holds only plugins.
+  if ! command -v nnn &>/dev/null; then
+    echo "Skipping nnn plugins: nnn is not installed."
+  else
+    local NNN_VERSION NNN_DIR NNN_MARKER
+    NNN_VERSION="$(nnn -V)"
+    NNN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nnn"
+    NNN_MARKER="$NNN_DIR/.plugins-version"
+
+    if [ -f "$NNN_MARKER" ] && [ "$(cat "$NNN_MARKER")" = "$NNN_VERSION" ]; then
+      echo "nnn plugins already at $NNN_VERSION, skipping"
+    else
+      section "Installing nnn plugins (v$NNN_VERSION)..."
+      # The archive unpacks to nnn-$VERSION, without the v that the release
+      # tag and the tarball filename both carry.
+      local nnn_tmp
+      nnn_tmp="$(mktemp -d)" || return 1
+      if curl -fsSL --connect-timeout 10 --max-time 120 \
+           "https://github.com/jarun/nnn/releases/download/v${NNN_VERSION}/nnn-v${NNN_VERSION}.tar.gz" \
+           -o "$nnn_tmp/nnn.tar.gz" \
+         && tar -xzf "$nnn_tmp/nnn.tar.gz" -C "$nnn_tmp" \
+         && [ -d "$nnn_tmp/nnn-${NNN_VERSION}/plugins" ]; then
+        # Back up whatever is there before overwriting. This path only runs
+        # when the marker disagrees, which is either an nnn upgrade or a
+        # hand-edited plugin, and `cp -Rf` would silently discard the second.
+        # getplugs backs up for the same reason, but then prompts on the
+        # differing files; a backup we cannot act on interactively is the most
+        # a non-interactive installer can do.
+        if [ -d "$NNN_DIR/plugins" ] && [ -n "$(ls -A "$NNN_DIR/plugins" 2>/dev/null)" ]; then
+          local nnn_backup="$NNN_DIR/plugins-$(date '+%Y%m%d%H%M').tar.gz"
+          if tar -czf "$nnn_backup" -C "$NNN_DIR" plugins 2>/dev/null; then
+            echo "✓ Existing plugins backed up to ${nnn_backup##*/}"
+          else
+            echo "Warning: could not back up existing plugins; continuing" >&2
+          fi
+        fi
+        mkdir -p "$NNN_DIR/plugins"
+        cp -Rf "$nnn_tmp/nnn-${NNN_VERSION}/plugins/." "$NNN_DIR/plugins/"
+        printf '%s\n' "$NNN_VERSION" > "$NNN_MARKER"
+        echo "✓ nnn plugins installed"
+      else
+        # Deliberately not fatal. nnn itself, and everything else in this
+        # function, still works; only NNN_OPENER is left dangling, which is
+        # a worse outcome than saying so and carrying on.
+        echo "Error: could not fetch nnn plugins for v$NNN_VERSION;" >&2
+        echo "  nnn still works, but archives will not open. Re-run with:" >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/jarun/nnn/master/plugins/getplugs | sh" >&2
+      fi
+      rm -rf "$nnn_tmp"
+    fi
   fi
 
   # eza (from deb.gierens.de)
@@ -283,15 +354,34 @@ install_optional_ai_tools() {
     return
   fi
 
-  if gum confirm "Install opencode?" </dev/tty; then
+  # A refresh should not re-ask about a tool this box already has, and none of
+  # these are cheap to repeat: the two deno installs are npm trees under
+  # ~/.deno, and the Hermes installer writes a set of shims into ~/.local/bin.
+  # Report what is present and ask only about what is actually missing, so
+  # every question that does get asked has a real decision behind it.
+  #
+  # claude-code is matched under both names on purpose. The deno install below
+  # puts it on PATH as `claude-code`, but the published npm package and every
+  # alias in config/shell/aliases call it `claude`, so a box provisioned either
+  # way should count as already having it.
+  if command -v opencode &>/dev/null; then
+    echo "✓ opencode already installed ($(command -v opencode))"
+  elif gum confirm "Install opencode?" </dev/tty; then
     deno_global_install opencode npm:opencode-ai
   fi
 
-  if gum confirm "Install claude-code?" </dev/tty; then
+  if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
+    echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
+  elif gum confirm "Install claude-code?" </dev/tty; then
     deno_global_install claude-code npm:@anthropic-ai/claude-code
   fi
 
-  if gum confirm "Install Hermes Agent?" </dev/tty; then
+  # The Hermes installer drops `hermes` plus `hermes-acp` and `hermes-agent`
+  # shims, so `hermes` alone is enough to detect it, with the other as a
+  # fallback in case a future release renames the entry point.
+  if command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null; then
+    echo "✓ Hermes Agent already installed ($(command -v hermes || command -v hermes-agent))"
+  elif gum confirm "Install Hermes Agent?" </dev/tty; then
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
   fi
 }

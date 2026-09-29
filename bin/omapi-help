@@ -55,7 +55,7 @@ page_commands() {
   section "AI Tools"
   cmd "c"   "opencode"
   cmd "cx"  "claude --permission-mode bypassPermissions"
-  cmd "cy"  "codex -s danger-full-access -a never"
+  cmd "ha"  "hermes"
 
   section "Docker"
   cmd "d"   "docker"

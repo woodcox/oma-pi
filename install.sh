@@ -138,10 +138,9 @@ patch_shell_config() {
   if [ -f "$SHELL_ENVS" ]; then
     ensure_trailing_newline "$SHELL_ENVS"
 
-    # Point EDITOR at MS Edit. Matches the nvim line it replaces, and the hx
-    # one, so a box last set up with either picks this up on refresh.
-    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' \
-           -e 's/^export EDITOR="hx"$/export EDITOR="msedit"/' "$SHELL_ENVS"
+    # Point EDITOR at MS Edit. Matches the nvim line it replaces, so a box
+    # last set up with nvim picks this up on refresh.
+    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' "$SHELL_ENVS"
 
     # Add tool PATH entries if not already present
     grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
@@ -250,17 +249,28 @@ install_fresh_binary() {
   # Unlike the .deb assets, the tarballs carry no version in the filename, so
   # the name is fixed apart from the architecture.
   subdir="fresh-editor-${arch}-unknown-linux-musl"
-  asset="${subdir}.tar.xz"
+
+  # Fresh publishes the same target triple as both .tar.xz and .tar.gz. tar -xJf
+  # shells out to xz, so on a box that never installed xz-utils the extraction
+  # died after the download had already succeeded, and nothing in core_pkgs
+  # requires xz. Pick the gzip asset when xz is missing; the payload is the
+  # same static binary either way.
+  if command -v xz &>/dev/null; then
+    ext="tar.xz"
+  else
+    ext="tar.gz"
+  fi
+  asset="${subdir}.${ext}"
   tmpdir="$(mktemp -d)"
 
-  curl -fL "https://github.com/sinelaw/fresh/releases/download/v${version}/${asset}" -o "$tmpdir/fresh.tar.xz" || {
+  curl -fL "https://github.com/sinelaw/fresh/releases/download/v${version}/${asset}" -o "$tmpdir/fresh.${ext}" || {
     echo "Error: could not download Fresh ${version} from ${asset}" >&2
     rm -rf "$tmpdir"
     return 1
   }
   # The binary sits one level down inside a directory named after the target
   # triple, so pull just it rather than unpacking ~40MB of icons next to it.
-  tar -xJf "$tmpdir/fresh.tar.xz" -C "$tmpdir" --strip-components=1 "${subdir}/fresh" || {
+  tar -xf "$tmpdir/fresh.${ext}" -C "$tmpdir" --strip-components=1 "${subdir}/fresh" || {
     echo "Error: could not extract ${asset}" >&2
     rm -rf "$tmpdir"
     return 1
@@ -288,6 +298,15 @@ install_optional_editors() {
 
   if ! command -v gum &>/dev/null; then
     echo "Skipping Fresh (gum not found)."
+    return
+  fi
+
+  # Do not ask about an editor the box already has, for the same reason the
+  # AI tools check first. install_fresh_binary still compares versions and
+  # upgrades in place when it is called, so this skips the question, not that
+  # path: a box that wants the newer release can remove the binary and re-run.
+  if command -v fresh &>/dev/null; then
+    echo "✓ Fresh already installed ($(fresh --version 2>/dev/null | awk 'NR==1{print $NF}'))"
     return
   fi
 
