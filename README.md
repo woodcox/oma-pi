@@ -14,6 +14,9 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
     `ListenStream=22`, the `Port` directive is ignored, and the script would
     report a port move that never happened. Those three releases are not
     supported.
+  - On Ubuntu, `nnn` lives in `universe`, which a stock server image does not
+    enable. The installer skips it and says so rather than failing the run.
+    Enable it with `sudo add-apt-repository universe` to get the file manager.
 - Harden the RPi / VM by following: 
   - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
   - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)
@@ -116,7 +119,9 @@ Some deliberate choices worth knowing before you run it:
 ## What it sets up
 
 - **Shell**: Bash with starship prompt, fzf, eza, zoxide
-- **Editors**: [Helix editor](https://helix-editor.com/) installed from official GitHub release binaries (`~/.local/bin/hx` + `~/.config/helix/runtime`)
+- **Files**: nnn as the interactive file manager
+- **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
+- **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
 - **Dev tools**: deno, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
 - **Optional AI tools**: opencode, claude-code, hermes-agent
 - **Networking**: SSH, tailscale
@@ -135,6 +140,7 @@ And you'll be offered to setup:
 - Root level user permissions for Docker
 - SSH public keys
 - Tailscale
+- Optional editor (Fresh)
 - Optional AI assistants (opencode, claude-code and hermes-agent)
 
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
@@ -146,9 +152,8 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
 
  - `omapi-setup`: Git name and email and github cli
  - `omapi-refresh`: Reinstall Oma-pi with initial configs
- - `omapi-ssh`: Add SSH key for remote access
- - `omapi-theme`: Switch helix editor themes
- - `omapi-harden`: One-time security hardening — run `./omapi-harden.sh --dry-run` first
+  - `omapi-ssh`: Add SSH key for remote access
+  - `omapi-harden`: One-time security hardening — run `./omapi-harden.sh --dry-run` first
 
  - [opencode](https://opencode.ai/): alias `c`
  - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
@@ -172,4 +177,5 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
       - `lsa` for listing including hidden files
       -  `lta` for a nested listing with hidden files
  - [Btop](https://github.com/aristocratos/btop)
+ - [nnn](https://github.com/jarun/nnn) file manager
  - [tldr](https://tldr.sh/)

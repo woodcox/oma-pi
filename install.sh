@@ -138,8 +138,10 @@ patch_shell_config() {
   if [ -f "$SHELL_ENVS" ]; then
     ensure_trailing_newline "$SHELL_ENVS"
 
-    # Replace nvim with helix as default editor
-    sed -i 's/^export EDITOR="nvim"$/export EDITOR="hx"/' "$SHELL_ENVS"
+    # Point EDITOR at MS Edit. Matches the nvim line it replaces, and the hx
+    # one, so a box last set up with either picks this up on refresh.
+    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' \
+           -e 's/^export EDITOR="hx"$/export EDITOR="msedit"/' "$SHELL_ENVS"
 
     # Add tool PATH entries if not already present
     grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
@@ -154,8 +156,8 @@ patch_shell_config() {
   echo "✓ Shell config patched"
 }
 
-install_helix_binary() {
-  section "Installing Helix from GitHub releases..."
+install_msedit_binary() {
+  section "Installing MS Edit from GitHub releases..."
 
   local arch
   local current_version
@@ -163,51 +165,129 @@ install_helix_binary() {
   local asset
   local tmpdir
 
-  arch="$(uname -m)"
+  # detect_arch already returns the names these release assets use, so no
+  # translation layer is needed here the way fastfetch and Helix needed one.
+  # It exits inside the command substitution for an unsupported machine, which
+  # leaves arch empty rather than failing, so reject that explicitly.
+  arch="$(detect_arch)"
   case "$arch" in
-    x86_64) arch="x86_64-linux" ;;
-    aarch64|arm64) arch="aarch64-linux" ;;
-    armv7l) arch="armv7-linux" ;;
+    aarch64|x86_64) ;;
     *)
-      echo "Unsupported architecture for Helix prebuilt binary: $arch"
+      echo "Error: unsupported architecture for the MS Edit package" >&2
       return 1
       ;;
   esac
 
-  version="$(github_latest_tag helix-editor/helix)" || {
-    echo "Error: could not determine the latest Helix release (GitHub API unreachable or rate limited)" >&2
+  version="$(github_latest_tag microsoft/edit)" || {
+    echo "Error: could not determine the latest MS Edit release (GitHub API unreachable or rate limited)" >&2
     return 1
   }
+  version="${version#v}"   # release tag is v2.0.0, asset filenames are not
 
-  # Check current version of helix
-  if command -v hx &>/dev/null; then
-    current_version="$(hx --version 2>/dev/null | awk 'NR==1{print $2}')"
+  if command -v msedit &>/dev/null; then
+    current_version="$(msedit --version 2>/dev/null | awk 'NR==1{print $NF}')"
     if [ "$current_version" = "$version" ]; then
-      echo "✓ Helix ${version} already installed"
+      echo "✓ MS Edit ${version} already installed"
       return 0
     fi
   fi
-  
-  asset="helix-${version}-${arch}.tar.xz"
+
+  asset="edit-${version}-${arch}-linux-gnu.tar.gz"
   tmpdir="$(mktemp -d)"
 
-  curl -fL "https://github.com/helix-editor/helix/releases/download/${version}/${asset}" -o "$tmpdir/helix.tar.xz"
-  tar -xJf "$tmpdir/helix.tar.xz" -C "$tmpdir"
+  curl -fL "https://github.com/microsoft/edit/releases/download/v${version}/${asset}" -o "$tmpdir/msedit.tar.gz"
+  tar -xzf "$tmpdir/msedit.tar.gz" -C "$tmpdir"
 
-  mkdir -p "$HOME/.local/bin" "$HOME/.config/helix"
-  install -m 0755 "$tmpdir/helix-${version}-${arch}/hx" "$HOME/.local/bin/hx"
-  rm -rf "$HOME/.config/helix/runtime"
-  cp -R "$tmpdir/helix-${version}-${arch}/runtime" "$HOME/.config/helix/runtime"
+  # The release ships a single bare binary named `edit`, which would shadow
+  # the `edit(1)` line editor every Debian install already has. Install it
+  # under the name the project uses for it, as its own README and Homebrew
+  # formula do.
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$tmpdir/edit" "$HOME/.local/bin/msedit"
 
   rm -rf "$tmpdir"
-  echo "✓ Helix ${version}"
+  echo "✓ MS Edit ${version} (as 'msedit')"
+}
+
+install_fresh_binary() {
+  section "Installing Fresh from GitHub releases..."
+
+  local arch
+  local current_version
+  local version
+  local asset
+  local tmpdir
+  local subdir
+
+  # Same reason as MS Edit: catch detect_arch's in-subshell exit, which would
+  # otherwise produce a download URL with an empty architecture in it.
+  arch="$(detect_arch)"
+  case "$arch" in
+    aarch64|x86_64) ;;
+    *)
+      echo "Error: unsupported architecture for the Fresh package" >&2
+      return 1
+      ;;
+  esac
+
+  version="$(github_latest_tag sinelaw/fresh)" || {
+    echo "Error: could not determine the latest Fresh release (GitHub API unreachable or rate limited)" >&2
+    return 1
+  }
+  version="${version#v}"
+
+  if command -v fresh &>/dev/null; then
+    current_version="$(fresh --version 2>/dev/null | awk 'NR==1{print $NF}')"
+    if [ "$current_version" = "$version" ]; then
+      echo "✓ Fresh ${version} already installed"
+      return 0
+    fi
+  fi
+
+  # The musl build is statically linked, so it carries no glibc floor. The gnu
+  # build is about the same size but needs glibc 2.30+, which is a floor this
+  # repo should not be quietly assuming given it supports bookworm and Ubuntu.
+  # Unlike the .deb assets, the tarballs carry no version in the filename, so
+  # the name is fixed apart from the architecture.
+  subdir="fresh-editor-${arch}-unknown-linux-musl"
+  asset="${subdir}.tar.xz"
+  tmpdir="$(mktemp -d)"
+
+  curl -fL "https://github.com/sinelaw/fresh/releases/download/v${version}/${asset}" -o "$tmpdir/fresh.tar.xz"
+  # The binary sits one level down inside a directory named after the target
+  # triple, so pull just it rather than unpacking ~40MB of icons next to it.
+  tar -xJf "$tmpdir/fresh.tar.xz" -C "$tmpdir" --strip-components=1 "${subdir}/fresh"
+
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$tmpdir/fresh" "$HOME/.local/bin/fresh"
+
+  rm -rf "$tmpdir"
+  echo "✓ Fresh ${version}"
+}
+
+# Only Fresh is offered rather than installed outright. It is young (Dec 2024)
+# and has no test coverage here, so a bad release taking the whole install run
+# down with it is a worse trade than asking. MS Edit does not get this
+# treatment: it is the default $EDITOR, and config/shell/aliases and the tds
+# tmux layout both invoke it by name, so a box that declined would have
+# $EDITOR pointing at nothing.
+install_optional_editors() {
+  section "Optional editors..."
+
+  if ! command -v gum &>/dev/null; then
+    echo "Skipping Fresh (gum not found)."
+    return
+  fi
+
+  if gum confirm "Install Fresh (terminal IDE)?" </dev/tty; then
+    install_fresh_binary || echo "Error: Fresh install failed, continuing" >&2
+  fi
 }
 
 install_configs() {
   section "Installing configs..."
   mkdir -p "$HOME/.config"
   cp -Rf "$INSTALLER_DIR/config/"* "$HOME/.config/"
-  echo "✓ Helix"
   echo "✓ Starship"
 
   if ! grep -q "if \[\[ -z \$TMUX \]\]" "$SHELL_RC" 2>/dev/null; then
@@ -235,7 +315,6 @@ install_bins() {
   echo "✓ omapi-ssh"
   echo "✓ omapi-refresh"
   echo "✓ omapi-setup"
-  echo "✓ omapi-theme"
   echo "✓ omapi-help"
 }
 
@@ -325,12 +404,16 @@ run_installation() {
   # Omadots
   install_omadots
 
-  # Helix binary + runtime
-  install_helix_binary
+  # MS Edit binary: the default $EDITOR
+  install_msedit_binary
 
   # Configs and bins
   install_configs
   install_bins
+
+  # Optional extras. Before patch_shell_config, which is the last step to
+  # touch ~/.config.
+  install_optional_editors
 
   # Patch last: every step above re-copies config/ over ~/.config, so running
   # this earlier would silently discard the EDITOR/alias edits.
