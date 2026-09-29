@@ -253,13 +253,25 @@ install_fresh_binary() {
   asset="${subdir}.tar.xz"
   tmpdir="$(mktemp -d)"
 
-  curl -fL "https://github.com/sinelaw/fresh/releases/download/v${version}/${asset}" -o "$tmpdir/fresh.tar.xz"
+  curl -fL "https://github.com/sinelaw/fresh/releases/download/v${version}/${asset}" -o "$tmpdir/fresh.tar.xz" || {
+    echo "Error: could not download Fresh ${version} from ${asset}" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
   # The binary sits one level down inside a directory named after the target
   # triple, so pull just it rather than unpacking ~40MB of icons next to it.
-  tar -xJf "$tmpdir/fresh.tar.xz" -C "$tmpdir" --strip-components=1 "${subdir}/fresh"
+  tar -xJf "$tmpdir/fresh.tar.xz" -C "$tmpdir" --strip-components=1 "${subdir}/fresh" || {
+    echo "Error: could not extract ${asset}" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
 
   mkdir -p "$HOME/.local/bin"
-  install -m 0755 "$tmpdir/fresh" "$HOME/.local/bin/fresh"
+  install -m 0755 "$tmpdir/fresh" "$HOME/.local/bin/fresh" || {
+    echo "Error: could not install fresh to $HOME/.local/bin" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
 
   rm -rf "$tmpdir"
   echo "✓ Fresh ${version}"
@@ -280,6 +292,9 @@ install_optional_editors() {
   fi
 
   if gum confirm "Install Fresh (terminal IDE)?" </dev/tty; then
+    # Called on the left of `||` because the failure is meant to be survivable.
+    # That also means `set -e` is disabled for the whole of install_fresh_binary,
+    # so the checks inside it are explicit rather than left to errexit.
     install_fresh_binary || echo "Error: Fresh install failed, continuing" >&2
   fi
 }
