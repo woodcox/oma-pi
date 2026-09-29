@@ -988,6 +988,69 @@ test_audit_output_mentions_rc_packages_and_the_purge() {
   return $rc
 }
 
+test_strictmodes_rejects_what_sshd_would_refuse() {
+  # sshd's StrictModes (on by default) silently ignores an authorized_keys
+  # that is group- or world-writable, or whose .ssh or home directory is.
+  # ssh-keygen -l does not care, so before this check a key sshd would refuse
+  # was indistinguishable from one it would accept - and PasswordAuthentication
+  # got turned off on the strength of a key that could not be used.
+  local rc=0
+  local t; t="$(mktemp -d)"
+  mkdir -p "$t/home/.ssh"
+  ssh-keygen -q -t ed25519 -N '' -f "$t/home/.ssh/id" -C t >/dev/null 2>&1
+  cp "$t/home/.ssh/id.pub" "$t/home/.ssh/authorized_keys" 2>/dev/null
+  local k="$t/home/.ssh/authorized_keys"
+
+  chmod 700 "$t/home" "$t/home/.ssh"
+  chmod 600 "$k"
+  key_strict_modes_ok "$k" || { printf '        a correctly-permissioned key was rejected\n'; rc=1; }
+
+  chmod 664 "$k"
+  if key_strict_modes_ok "$k"; then
+    printf '        authorized_keys at 664 was accepted; sshd would ignore it\n'
+    rc=1
+  fi
+  chmod 600 "$k"
+
+  chmod 777 "$t/home/.ssh"
+  if key_strict_modes_ok "$k"; then
+    printf '        a world-writable .ssh was accepted; sshd would ignore the key\n'
+    rc=1
+  fi
+  chmod 700 "$t/home/.ssh"
+
+  chmod 775 "$t/home"
+  if key_strict_modes_ok "$k"; then
+    printf '        a group-writable home was accepted; sshd would ignore the key\n'
+    rc=1
+  fi
+
+  rm -rf "$t"
+  return $rc
+}
+
+test_dry_run_updates_and_audit_do_not_die() {
+  # Regression, and the reason these had no coverage: `peek` returns 1 when it
+  # cannot get root, which is exactly the situation in a non-interactive dry
+  # run. Under set -e that propagated out of a command substitution and killed
+  # the script on the section header. Both were reproduced by hand as
+  # `--dry-run updates` and `--dry-run audit` exiting 1, and both passed the
+  # suite, because t() invokes each test as `if "$fn"`, which suspends set -e
+  # for the whole test body.
+  local rc=0 out r
+  out="$(bash "$SCRIPT" --dry-run updates </dev/null 2>&1)"; r=$?
+  if ((r != 0)); then
+    printf '        --dry-run updates exited %s\n' "$r"
+    rc=1
+  fi
+  out="$(bash "$SCRIPT" --dry-run audit </dev/null 2>&1)"; r=$?
+  if ((r != 0)); then
+    printf '        --dry-run audit exited %s\n' "$r"
+    rc=1
+  fi
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1706,6 +1769,8 @@ t 'held-back packages are parsed out of apt'          test_held_back_packages_ar
 t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
 t 'audit reports rc-state kernel packages'            test_audit_reports_removed_config_kernel_packages
 t 'audit output names rc packages and the purge'      test_audit_output_mentions_rc_packages_and_the_purge
+t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_what_sshd_would_refuse
+t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
 t 'initrd/cmdline are not false positives'              test_untracked_kernels_ignores_files_that_are_untracked_by_design
 t 'running kernel owner resolves on this box'           test_running_kernel_owner_reads_the_real_boot_dir

@@ -405,6 +405,14 @@ have_usable_key() {
   local found=1 f
   while IFS= read -r f; do
     [[ -n $f && -s $f ]] || continue
+    # sshd's StrictModes (on by default) silently IGNORES an authorized_keys
+    # whose own mode, or whose .ssh or home directory, is group- or
+    # world-writable. `ssh-keygen -l` does not care about any of that, so a
+    # key sshd would refuse is indistinguishable here from one it would
+    # accept - and the difference is the difference between "you can still get
+    # in" and "you cannot". Check the same way sshd does, so this cannot report
+    # a key is usable when it is not.
+    key_strict_modes_ok "$f" || continue
     # A private key is not a usable authorized_keys entry. ssh-keygen -l will
     # happily print a fingerprint for one, because it can read the public half
     # embedded in it, so it has to be rejected explicitly.
@@ -418,6 +426,23 @@ have_usable_key() {
     fi
   done <<<"$1"
   return $found
+}
+
+# True when sshd would not reject this path over file permissions.
+# Mirrors sshd's StrictModes check: the file, its .ssh directory and the
+# user's home directory must not be group- or world-writable. Read-only, and
+# every path involved is owned by the user being checked, so no privilege is
+# needed.
+key_strict_modes_ok() {
+  local f="$1" d
+  for d in "$f" "$(dirname "$f")" "$(dirname "$(dirname "$f")")"; do
+    [[ -e $d ]] || continue
+    # -A: group or other has any write bit.
+    if [[ -n $(find "$d" -maxdepth 0 -perm /022 2>/dev/null) ]]; then
+      return 1
+    fi
+  done
+  return 0
 }
 
 # Resolve the real home directory rather than assuming /home/$user, and honour
@@ -438,7 +463,21 @@ key_files_for_user() {
     local f
     while IFS= read -r f; do
       [[ -n $f ]] || continue
-      printf '%s\n' "$f" | sed "s|^%[hHd]|$home|; s|^%[uU]|$user|"
+      f="${f//\%h/$home}"
+      f="${f//\%H/$home}"
+      f="${f//\%d/$home}"
+      f="${f//\%u/$user}"
+      f="${f//\%U/$user}"
+      # `sshd -T` prints the *effective* setting, and sshd's own default is
+      # the relative `.ssh/authorized_keys` - it does not expand it to an
+      # absolute path. The sed above only fired when the token literally
+      # started with %h, so the default came back as a bare relative path and
+      # `have_usable_key` tested it against the current working directory.
+      # Every box therefore reported "no usable key" even with a perfectly
+      # good authorized_keys: a false negative that makes the lockout check
+      # meaningless and refuses --lockdown-ssh every time.
+      [[ $f == /* ]] || f="$home/$f"
+      printf '%s\n' "$f"
     done <<<"$auth"
   else
     printf '%s\n' "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"
@@ -1345,6 +1384,12 @@ configure_firewall() {
     if ((DRY_RUN)); then
       printf '  %s•%s would deny: ufw deny %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
     else
+      # `delete limit`, not `delete allow`: the rule added above is a
+      # `ufw limit` one, so `delete allow` matches nothing and leaves it in
+      # place. The `|| true` hid that, and a stale limit rule reappears the
+      # moment the deny is ever removed. Delete both forms so a box that
+      # predates this script is handled too.
+      run_root ufw delete limit "$ssh_port/tcp" || true
       run_root ufw delete allow "$ssh_port/tcp" || true
       run_root ufw deny "$ssh_port/tcp" comment "omapi: ssh over tailscale only"
       warn "port ${ssh_port} is now denied - make sure a tailscale session works"
@@ -1702,8 +1747,11 @@ apt_release_origin_combo() {
 # the package list needs no privilege.
 removed_config_kernel_packages() {
   have dpkg || return 0
+  # `|| true` because `dpkg -l 'linux-image-*'` exits 1 when the pattern
+  # matches nothing, which is the normal case on a non-Pi host. Under set -e
+  # that propagated out of the command substitution and aborted audit().
   dpkg -l 'linux-image-*' 2>/dev/null |
-    awk '$1 == "rc" { print $2, $3 }'
+    awk '$1 == "rc" { print $2, $3 }' || true
 }
 
 untracked_kernels() {
@@ -1797,7 +1845,11 @@ configure_updates() {
   if grep -rqs 'archive\.raspberrypi\.com' \
     /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     local rpi_combo
-    rpi_combo="$(apt_release_origin_combo "$(apt_release_line_for archive.raspberrypi.com)")"
+    # `|| rpi_combo=""` matters: without root, and with stdin not a tty, peek
+    # cannot run, the inner substitution returns non-zero, and under set -e
+    # this line aborts the whole task. Reproduced as
+    # `./omapi-harden.sh --dry-run updates` exiting 1 on the section header.
+    rpi_combo="$(apt_release_origin_combo "$(apt_release_line_for archive.raspberrypi.com)" || true)" || rpi_combo=""
     if [[ -n $rpi_combo ]]; then
       origins+=("\"${rpi_combo}\"")
     else
@@ -2067,8 +2119,12 @@ audit() {
   # `grep -c` prints a 0 and still exits 1 when nothing matches, so the
   # `|| echo` used to fire as well and emit a stray '?' under the count.
   if [[ -r /var/lib/dpkg/status ]]; then
+    # `|| upgradable=""` for the same reason: peek returns 1 when it cannot
+    # get root, pipefail propagates that, and set -e kills the script before
+    # the audit prints anything. Reproduced as
+    # `./omapi-harden.sh --dry-run audit` exiting 1 on the section header.
     upgradable="$(peek apt list --upgradable 2>/dev/null |
-      awk '/^[^ ]+\/[^ ]+ .*upgradable from/{n++} END{print n + 0}')"
+      awk '/^[^ ]+\/[^ ]+ .*upgradable from/{n++} END{print n + 0}' || true)"
     [[ -n $upgradable ]] || upgradable="unknown (needs root)"
   fi
 
