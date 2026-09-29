@@ -5,6 +5,15 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
 ## Requirements
 
 - Base Raspberry Pi OS Lite, Debian or Ubuntu server installation
+  - Tested on Raspberry Pi OS Lite / Debian 12 (bookworm).
+  - **Ubuntu 24.04 (noble) or newer.** Ubuntu moved sshd to systemd socket
+    activation in 22.10. On 24.04 and later a `Port` change in
+    `sshd_config` is read by a systemd generator, so `security.sh` can move
+    the port by reloading and restarting `ssh.socket`. On 22.10 through
+    23.10 there is no such generator: `ssh.socket` uses a fixed
+    `ListenStream=22`, the `Port` directive is ignored, and the script would
+    report a port move that never happened. Those three releases are not
+    supported.
 - Harden the RPi / VM by following: 
   - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
   - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)

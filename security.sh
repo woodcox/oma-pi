@@ -87,6 +87,11 @@ oma-pi security hardening
 Usage:
   security.sh [options] [task ...]
 
+Supported: Raspberry Pi OS Lite / Debian 12 (bookworm), or Ubuntu 24.04
+(noble) and newer. Ubuntu 22.10-23.10 are not supported: sshd there is
+socket-activated without a generator, so a `Port` change is ignored and
+this script would report a move that never happened. See the README.
+
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
