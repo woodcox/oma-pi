@@ -334,15 +334,34 @@ install_optional_ai_tools() {
     return
   fi
 
-  if gum confirm "Install opencode?" </dev/tty; then
+  # A refresh should not re-ask about a tool this box already has, and none of
+  # these are cheap to repeat: the two deno installs are npm trees under
+  # ~/.deno, and the Hermes installer writes a set of shims into ~/.local/bin.
+  # Report what is present and ask only about what is actually missing, so
+  # every question that does get asked has a real decision behind it.
+  #
+  # claude-code is matched under both names on purpose. The deno install below
+  # puts it on PATH as `claude-code`, but the published npm package and every
+  # alias in config/shell/aliases call it `claude`, so a box provisioned either
+  # way should count as already having it.
+  if command -v opencode &>/dev/null; then
+    echo "✓ opencode already installed ($(command -v opencode))"
+  elif gum confirm "Install opencode?" </dev/tty; then
     deno_global_install opencode npm:opencode-ai
   fi
 
-  if gum confirm "Install claude-code?" </dev/tty; then
+  if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
+    echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
+  elif gum confirm "Install claude-code?" </dev/tty; then
     deno_global_install claude-code npm:@anthropic-ai/claude-code
   fi
 
-  if gum confirm "Install Hermes Agent?" </dev/tty; then
+  # The Hermes installer drops `hermes` plus `hermes-acp` and `hermes-agent`
+  # shims, so `hermes` alone is enough to detect it, with the other as a
+  # fallback in case a future release renames the entry point.
+  if command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null; then
+    echo "✓ Hermes Agent already installed ($(command -v hermes || command -v hermes-agent))"
+  elif gum confirm "Install Hermes Agent?" </dev/tty; then
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
   fi
 }

@@ -291,6 +291,15 @@ install_optional_editors() {
     return
   fi
 
+  # Do not ask about an editor the box already has, for the same reason the
+  # AI tools check first. install_fresh_binary still compares versions and
+  # upgrades in place when it is called, so this skips the question, not that
+  # path: a box that wants the newer release can remove the binary and re-run.
+  if command -v fresh &>/dev/null; then
+    echo "✓ Fresh already installed ($(fresh --version 2>/dev/null | awk 'NR==1{print $NF}'))"
+    return
+  fi
+
   if gum confirm "Install Fresh (terminal IDE)?" </dev/tty; then
     # Called on the left of `||` because the failure is meant to be survivable.
     # That also means `set -e` is disabled for the whole of install_fresh_binary,
