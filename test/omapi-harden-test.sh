@@ -13,6 +13,9 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$TEST_DIR/omapi-harden.sh"
 PASS=0
 FAIL=0
+# Test functions already run, so t() can reject a duplicate registration
+# rather than silently running the same test twice and counting it twice.
+_SEEN_TESTS=()
 
 # shellcheck source=../omapi-harden.sh
 source "$SCRIPT"
@@ -115,6 +118,17 @@ t() {
     FAIL=$((FAIL + 1))
     return
   fi
+  # Registering the same function twice inflates the count and runs the test
+  # twice, which reads as more assurance than it is. That happened once here
+  # while repointing the dead registration above, so it is caught rather than
+  # left to be discovered by comparing the total against the function list.
+  if [[ " ${_SEEN_TESTS[*]-} " == *" $fn "* ]]; then
+    printf '  FAIL  %s\n' "$name"
+    printf '        duplicate registration: %s already ran\n' "$fn"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  _SEEN_TESTS+=("$fn")
   if "$fn"; then
     printf '  ok    %s\n' "$name"
     PASS=$((PASS + 1))
@@ -1688,7 +1702,6 @@ t 'rpi origin survives the spaces in "Raspberry Pi Foundation"' test_rpi_origin_
 t 'a half-read release line yields no origin'          test_rpi_origin_combo_rejects_a_half_read_release_line
 t 'the rpi archive is auto-updated where present'       test_rpi_archive_is_allowed_when_this_box_has_it
 t 'docker/tailscale/github-cli stay out of unattended'  test_third_party_repos_are_never_auto_upgraded
-t 'held-back packages are parsed out of apt'            test_held_back_packages_are_named
 t 'held-back packages are parsed out of apt'          test_held_back_packages_are_named
 t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
 t 'audit reports rc-state kernel packages'            test_audit_reports_removed_config_kernel_packages
