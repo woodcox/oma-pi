@@ -162,26 +162,6 @@ page_tmux() {
   hotkey "Prefix :"   "Open command prompt"
 }
 
-# MS Edit is mode-less and has no published keybinding table, so this is
-# deliberately short: the menus are the documentation, F10 opens them. The
-# Helix page this replaces was a cheat sheet for a modal editor, and there is
-# nothing to replace it with.
-page_editor() {
-  clear
-  echo ""
-  header "MS Edit Reference"
-
-  section "Basics"
-  hotkey "F10"            "Menus - the editor is mode-less, so this is the reference"
-  hotkey "msedit ."       "Open the current directory"
-  hotkey "msedit -g f:12" "Open a file at a line"
-  hotkey "eff"            "fzf fuzzy find a file and open it in \$EDITOR"
-
-  section "Also installed"
-  cmd  "nnn"   "File manager (opens files in \$EDITOR)"
-  cmd  "fresh" "Fresh terminal IDE (installed only if you opted in)"
-}
-
 page_functions() {
   clear
   echo ""
@@ -230,14 +210,12 @@ while true; do
     "Commands & Aliases" \
     "Functions" \
     "Tmux Reference" \
-    "Editor Reference" \
     "Quit")
 
   case "$CHOICE" in
     "Commands & Aliases") page_commands ;;
     "Functions")          page_functions ;;
     "Tmux Reference")     page_tmux     ;;
-    "Editor Reference")   page_editor   ;;
     "Quit"|"")            clear; exit 0 ;;
   esac
 
