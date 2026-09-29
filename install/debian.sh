@@ -47,6 +47,57 @@ install_packages() {
     echo "  On Ubuntu, enable universe with: sudo add-apt-repository universe"
   fi
 
+  # nnn plugins: nuke browses and extracts archives, the rest add key bindings.
+  # config/shell/fns/nnn points NNN_OPENER at nuke, so a box that skips this
+  # has an opener path that resolves to nothing and archives stop opening.
+  #
+  # Upstream ships plugins/getplugs, but it cannot run here: when a plugin
+  # file already differs it opens nvim/vimdiff or blocks on `read`, and an
+  # installer that prompts halfway through is worse than one that skips. Fetch
+  # the release tarball for the installed nnn and copy the directory directly
+  # instead, so a run stays deterministic and re-runnable.
+  #
+  # Keyed on nnn's version because the tarball is per-release and nnn only
+  # loads plugins matching the running binary. A box upgraded to a new nnn
+  # gets a marker mismatch and refetches. The marker sits beside plugins/
+  # rather than inside it, so the plugin directory holds only plugins.
+  if ! command -v nnn &>/dev/null; then
+    echo "Skipping nnn plugins: nnn is not installed."
+  else
+    local NNN_VERSION NNN_DIR NNN_MARKER
+    NNN_VERSION="$(nnn -V)"
+    NNN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nnn"
+    NNN_MARKER="$NNN_DIR/.plugins-version"
+
+    if [ -f "$NNN_MARKER" ] && [ "$(cat "$NNN_MARKER")" = "$NNN_VERSION" ]; then
+      echo "nnn plugins already at $NNN_VERSION, skipping"
+    else
+      section "Installing nnn plugins (v$NNN_VERSION)..."
+      # The archive unpacks to nnn-$VERSION, without the v that the release
+      # tag and the tarball filename both carry.
+      local nnn_tmp
+      nnn_tmp="$(mktemp -d)" || return 1
+      if curl -fsSL --connect-timeout 10 --max-time 120 \
+           "https://github.com/jarun/nnn/releases/download/v${NNN_VERSION}/nnn-v${NNN_VERSION}.tar.gz" \
+           -o "$nnn_tmp/nnn.tar.gz" \
+         && tar -xzf "$nnn_tmp/nnn.tar.gz" -C "$nnn_tmp" \
+         && [ -d "$nnn_tmp/nnn-${NNN_VERSION}/plugins" ]; then
+        mkdir -p "$NNN_DIR/plugins"
+        cp -Rf "$nnn_tmp/nnn-${NNN_VERSION}/plugins/." "$NNN_DIR/plugins/"
+        printf '%s\n' "$NNN_VERSION" > "$NNN_MARKER"
+        echo "✓ nnn plugins installed"
+      else
+        # Deliberately not fatal. nnn itself, and everything else in this
+        # function, still works; only NNN_OPENER is left dangling, which is
+        # a worse outcome than saying so and carrying on.
+        echo "Error: could not fetch nnn plugins for v$NNN_VERSION;" >&2
+        echo "  nnn still works, but archives will not open. Re-run with:" >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/jarun/nnn/master/plugins/getplugs | sh" >&2
+      fi
+      rm -rf "$nnn_tmp"
+    fi
+  fi
+
   # eza (from deb.gierens.de)
   if ! command -v eza &>/dev/null; then
     section "Installing eza..."
