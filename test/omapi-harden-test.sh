@@ -105,6 +105,16 @@ teardown_destdir() {
 # pattern is `local rc=0; <assertion> || rc=1; teardown_destdir; return $rc`.
 t() {
   local name="$1" fn="$2"
+  # A registration naming a function that does not exist is worse than a
+  # failing test: it reports FAIL forever and trains you to ignore red. One
+  # such line sat here pointing at a test that had been renamed, so the
+  # canonical case is worth an explicit message rather than a bare FAIL.
+  if ! declare -F "$fn" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "$name"
+    printf '        no such test function: %s (registered but never defined)\n' "$fn"
+    FAIL=$((FAIL + 1))
+    return
+  fi
   if "$fn"; then
     printf '  ok    %s\n' "$name"
     PASS=$((PASS + 1))
@@ -889,6 +899,40 @@ test_ssh_port_change_handles_socket_activated_units() {
   return $rc
 }
 
+test_audit_reports_removed_config_kernel_packages() {
+  # A kernel package dpkg removed but whose config files linger in state "rc"
+  # is invisible to `apt-get -s upgrade` by construction, so the held-back
+  # line can never report it. This is what made `dpkg -l linux-image-*` look
+  # like it disagreed with /boot.
+  setup_destdir
+  local rc=0 out
+  stub have
+  have() { [[ $1 == dpkg ]] && return 0; return 1; }
+  stub dpkg
+  dpkg() {
+    cat <<'OUT'
+Desired=Unknown/Install/Remove/Purge/Hold
+| Status=Not/Inst/Conf-files/Unpacked/halF-conf/Half-inst/trig-aWait/Trig-pend
+|/ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)
+||/ Name           Version      Architecture Description
++++-==============-============-============-=================
+ii  linux-image-6.12.109+rpt-rpi-2712  1:6.12.109-1+rpt1
+rc  linux-image-6.12.25+rpt-rpi-2712  1:6.12.25-1+rpt1
+rc  linux-image-6.6.51+rpt-rpi-v8      1:6.6.51-1+rpt3
+OUT
+  }
+  out="$(removed_config_kernel_packages)"
+  # Only rc, never ii.
+  grep -q 'linux-image-6.12.25' <<<"$out" || rc=1
+  grep -q 'linux-image-6.6.51'   <<<"$out" || rc=1
+  if grep -q '6.12.109' <<<"$out"; then
+    printf '        an installed (ii) kernel was reported as removed\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1604,7 +1648,9 @@ t 'a half-read release line yields no origin'          test_rpi_origin_combo_rej
 t 'the rpi archive is auto-updated where present'       test_rpi_archive_is_allowed_when_this_box_has_it
 t 'docker/tailscale/github-cli stay out of unattended'  test_third_party_repos_are_never_auto_upgraded
 t 'held-back packages are parsed out of apt'            test_held_back_packages_are_named
-t 'a held-back package is actually reported'            test_held_back_warning_reaches_the_output
+t 'held-back packages are parsed out of apt'          test_held_back_packages_are_named
+t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
+t 'audit reports rc-state kernel packages'            test_audit_reports_removed_config_kernel_packages
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
 t 'initrd/cmdline are not false positives'              test_untracked_kernels_ignores_files_that_are_untracked_by_design
 t 'running kernel owner resolves on this box'           test_running_kernel_owner_reads_the_real_boot_dir
