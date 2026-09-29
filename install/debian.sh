@@ -22,6 +22,12 @@ install_packages() {
     # `format-drive`. Debian installs the bat binary as `batcat`, which
     # config/shell/aliases resolves for.
     bat parted exfatprogs
+    # atool backs the nnn nuke plugin, which lists most archives through it
+    # and falls back to bsdtar only when atool is absent. Neither is a
+    # dependency of anything else here, so without this a box would install
+    # nuke and then be unable to list anything with it. 136K, and perl is
+    # already required by build-essential below.
+    atool
   )
 
   section "Updating system packages..."
@@ -31,8 +37,8 @@ install_packages() {
   section "Installing Debian packages..."
   sudo apt install -y "${core_pkgs[@]}"
 
-  # nnn is the interactive file manager. It reads NNN_EDITOR, which
-  # config/shell/envs points at $EDITOR.
+  # nnn is the interactive file manager. Its -e opens text files with $VISUAL,
+  # which config/shell/envs pins to $EDITOR.
   #
   # Not in core_pkgs: nnn ships in Debian's main but in Ubuntu's universe on
   # every series, and this installer runs on both. A stock Ubuntu server image
@@ -82,6 +88,20 @@ install_packages() {
            -o "$nnn_tmp/nnn.tar.gz" \
          && tar -xzf "$nnn_tmp/nnn.tar.gz" -C "$nnn_tmp" \
          && [ -d "$nnn_tmp/nnn-${NNN_VERSION}/plugins" ]; then
+        # Back up whatever is there before overwriting. This path only runs
+        # when the marker disagrees, which is either an nnn upgrade or a
+        # hand-edited plugin, and `cp -Rf` would silently discard the second.
+        # getplugs backs up for the same reason, but then prompts on the
+        # differing files; a backup we cannot act on interactively is the most
+        # a non-interactive installer can do.
+        if [ -d "$NNN_DIR/plugins" ] && [ -n "$(ls -A "$NNN_DIR/plugins" 2>/dev/null)" ]; then
+          local nnn_backup="$NNN_DIR/plugins-$(date '+%Y%m%d%H%M').tar.gz"
+          if tar -czf "$nnn_backup" -C "$NNN_DIR" plugins 2>/dev/null; then
+            echo "✓ Existing plugins backed up to ${nnn_backup##*/}"
+          else
+            echo "Warning: could not back up existing plugins; continuing" >&2
+          fi
+        fi
         mkdir -p "$NNN_DIR/plugins"
         cp -Rf "$nnn_tmp/nnn-${NNN_VERSION}/plugins/." "$NNN_DIR/plugins/"
         printf '%s\n' "$NNN_VERSION" > "$NNN_MARKER"

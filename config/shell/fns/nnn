@@ -4,7 +4,8 @@
 # install.sh:99 blanket-copies config/ over ~/.config, so a hand-written
 # ~/.config/shell/fns/nnn would be wiped on the next omapi-refresh.
 #
-#   -e  open text files in $NNN_EDITOR instead of probing terminal editors
+#   -c  mark NNN_OPENER as a CLI opener (nuke)
+#   -e  open text files in $VISUAL, which envs pins to $EDITOR
 #   -d  start in detail mode (permissions, size, mtime)
 #   -D  render directories in the terminal context colour
 #   -H  show dotfiles on launch
@@ -29,8 +30,13 @@ n() {
   # Installed by plugins/getplugs into ~/.config/nnn/plugins.
   export NNN_OPENER="${XDG_CONFIG_HOME:-$HOME/.config}/nnn/plugins/nuke"
 
-  # `command` keeps this from recursing if nnn itself is aliased to n.
-  command nnn -e -d -D -H -n "$@"
+  # -c is what makes the opener a CLI one. nuke lists archives through
+  # atool/bsdtar piped to $PAGER, so it needs a terminal on stdin and stdout;
+  # without -c nnn runs it detached and those views come out blank. nuke
+  # documents -c as overriding -e, which is fine: -e still covers the case
+  # where NNN_OPENER is missing and nnn falls back to opening text itself.
+  # `command` keeps this from recursing if nnn is ever aliased to n.
+  command nnn -c -e -d -D -H -n "$@"
 
   [ ! -f "$NNN_TMPFILE" ] || {
     . "$NNN_TMPFILE"

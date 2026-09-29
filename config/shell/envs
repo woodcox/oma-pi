@@ -4,6 +4,8 @@ export SUDO_EDITOR="$EDITOR"
 export BAT_THEME=ansi
 export MANROFFOPT="-c"
 export PATH="$HOME/.deno/bin:$PATH"
-# nnn opens files with NNN_EDITOR, falling back to $EDITOR on its own. Named
-# explicitly so it tracks $EDITOR rather than a second hardcoded editor.
-export NNN_EDITOR="$EDITOR"
+# nnn -e opens text files with $VISUAL, falling back to $EDITOR and then vi.
+# It has no NNN_EDITOR of its own, so an earlier NNN_EDITOR line here did
+# nothing at all. Pinning VISUAL to $EDITOR means a VISUAL inherited from
+# outside cannot send nnn to a different editor than every other tool uses.
+export VISUAL="$EDITOR"
