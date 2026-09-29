@@ -1696,6 +1696,16 @@ apt_release_origin_combo() {
 # untracked by design. Checking the whole directory would report all of them
 # on every single machine, and an audit that always has something to complain
 # about is an audit nobody reads.
+# Kernel packages dpkg has removed but whose config files linger in state "rc"
+# (removed, config-files remain). Invisible to `apt-get -s upgrade` by
+# construction, so the held-back check can never report them. Read-only, and
+# the package list needs no privilege.
+removed_config_kernel_packages() {
+  have dpkg || return 0
+  dpkg -l 'linux-image-*' 2>/dev/null |
+    awk '$1 == "rc" { print $2, $3 }'
+}
+
 untracked_kernels() {
   # dpkg -S only reads the package database. Called without peek's sudo
   # fallback on purpose: an audit must never be able to stop on a password
@@ -2137,6 +2147,20 @@ audit() {
       printf '  receiving security patches silently. Reinstall from apt to fix.\n'
     else
       printf '  every kernel image in /boot is owned by a package\n'
+    fi
+    # A third, quieter case: a kernel package that dpkg has removed but whose
+    # config files linger in "rc" (removed, config-files remain). apt considers
+    # it gone, so it never appears in `apt-get -s upgrade` and the held-back
+    # line above cannot see it either - yet the stale metadata is what makes
+    # `dpkg -l linux-image-*` disagree with /boot and look like a packaging
+    # bug. Harmless to security, worth a human knowing about.
+    local krc
+    krc="$(removed_config_kernel_packages)"
+    if [[ -n $krc ]]; then
+      printf '  removed kernel packages still holding config files (dpkg state rc):\n'
+      printf '%s\n' "$krc" | sed 's/^/    /'
+      printf '  cosmetic; clear with: sudo apt-get purge %s\n' \
+        "$(printf '%s' "$krc" | awk '{print $1}' | tr '\n' ' ')"
     fi
 
     printf '\n-- apparmor --\n'
