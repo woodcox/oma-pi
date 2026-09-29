@@ -157,6 +157,7 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
 
  - [opencode](https://opencode.ai/): alias `c`
  - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
+ - Hermes Agent: alias `ha=hermes-agent`
  - Docker: alias `d`
  - Lazydocker: alias `lzd`
  - Tmux alias: 
