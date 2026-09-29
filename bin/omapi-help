@@ -55,7 +55,7 @@ page_commands() {
   section "AI Tools"
   cmd "c"   "opencode"
   cmd "cx"  "claude --permission-mode bypassPermissions"
-  cmd "ha"  "hermes-agent"
+  cmd "ha"  "hermes"
 
   section "Docker"
   cmd "d"   "docker"
