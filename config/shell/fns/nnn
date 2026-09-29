@@ -1,0 +1,39 @@
+# nnn file manager launcher.
+# Vendored from jarun/nnn misc/quitcd/quitcd.bash_sh_zsh, then trimmed to the
+# flags this box actually wants. Kept in fns/ rather than ~/.bashrc because
+# install.sh:99 blanket-copies config/ over ~/.config, so a hand-written
+# ~/.config/shell/fns/nnn would be wiped on the next omapi-refresh.
+#
+#   -e  open text files in $NNN_EDITOR instead of probing terminal editors
+#   -d  start in detail mode (permissions, size, mtime)
+#   -D  render directories in the terminal context colour
+#   -H  show dotfiles on launch
+#   -n  keep type-to-navigate filtering always on
+n() {
+  # Block nesting of nnn in subshells.
+  [ "${NNNLVL:-0}" -eq 0 ] || {
+    echo "nnn is already running"
+    return
+  }
+
+  # nnn only performs the cd-on-quit dance when NNN_TMPFILE is set and
+  # exported. Drop the export and use the default path if you want to cd only
+  # on ^G rather than on every quit.
+  export NNN_TMPFILE="${XDG_CONFIG_HOME:-$HOME/.config}/nnn/.lastd"
+
+  # Dark background, 256 colours; the second half is the 8-colour fallback for
+  # terminals that cannot do 256.
+  export NNN_COLORS='#51e2d0c652d59f7b;36735673'
+
+  # nuke handles archives and media; the default opener cannot browse them.
+  # Installed by plugins/getplugs into ~/.config/nnn/plugins.
+  export NNN_OPENER="${XDG_CONFIG_HOME:-$HOME/.config}/nnn/plugins/nuke"
+
+  # `command` keeps this from recursing if nnn itself is aliased to n.
+  command nnn -e -d -D -H -n "$@"
+
+  [ ! -f "$NNN_TMPFILE" ] || {
+    . "$NNN_TMPFILE"
+    rm -f -- "$NNN_TMPFILE" > /dev/null
+  }
+}
