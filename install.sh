@@ -138,10 +138,10 @@ patch_shell_config() {
   if [ -f "$SHELL_ENVS" ]; then
     ensure_trailing_newline "$SHELL_ENVS"
 
-    # Point EDITOR at MS Edit. Matches the nvim line it replaces, and the hx
-    # one, so a box last set up with either picks this up on refresh.
-    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' \
-           -e 's/^export EDITOR="hx"$/export EDITOR="msedit"/' "$SHELL_ENVS"
+    # Point EDITOR at MS Edit. Matches the nvim line it replaces, so a box
+    # last set up with nvim picks this up on refresh. Helix is gone from the
+    # repo, so there is no longer an hx line to migrate.
+    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' "$SHELL_ENVS"
 
     # Add tool PATH entries if not already present
     grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
