@@ -8,7 +8,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
   - Tested on Raspberry Pi OS Lite / Debian 12 (bookworm).
   - **Ubuntu 24.04 (noble) or newer.** Ubuntu moved sshd to systemd socket
     activation in 22.10. On 24.04 and later a `Port` change in
-    `sshd_config` is read by a systemd generator, so `security.sh` can move
+    `sshd_config` is read by a systemd generator, so `omapi-harden.sh` can move
     the port by reloading and restarting `ssh.socket`. On 22.10 through
     23.10 there is no such generator: `ssh.socket` uses a fixed
     `ListenStream=22`, the `Port` directive is ignored, and the script would
@@ -19,7 +19,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
   - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)
   - [Raspberry Pi hardening tips](https://raspberrytips.com/security-tips-raspberry-pi/)
 
-`security.sh` automates the hardening those three guides describe, if you would rather not do it by hand.
+`omapi-harden.sh` automates the hardening those three guides describe, if you would rather not do it by hand.
 - Internet connection
 - `sudo` privileges
 
@@ -36,21 +36,21 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 git clone https://github.com/woodcox/oma-pi.git
 cd oma-pi
 
-./security.sh --dry-run     # read the plan, change nothing
-sudo ./security.sh           # do it
+./omapi-harden.sh --dry-run     # read the plan, change nothing
+sudo ./omapi-harden.sh           # do it
 ```
 
-`security.sh` applies the advice from the three hardening guides linked under Requirements:
+`omapi-harden.sh` applies the advice from the three hardening guides linked under Requirements:
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
 security updates, AppArmor, and kernel and network sysctls. File-integrity monitoring
 (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 
 ```bash
-./security.sh --list                 # available tasks
-sudo ./security.sh ssh firewall      # just these two
-sudo ./security.sh --yes             # take the recommended defaults
-./test/security-test.sh              # 69 tests, no root needed
+./omapi-harden.sh --list                 # available tasks
+sudo ./omapi-harden.sh ssh firewall      # just these two
+sudo ./omapi-harden.sh --yes             # take the recommended defaults
+./test/omapi-harden-test.sh              # 69 tests, no root needed
 ```
 
 Some deliberate choices worth knowing before you run it:
@@ -148,6 +148,7 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - `omapi-refresh`: Reinstall Oma-pi with initial configs
  - `omapi-ssh`: Add SSH key for remote access
  - `omapi-theme`: Switch helix editor themes
+ - `omapi-harden`: One-time security hardening — run `./omapi-harden.sh --dry-run` first
 
  - [opencode](https://opencode.ai/): alias `c`
  - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`

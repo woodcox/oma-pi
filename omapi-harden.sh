@@ -52,7 +52,12 @@ SELECTED=()
 # Prepended, not appended: sshd honours the FIRST value it reads, so a
 # matching directive further down sshd_config - or in an Include drop-in
 # above it - would silently win over one appended at the bottom.
-MANAGED_BEGIN="# BEGIN oma-pi hardening (security.sh) - do not edit between these lines"
+# Deliberately does NOT name this file. An earlier version read
+# "(security.sh)", and renaming the script would then have left an existing
+# managed block in sshd_config unmatched: the new run writes a second block
+# and never removes the first, leaving two conflicting copies of every
+# directive in the file.
+MANAGED_BEGIN="# BEGIN oma-pi hardening - do not edit between these lines"
 MANAGED_END="# END oma-pi hardening"
 
 # aideinit builds a file database over the whole filesystem. On an SD card
@@ -85,7 +90,7 @@ usage() {
 oma-pi security hardening
 
 Usage:
-  security.sh [options] [task ...]
+  omapi-harden.sh [options] [task ...]
 
 Supported: Raspberry Pi OS Lite / Debian 12 (bookworm), or Ubuntu 24.04
 (noble) and newer. Ubuntu 22.10-23.10 are not supported: sshd there is
@@ -115,9 +120,9 @@ Options:
   -h, --help        this text
 
 Examples:
-  ./security.sh --dry-run
-  sudo ./security.sh ssh firewall fail2ban
-  sudo ./security.sh --yes --report
+  ./omapi-harden.sh --dry-run
+  sudo ./omapi-harden.sh ssh firewall fail2ban
+  sudo ./omapi-harden.sh --yes --report
 EOF
 }
 
@@ -601,7 +606,7 @@ harden_ssh() {
     warn "no non-root account with a usable authorized_keys entry was found"
     # Default no, and deliberately not overridable by --yes/--force. Those
     # flags take *defaults*, and defaulting this one to yes means every
-    # `sudo ./security.sh --yes` run turns passwords off on a box with no
+    # `sudo ./omapi-harden.sh --yes` run turns passwords off on a box with no
     # verified way back in, which is the exact failure this whole check
     # exists to prevent. Continuing requires a deliberate interactive yes.
     if ! ask "switch SSH to key-only anyway (make sure you can reach this box another way)?" n; then
@@ -614,13 +619,13 @@ harden_ssh() {
 
   local new_port="$port" change_port=0
   if ((LOCKDOWN_SSH)); then
-    # Under `sudo ./security.sh`, id -un is root. AllowUsers root alongside
+    # Under `sudo ./omapi-harden.sh`, id -un is root. AllowUsers root alongside
     # PermitRootLogin no is a config sshd accepts and that locks out every
     # account, so the real invoking user has to be resolved, and root has to
     # be refused outright.
     local target_user="${SUDO_USER:-$(id -un)}"
     if [[ -z $target_user || $target_user == root ]]; then
-      warn "--lockdown-ssh needs a real non-root user; run it as 'sudo -u \$USER -E ./security.sh --lockdown-ssh' or from a root shell with SUDO_USER set"
+      warn "--lockdown-ssh needs a real non-root user; run it as 'sudo -u \$USER -E ./omapi-harden.sh --lockdown-ssh' or from a root shell with SUDO_USER set"
       warn "refusing to write AllowUsers root: it would lock out every account"
       LOCKDOWN_SSH=0
     elif ! have_usable_key "$(key_files_for_user "$target_user")"; then
@@ -671,7 +676,7 @@ harden_ssh() {
     cat <<EOF
 # Prepended because sshd takes the first value it reads, so the same
 # directive further down the file (or in an Include drop-in above this)
-# would silently override it. Re-run security.sh to change these; edits
+# would silently override it. Re-run omapi-harden.sh to change these; edits
 # inside the block are lost on the next run.
 PermitRootLogin no
 PubkeyAuthentication yes
@@ -1100,7 +1105,7 @@ install_docker_ufw_rules() {
   {
     printf '%s\n' "$DOCKER_UFW_BEGIN"
     cat <<'EOF'
-# Managed by oma-pi security.sh. Rules from chaifeng/ufw-docker.
+# Managed by oma-pi omapi-harden.sh. Rules from chaifeng/ufw-docker.
 #
 # Without these, Docker's own DNAT/ACCEPT rules sit ahead of ufw's and a
 # published port is reachable from the internet regardless of ufw.
@@ -1191,7 +1196,7 @@ install_docker_ufw6_rules() {
   {
     printf '%s\n' "$DOCKER_UFW_BEGIN"
     cat <<'EOF'
-# Managed by oma-pi security.sh. IPv6 twin of the after.rules block.
+# Managed by oma-pi omapi-harden.sh. IPv6 twin of the after.rules block.
 *filter
 :ufw6-user-forward - [0:0]
 :ufw6-docker-logging-deny - [0:0]
@@ -1495,9 +1500,9 @@ configure_docker_ufw() {
     # Three outcomes, not two: verified, malformed, and - when not running as
     # root - unverified, because iptables-restore needs privilege even for
     # --test. Only a malformed fragment blocks the reload. An unverified one
-    # is the normal case for `security.sh` run as a normal user, and refusing
+    # is the normal case for `omapi-harden.sh` run as a normal user, and refusing
     # to configure Docker at all there would be worse than proceeding with a
-    # loud warning; a real run of this script is `sudo ./security.sh`.
+    # loud warning; a real run of this script is `sudo ./omapi-harden.sh`.
     local vrc=0
     validate_docker_ufw_rules "${CONF_DEST}/etc/ufw/after.rules" || vrc=$?
     case $vrc in
@@ -1593,7 +1598,7 @@ configure_fail2ban() {
   fi
 
   write_conf "$jail" <<EOF
-# Managed by oma-pi security.sh. Re-run the script to change these.
+# Managed by oma-pi omapi-harden.sh. Re-run the script to change these.
 [DEFAULT]
 usedns = no
 banaction = ${banaction}
@@ -1808,7 +1813,7 @@ configure_updates() {
   # hardening script, because it is silent. So: the Periodic keys go here, and
   # the policy goes in the script's own file.
   write_conf /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-// Managed by oma-pi security.sh. Re-run the script to change these.
+// Managed by oma-pi omapi-harden.sh. Re-run the script to change these.
 // These two keys are what actually enable unattended-upgrades. Without them
 // apt.systemd.daily defaults to 0 and no security patch is ever applied.
 APT::Periodic::Update-Package-Lists "1";
@@ -1816,7 +1821,7 @@ APT::Periodic::Unattended-Upgrade "1";
 EOF
 
   write_conf /etc/apt/apt.conf.d/51omapi-origins <<EOF
-// Managed by oma-pi security.sh. Re-run the script to change these.
+// Managed by oma-pi omapi-harden.sh. Re-run the script to change these.
 Unattended-Upgrade::Allowed-Origins {
 ${origin_block}};
 
@@ -1831,7 +1836,7 @@ Acquire::Retries "3";
 EOF
 
   write_conf /etc/apt/apt.conf.d/52omapi-unattended-upgrades <<'EOF'
-// Managed by oma-pi security.sh. Re-run the script to change these.
+// Managed by oma-pi omapi-harden.sh. Re-run the script to change these.
 // No Automatic-Reboot: this box runs containers and serves a tailnet, and an
 // unattended reboot in the middle of a task is a worse outcome than a patch
 // that waits for the next maintenance window. Set it to "true" here if the
@@ -1922,7 +1927,7 @@ configure_sysctl() {
   fi
 
   write_conf /etc/sysctl.d/99-omapi-hardening.conf <<EOF
-# Managed by oma-pi security.sh. Re-run the script to change these.
+# Managed by oma-pi omapi-harden.sh. Re-run the script to change these.
 # Network redirects and source routes are off: a Pi is normally a plain
 # endpoint on one LAN, and none of these have a use here.
 net.ipv4.conf.all.send_redirects = 0
@@ -1964,7 +1969,7 @@ EOF
   # An SD card fills up, and then the box stops logging, stops patching and
   # starts failing in ways that look like hardware faults.
   write_conf /etc/systemd/journald.conf.d/omapi-hardening.conf <<'EOF'
-# Managed by oma-pi security.sh. Re-run the script to change these.
+# Managed by oma-pi omapi-harden.sh. Re-run the script to change these.
 [Journal]
 SystemMaxUse=200M
 RuntimeMaxUse=50M
@@ -2026,7 +2031,7 @@ configure_aide() {
   if [[ ! -e /etc/cron.daily/aide-check ]]; then
     write_conf /etc/cron.daily/aide-check <<'EOF'
 #!/bin/sh
-# Managed by oma-pi security.sh.
+# Managed by oma-pi omapi-harden.sh.
 # A non-zero exit is expected on any change, so cron mails the diff.
 exec /usr/bin/aide.wrapper --stdout
 EOF
