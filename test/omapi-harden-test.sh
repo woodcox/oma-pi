@@ -10,14 +10,14 @@
 set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$TEST_DIR/omapi-harden.sh"
+SCRIPT="$TEST_DIR/bin/omapi-harden.sh"
 PASS=0
 FAIL=0
 # Test functions already run, so t() can reject a duplicate registration
 # rather than silently running the same test twice and counting it twice.
 _SEEN_TESTS=()
 
-# shellcheck source=../omapi-harden.sh
+# shellcheck source=../bin/omapi-harden.sh
 source "$SCRIPT"
 
 # Snapshot the script's own functions, so t() can tell when a test has

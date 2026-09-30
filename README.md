@@ -39,9 +39,13 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 git clone https://github.com/woodcox/oma-pi.git
 cd oma-pi
 
-./omapi-harden.sh --dry-run     # read the plan, change nothing
-sudo ./omapi-harden.sh           # do it
+./bin/omapi-harden.sh --dry-run   # read the plan, change nothing
+./bin/omapi-harden.sh              # do it
 ```
+
+After `install.sh` these are on your `PATH` as `omapi-harden` — the installer
+copies `bin/*` into `~/.local/bin` — so the commands below work from anywhere,
+with no `./` and no `sudo`. The script asks for your password once itself.
 
 `omapi-harden.sh` applies the advice from the three hardening guides linked under Requirements:
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
@@ -50,9 +54,9 @@ security updates, AppArmor, and kernel and network sysctls. File-integrity monit
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 
 ```bash
-./omapi-harden.sh --list                 # available tasks
-sudo ./omapi-harden.sh ssh firewall      # just these two
-sudo ./omapi-harden.sh --yes             # take the recommended defaults
+omapi-harden --list               # available tasks
+omapi-harden ssh firewall        # just these two
+omapi-harden --yes               # take the recommended defaults
 ./test/omapi-harden-test.sh              # 77 tests, no root needed
 ```
 
@@ -153,7 +157,7 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - `omapi-setup`: Git name and email and github cli
  - `omapi-refresh`: Reinstall Oma-pi with initial configs
   - `omapi-ssh`: Add SSH key for remote access
-  - `omapi-harden`: One-time security hardening — run `./omapi-harden.sh --dry-run` first
+  - `omapi-harden`: One-time security hardening — run `omapi-harden --dry-run` first
 
  - [opencode](https://opencode.ai/): alias `c`
  - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
