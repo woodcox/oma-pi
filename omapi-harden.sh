@@ -607,10 +607,19 @@ install_hardening_packages() {
   step "installing: ${missing[*]}"
   run_root apt-get update -qq
   # apt pulling new things in mid-run is normal; the point of this script is
-  # to not fail halfway through a hardening pass because of it.
+  # to not fail halfway through a hardening pass because of it. But the
+  # success line used to be unconditional, so a failed install still printed
+  # "packages present" with a check mark - for packages that are not present.
+  # Later tasks re-guard on `have`, so continuing is right; claiming success
+  # is not.
+  local install_ok=1
   run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    "${missing[@]}" || warn "apt-get install returned non-zero, continuing with what is installed"
-  ok "packages present"
+    "${missing[@]}" || { warn "apt-get install returned non-zero, continuing with what is installed"; install_ok=0; }
+  if ((install_ok)); then
+    ok "packages present"
+  else
+    warn "some packages are still missing; later tasks will skip anything that needs them"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -651,7 +660,11 @@ check_users() {
     warn "the default 'pi' account still exists"
     if ask "lock the 'pi' account (reversible, /home/pi is left untouched)?"; then
       run_root usermod -L -s /usr/sbin/nologin pi
-      ok "locked pi - undo with: sudo usermod -L -s /bin/bash pi && sudo passwd -u pi"
+      # -U, not -L. The undo message used to repeat the lock flag, so running
+      # it as printed left the password locked and only restored the shell -
+      # the opposite of undoing. It has to be the exact inverse of the line
+      # above: unlock the password AND put a real shell back.
+      ok "locked pi - undo with: sudo usermod -U -s /bin/bash pi"
     else
       skip "left the pi account alone"
     fi
@@ -920,6 +933,10 @@ EOF
 
   local target="${CONF_DEST}${conf}"
   local backup=""
+  # Backups of the sshd_config.d drop-ins, populated when they are rewritten
+  # and consumed by the rollback below. Declared here, not inside the rewrite
+  # block, because the rollback is outside it and would otherwise see nothing.
+  local dropin_backups=""
   if ((!DRY_RUN)) && [[ -f $target ]]; then
     backup="${target}.omapi-backup"
     cp -p "$target" "$backup"
@@ -980,6 +997,13 @@ EOF
     local dropin
     for dropin in "${CONF_DEST}"/etc/ssh/sshd_config.d/*.conf; do
       [[ -f $dropin ]] || continue
+      # Back the drop-in up before rewriting it. `backup` covers only the main
+      # file, so a failed `sshd -t` rolled the main config back and left the
+      # drop-ins modified - a config inconsistency that would only bite on the
+      # next sshd start, which is exactly the kind of thing that surfaces hours
+      # later as "ssh won't come back".
+      local dbak="${dropin}.omapi-backup"
+      cp -p "$dropin" "$dbak" 2>/dev/null && dropin_backups+="$dbak"$'\n'
       if awk '
         $0 ~ /^[[:space:]]*Port[[:space:]]+[0-9]+/ {
           line = $0
@@ -1021,6 +1045,13 @@ EOF
   fi
 
   if ! peek sshd -t -f "$conf" >/dev/null 2>&1; then
+    # Drop-ins first: they were rewritten before this validation, and the
+    # main file's rollback does not touch them.
+    local dbak
+    while read -r dbak; do
+      [[ -n $dbak && -f $dbak ]] || continue
+      cp -p "$dbak" "${dbak%.omapi-backup}" || warn "could not restore ${dbak%.omapi-backup}"
+    done <<<"${dropin_backups:-}"
     if [[ -n $backup ]]; then
       warn "sshd rejected the new config, rolling ${conf} back"
       peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"
@@ -1030,6 +1061,13 @@ EOF
     return 1
   fi
   ok "sshd accepts the new config"
+
+  # The config is good, so the drop-in backups have served their purpose.
+  # Leaving them behind would accumulate one file per drop-in on every run.
+  local dbak
+  while read -r dbak; do
+    [[ -n $dbak ]] && rm -f "$dbak"
+  done <<<"${dropin_backups:-}"
 
   if ((NO_RESTART)); then
     note "--no-restart: run 'sudo systemctl restart ssh' yourself when ready"
@@ -1941,7 +1979,12 @@ EOF
     return 0
   fi
 
-  if ! peek fail2ban-client -t >/dev/null 2>&1; then
+  # Capture the rejection output. It used to go to /dev/null, and the
+  # "show the error" line below re-ran `fail2ban-client -t` AFTER the rollback -
+  # so it validated the restored config, printed nothing, and the user never
+  # saw the error explaining what was wrong with the jail they needed to fix.
+  local f2b_err=""
+  if ! f2b_err="$(peek fail2ban-client -t 2>&1)"; then
     warn "fail2ban rejected the jail file, rolling ${jail} back"
     if ((had_prev)); then
       peek cp -p "$prev" "$jail" || true
@@ -1953,7 +1996,12 @@ EOF
       ok "no previous jail file existed, removed the rejected one"
     fi
     rm -f "$prev"
-    peek fail2ban-client -t 2>&1 | tail -3 >&2 || true
+    # Show the error from the run that actually failed, not a fresh -t against
+    # the restored config - which validates fine and tells the user nothing.
+    if [[ -n ${f2b_err//[[:space:]]/} ]]; then
+      note "fail2ban said:"
+      printf '%s\n' "$f2b_err" | tail -5 | sed 's/^/  /'
+    fi
     return 1
   fi
   [[ -n $prev ]] && rm -f "$prev"
