@@ -658,7 +658,25 @@ check_users() {
   # or hand-built image still can.
   if id pi &>/dev/null; then
     warn "the default 'pi' account still exists"
-    if ask "lock the 'pi' account (reversible, /home/pi is left untouched)?"; then
+    # Refuse to lock the last password-login account. `ask` defaults to yes,
+    # and a headless run - a pipe, cron, CI, or an `ssh host sudo ...` with no
+    # tty - takes that default, so on an image where `pi` is the ONLY account
+    # with a usable password this would lock the box with no way back in over
+    # SSH. The existing session survives, which is exactly why this is easy to
+    # miss until the next login fails.
+    local pi_would_be_last=1
+    local other_pw
+    while read -r other_pw; do
+      [[ -n $other_pw && $other_pw != pi ]] || continue
+      pi_would_be_last=0
+      break
+    done < <(peek awk -F: '($2 != "*" && $2 != "" && $1 != "pi" && $3 >= 1000 && $3 < 65534) {print $1}' /etc/passwd 2>/dev/null || true)
+
+    if ((pi_would_be_last)); then
+      warn "not locking 'pi': it is the only account with a usable password"
+      note "locking it would leave no password login at all; add another admin account first"
+      note "to lock it anyway once you have a key-based way in: sudo usermod -L -s /usr/sbin/nologin pi"
+    elif ask "lock the 'pi' account (reversible, /home/pi is left untouched)?"; then
       run_root usermod -L -s /usr/sbin/nologin pi
       # -U, not -L. The undo message used to repeat the lock flag, so running
       # it as printed left the password locked and only restored the shell -
@@ -1003,7 +1021,14 @@ EOF
       # next sshd start, which is exactly the kind of thing that surfaces hours
       # later as "ssh won't come back".
       local dbak="${dropin}.omapi-backup"
-      cp -p "$dropin" "$dbak" 2>/dev/null && dropin_backups+="$dbak"$'\n'
+      # Do not rewrite a file we could not back up. The sshd -t rollback
+      # restores from these backups, so rewriting without one leaves an
+      # unrestorable change on a file sshd reads.
+      if ! cp -p "$dropin" "$dbak" 2>/dev/null; then
+        warn "could not back up ${dropin}; leaving it untouched"
+        continue
+      fi
+      dropin_backups+="$dbak"$'\n'
       if awk '
         $0 ~ /^[[:space:]]*Port[[:space:]]+[0-9]+/ {
           line = $0
@@ -1070,7 +1095,16 @@ EOF
   done <<<"${dropin_backups:-}"
 
   if ((NO_RESTART)); then
-    note "--no-restart: run 'sudo systemctl restart ssh' yourself when ready"
+    if peek systemctl is-active --quiet ssh.socket; then
+      # The instruction has to name the unit that will actually take effect.
+      # On Ubuntu 22.10+ ssh.socket owns the port and a plain `restart ssh` is
+      # masked by it, so telling the user to run that would look like it worked
+      # and leave the staged change unapplied.
+      note "--no-restart: ssh.socket is active, so run:"
+      note "  sudo systemctl daemon-reload && sudo systemctl restart ssh.socket"
+    else
+      note "--no-restart: run 'sudo systemctl restart ssh' yourself when ready"
+    fi
     return 0
   fi
 
@@ -1599,6 +1633,20 @@ configure_firewall() {
     return 1
   fi
 
+  # Allow BEFORE deny, not after. ufw evaluates rules in order, and a
+  # `default deny` that lands before the SSH rule leaves a window in which
+  # new inbound connections are denied with nothing to permit them. On a box
+  # where ufw is ALREADY active that is a real reconnect lockout: the current
+  # session survives on ufw's ESTABLISHED rule, so it looks fine, and the next
+  # login is refused. Adding the permit first means the deny can never be the
+  # last thing standing between an arriving connection and a closed door.
+  if ((DRY_RUN)); then
+    printf '  %s•%s would allow: ufw limit %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
+  else
+    run_root ufw limit "$ssh_port/tcp"
+    ok "ssh rate-limited on port ${ssh_port}"
+  fi
+
   if ((DRY_RUN)); then
     note "would set: ufw default deny incoming / allow outgoing, logging on"
   else
@@ -1606,13 +1654,6 @@ configure_firewall() {
     run_root ufw default allow outgoing
     run_root ufw logging on
     ok "default policies set (incoming denied, outgoing allowed, logging on)"
-  fi
-
-  if ((DRY_RUN)); then
-    printf '  %s•%s would allow: ufw limit %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
-  else
-    run_root ufw limit "$ssh_port/tcp"
-    ok "ssh rate-limited on port ${ssh_port}"
   fi
 
   # Tailscale's interface is not a public interface, but ufw still counts
@@ -1786,9 +1827,19 @@ docker_offer_published_ports() {
         ok "${name}: container port ${cport}/${proto} reachable from the network"
       fi
     else
-      warn "${name} publishes ${cport}/${proto} on all interfaces and is now BLOCKED"
-      note "if something should reach it: sudo ufw route allow proto ${proto} from any to any port ${cport}"
-      note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+      if ((DRY_RUN)); then
+        # Past tense here is a lie in a dry run: nothing is written and no
+        # reload happens, so no port is actually blocked. The plan is the whole
+        # point of a dry run, and it should not claim an outcome that has not
+        # occurred.
+        note "${name} publishes ${cport}/${proto} on all interfaces and WOULD BE BLOCKED"
+        note "  to let it through: sudo ufw route allow proto ${proto} from any to any port ${cport}"
+        note "  or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+      else
+        warn "${name} publishes ${cport}/${proto} on all interfaces and is now BLOCKED"
+        note "if something should reach it: sudo ufw route allow proto ${proto} from any to any port ${cport}"
+        note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+      fi
     fi
   done 3< <(docker_published_pairs)
 }
@@ -1806,10 +1857,20 @@ configure_docker_ufw() {
   # Snapshot BEFORE anything is written. Taking it after the install would
   # back up the file we are trying to protect against, so a failed reload
   # would "restore" the broken rules and leave ufw just as dead.
-  local rules_backup=""
+  #
+  # after6.rules needs the same protection. It is written in the same pass and
+  # reloaded in the same `ufw reload`, but it previously had no snapshot, no
+  # validation and no rollback - so a bad v6 block would survive on disk and
+  # break ufw's own boot-time restore on every boot after that, which is the
+  # "no firewall at all" outcome rather than a slightly wrong one.
+  local rules_backup="" rules6_backup=""
   if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after.rules ]]; then
     rules_backup="$(mktemp)"
     cp -p "${CONF_DEST}/etc/ufw/after.rules" "$rules_backup" || rules_backup=""
+  fi
+  if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after6.rules ]]; then
+    rules6_backup="$(mktemp)"
+    cp -p "${CONF_DEST}/etc/ufw/after6.rules" "$rules6_backup" || rules6_backup=""
   fi
 
   # Restoring puts the pre-change file back and reloads, so it is used both
@@ -1818,8 +1879,11 @@ configure_docker_ufw() {
     if [[ -n $rules_backup ]]; then
       run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || warn "could not restore after.rules from the backup; ufw may fail to reload"
     fi
-    rm -f "$rules_backup"
-    rules_backup=""
+    if [[ -n ${rules6_backup:-} ]]; then
+      run_root cp -p "$rules6_backup" "${CONF_DEST}/etc/ufw/after6.rules" || warn "could not restore after6.rules from the backup; ufw may fail to reload"
+    fi
+    rm -f "$rules_backup" ${rules6_backup:-}
+    rules_backup="" rules6_backup=""
   }
 
   # Checked through CONF_DEST so this works against a temporary tree, and so
@@ -1870,7 +1934,8 @@ configure_docker_ufw() {
 
     if run_root ufw reload; then
       ok "ufw reloaded with the DOCKER-USER chain in place"
-      rm -f "$rules_backup"
+      rm -f "$rules_backup" ${rules6_backup:-}
+      rules6_backup=""
     else
       warn "ufw reload failed; restoring the previous rules and reloading again"
       restore_rules
@@ -1987,15 +2052,24 @@ EOF
   if ! f2b_err="$(peek fail2ban-client -t 2>&1)"; then
     warn "fail2ban rejected the jail file, rolling ${jail} back"
     if ((had_prev)); then
-      peek cp -p "$prev" "$jail" || true
-      ok "previous jail file restored"
+      # The three lines here used to be: `cp ... || true`, then an
+      # unconditional "previous jail file restored", then `rm -f "$prev"`. If
+      # the copy failed that sequence lied about success, left the rejected
+      # jail in place, and then deleted the only good copy. Order matters
+      # here: restore, verify, and only discard the backup once it worked.
+      if peek cp -p "$prev" "$jail"; then
+        ok "previous jail file restored"
+        rm -f "$prev"
+      else
+        warn "could not restore ${jail} from the backup - the rejected jail is still in place"
+        note "the good copy is kept at ${prev}; fix the jail and re-run, or restore it by hand"
+      fi
     else
       # There was no previous file, so the correct rollback is to remove the
       # one we just wrote rather than leave fail2ban unable to start.
       rm -f "$jail"
       ok "no previous jail file existed, removed the rejected one"
     fi
-    rm -f "$prev"
     # Show the error from the run that actually failed, not a fresh -t against
     # the restored config - which validates fine and tells the user nothing.
     if [[ -n ${f2b_err//[[:space:]]/} ]]; then
@@ -2007,8 +2081,14 @@ EOF
   [[ -n $prev ]] && rm -f "$prev"
   ok "fail2ban config accepted (banaction ${banaction})"
 
-  run_root systemctl enable --now fail2ban
-  ok "fail2ban running"
+  # Loud on failure, like the equivalent enable in configure_updates. A bare
+  # `systemctl enable` here aborted the whole script under set -e with no
+  # message of our own, and took every later task with it.
+  if run_root systemctl enable --now fail2ban; then
+    ok "fail2ban running"
+  else
+    warn "could not enable fail2ban; brute-force protection is NOT active"
+  fi
   note "$(peek fail2ban-client status sshd 2>/dev/null | grep -i "currently banned" || true)"
 }
 
@@ -2088,10 +2168,17 @@ running_kernel_owner() {
 # configured repo carries and sat there indefinitely. A simulated upgrade is
 # the only way to see this without changing anything, hence -s.
 held_back_packages() {
+  # `|| true` is load-bearing, not decoration. `peek` returns 1 whenever it
+  # cannot get root, which is the normal case in a non-interactive dry run;
+  # under `set -euo pipefail` that made the pipeline non-zero, and the bare
+  # `kept_back="$(held_back_packages)"` at the call site then aborted the ENTIRE
+  # script - after the unattended-upgrades config had already been written and
+  # the service enabled, so apparmor, sysctl, aide and audit silently never
+  # ran. Same class as the fix at the rpi origin line, which this one missed.
   peek apt-get -s upgrade 2>/dev/null | awk '
     /^The following packages have been kept back:/ {f=1; next}
     f && /^[[:space:]]+[^[:space:]]/ {print $1}
-    f && !/^[[:space:]]/ {exit}'
+    f && !/^[[:space:]]/ {exit}' || true
 }
 
 configure_updates() {
