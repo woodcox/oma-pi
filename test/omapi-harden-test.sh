@@ -17,7 +17,7 @@ FAIL=0
 # rather than silently running the same test twice and counting it twice.
 _SEEN_TESTS=()
 
-# shellcheck source=../bin/omapi-harden.sh
+# shellcheck source=../bin/omapi-harden
 source "$SCRIPT"
 
 # Snapshot the script's own functions, so t() can tell when a test has
