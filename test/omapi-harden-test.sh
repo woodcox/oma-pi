@@ -13,9 +13,26 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$TEST_DIR/omapi-harden.sh"
 PASS=0
 FAIL=0
+# Test functions already run, so t() can reject a duplicate registration
+# rather than silently running the same test twice and counting it twice.
+_SEEN_TESTS=()
 
 # shellcheck source=../omapi-harden.sh
 source "$SCRIPT"
+
+# Snapshot the script's own functions, so t() can tell when a test has
+# redefined one without registering it. Built once, immediately after the
+# source, before any test has run.
+declare -A _ORIG_FN_SNAPSHOT=()
+_SCRIPT_FNS=()
+for _f in $(declare -F | awk '{print $3}'); do
+  case "$_f" in
+    test_*|t|assert_*|setup_destdir|teardown_destdir|stub|s$) continue ;;
+  esac
+  _SCRIPT_FNS+=("$_f")
+  _ORIG_FN_SNAPSHOT["$_f"]="$(declare -f "$_f" 2>/dev/null)"
+done
+unset _f
 
 setup_destdir() {
   OMAPI_SECURITY_DESTDIR="$(mktemp -d)"
@@ -105,12 +122,48 @@ teardown_destdir() {
 # pattern is `local rc=0; <assertion> || rc=1; teardown_destdir; return $rc`.
 t() {
   local name="$1" fn="$2"
+  # A registration naming a function that does not exist is worse than a
+  # failing test: it reports FAIL forever and trains you to ignore red. One
+  # such line sat here pointing at a test that had been renamed, so the
+  # canonical case is worth an explicit message rather than a bare FAIL.
+  if ! declare -F "$fn" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "$name"
+    printf '        no such test function: %s (registered but never defined)\n' "$fn"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  # Registering the same function twice inflates the count and runs the test
+  # twice, which reads as more assurance than it is. That happened once here
+  # while repointing the dead registration above, so it is caught rather than
+  # left to be discovered by comparing the total against the function list.
+  if [[ " ${_SEEN_TESTS[*]-} " == *" $fn "* ]]; then
+    printf '  FAIL  %s\n' "$name"
+    printf '        duplicate registration: %s already ran\n' "$fn"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  _SEEN_TESTS+=("$fn")
   if "$fn"; then
     printf '  ok    %s\n' "$name"
     PASS=$((PASS + 1))
   else
     printf '  FAIL  %s\n' "$name"
     FAIL=$((FAIL + 1))
+  fi
+  # Catch the leak this suite has been bitten by twice: a test that redefines
+  # one of the script's functions with a bare `name() { ... }` and no matching
+  # `stub name` leaves that definition in place for every later test, which
+  # then fail - or worse, silently pass - for reasons unrelated to what they
+  # claim to test. Both times it surfaced as a test reporting a value it had
+  # no way of producing.
+  local fn2 leaked=""
+  for fn2 in "${_SCRIPT_FNS[@]}"; do
+    if [[ ${_ORIG_FN_SNAPSHOT[$fn2]:-} != "$(declare -f "$fn2" 2>/dev/null)" ]]; then
+      leaked+=" $fn2"
+    fi
+  done
+  if [[ -n $leaked ]]; then
+    printf '        WARNING: %s left these redefined without a stub call:%s\n' "$fn" "$leaked"
   fi
 }
 
@@ -277,15 +330,6 @@ test_usable_key_rejects_real_private_key() {
   fi
   rm -rf "$d"
   teardown_destdir
-  return $rc
-}
-
-test_usable_key_rejects_private_key() {
-  local f; f="$(mktemp)"
-  printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nbm90cmVhbGtleQ==\n-----END OPENSSH PRIVATE KEY-----\n' >"$f"
-  ! have_usable_key "$f"
-  local rc=$?
-  rm -f "$f"
   return $rc
 }
 
@@ -600,33 +644,52 @@ test_dry_run_touches_nothing() {
 }
 
 test_dry_run_never_restarts_a_service() {
-  # --dry-run must not restart sshd or any other service. The old version of
-  # this test ran `bash -c true` and asserted its output was non-empty, which
-  # passed no matter what omapi-harden.sh did.
+  # Rewritten. The previous version asserted `[[ -n $r ]]` on a numeric exit
+  # status, which is true for every exit code, and harden_ssh returned at the
+  # key-only early-return before any restart path was reachable - so it could
+  # not have caught a restart even if one had happened. The systemctl stub now
+  # sets a flag and the test checks the flag was never set.
   setup_destdir
   local rc=0
-  # A systemctl stub that fails the test if it is ever asked to restart.
-  local _orig_systemctl
-  _orig_systemctl="$(declare -f systemctl 2>/dev/null || true)"
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "/home/x/.ssh/authorized_keys"; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'keyful\n'; }
+  stub ask
+  ask() { return 1; }
   stub systemctl
+  RESTART_SEEN=""
   systemctl() {
     case "$*" in
-      *restart*|*reload*|*try-restart*)
-        printf '        dry run attempted to restart a service: %s\n' "$*" >&2
+      *restart*|*reload*|*try-restart*|*enable*)
+        RESTART_SEEN="$*"
         return 97
         ;;
     esac
     return 0
   }
+  # harden_ssh dispatches service actions through `peek`, and setup_destdir
+  # replaces peek with a no-op stub - so without this forwarding, systemctl is
+  # never reached at all and this test could not fail however many restarts the
+  # code issued. CodeRabbit's point, and the test was decorative until now.
+  stub peek
+  peek() {
+    case "$1" in
+      systemctl) systemctl "${@:2}" ;;
+    esac
+    return 1
+  }
   DRY_RUN=1
   harden_ssh >/dev/null 2>&1
-  local r=$?
-  unset -f systemctl
-  [[ -n $_orig_systemctl ]] && eval "$_orig_systemctl"
   DRY_RUN=0
-  # 97 never surfaces from a function that ignores status, so assert the
-  # observable thing instead: nothing was written.
-  [[ -n $r ]] || rc=1
+  if [[ -n $RESTART_SEEN ]]; then
+    printf '        dry run issued a service action: %s\n' "$RESTART_SEEN"
+    rc=1
+  fi
   teardown_destdir
   return $rc
 }
@@ -760,10 +823,12 @@ test_lockdown_ssh_refuses_a_keyless_target_user() {
   local rc=0
   LOCKDOWN_SSH=1
   SUDO_USER="keyless-user"
+  stub have_usable_key
   have_usable_key() {
     [[ $1 == *keyless-user* ]] && return 1
     return 0   # the backdoor account has a key
   }
+  stub key_files_for_user
   key_files_for_user() { printf '%s\n' "/home/$1/.ssh/authorized_keys"; }
   # The backdoor check enumerates accounts through non_root_sudoer_with_key,
   # which reads /etc/passwd via peek. Stub the helper itself: leaving peek
@@ -771,6 +836,11 @@ test_lockdown_ssh_refuses_a_keyless_target_user() {
   # a key", and harden_ssh returns before the --lockdown-ssh guard is reached.
   stub non_root_sudoer_with_key
   non_root_sudoer_with_key() { printf '%s\n' "keyful-user"; }
+  # harden_ssh now refuses to do anything when it cannot determine the sshd
+  # port, and on a test host nothing can determine it. Pin it, or this test
+  # passes or fails on the guard rather than on the lockdown behaviour.
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
   stub ask
   ask() { return 1; }   # decline the port move and the key-only override
 
@@ -867,6 +937,10 @@ test_ssh_port_change_handles_socket_activated_units() {
   have() { [[ $1 == gum ]] && return 1; return 0; }
   stub gum
   gum() { printf '2222\n'; }
+  # Pinned for the same reason: harden_ssh bails out when the port cannot be
+  # determined, which on a test host is always.
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
 
   DRY_RUN=1
   local out
@@ -885,6 +959,362 @@ test_ssh_port_change_handles_socket_activated_units() {
     printf '        the dry run did not mention daemon-reload, so the port change would not apply\n'
     rc=1
   fi
+  teardown_destdir
+  return $rc
+}
+
+test_strictmodes_rejects_what_sshd_would_refuse() {
+  # sshd's StrictModes (on by default) silently ignores an authorized_keys
+  # that is group- or world-writable, or whose .ssh or home directory is.
+  # ssh-keygen -l does not care, so before this check a key sshd would refuse
+  # was indistinguishable from one it would accept - and PasswordAuthentication
+  # got turned off on the strength of a key that could not be used.
+  local rc=0
+  local t; t="$(mktemp -d)"
+  mkdir -p "$t/home/.ssh"
+  ssh-keygen -q -t ed25519 -N '' -f "$t/home/.ssh/id" -C t >/dev/null 2>&1
+  cp "$t/home/.ssh/id.pub" "$t/home/.ssh/authorized_keys" 2>/dev/null
+  local k="$t/home/.ssh/authorized_keys"
+
+  chmod 700 "$t/home" "$t/home/.ssh"
+  chmod 600 "$k"
+  key_strict_modes_ok "$k" || { printf '        a correctly-permissioned key was rejected\n'; rc=1; }
+
+  chmod 664 "$k"
+  if key_strict_modes_ok "$k"; then
+    printf '        authorized_keys at 664 was accepted; sshd would ignore it\n'
+    rc=1
+  fi
+  chmod 600 "$k"
+
+  chmod 777 "$t/home/.ssh"
+  if key_strict_modes_ok "$k"; then
+    printf '        a world-writable .ssh was accepted; sshd would ignore the key\n'
+    rc=1
+  fi
+  chmod 700 "$t/home/.ssh"
+
+  chmod 775 "$t/home"
+  if key_strict_modes_ok "$k"; then
+    printf '        a group-writable home was accepted; sshd would ignore the key\n'
+    rc=1
+  fi
+
+  rm -rf "$t"
+  return $rc
+}
+
+test_dry_run_updates_and_audit_do_not_die() {
+  # Regression, and the reason these had no coverage: `peek` returns 1 when it
+  # cannot get root, which is exactly the situation in a non-interactive dry
+  # run. Under set -e that propagated out of a command substitution and killed
+  # the script on the section header. Both were reproduced by hand as
+  # `--dry-run updates` and `--dry-run audit` exiting 1, and both passed the
+  # suite, because t() invokes each test as `if "$fn"`, which suspends set -e
+  # for the whole test body.
+  local rc=0 out r
+  out="$(bash "$SCRIPT" --dry-run updates </dev/null 2>&1)"; r=$?
+  if ((r != 0)); then
+    printf '        --dry-run updates exited %s\n' "$r"
+    rc=1
+  fi
+  out="$(bash "$SCRIPT" --dry-run audit </dev/null 2>&1)"; r=$?
+  if ((r != 0)); then
+    printf '        --dry-run audit exited %s\n' "$r"
+    rc=1
+  fi
+  return $rc
+}
+
+test_current_ssh_port_never_guesses() {
+  # The 20-30 "must be sshd" heuristic that used to live here matched Postfix
+  # on 25 on this very box before it ever reached sshd on 1199 - it would have
+  # had the firewall protecting the mail server. So no source is allowed to
+  # invent a port: when nothing authoritative answers, the function returns
+  # empty and fails, and each caller refuses to act.
+  local rc=0 out
+
+  # Nothing answers: ss finds no sshd, no config has a Port, sshd -T is dead.
+  # setup_destdir goes FIRST because it installs its own `peek` stub; calling
+  # `stub peek` before that would save the stub as the "original" and leave
+  # teardown restoring a stub rather than the real function, which poisons
+  # every later test. Its empty CONF_DEST tree is also what silences the
+  # config-file source - otherwise that read answers with this box's real port
+  # (1199), which is correct behaviour and makes this test meaningless.
+  setup_destdir
+  peek() { return 1; }
+  out="$(current_ssh_port 2>/dev/null || true)"
+  if [[ -n $out ]]; then
+    printf '        current_ssh_port invented the port %s when nothing could confirm it\n' "$out"
+    rc=1
+  fi
+
+  # A port on some OTHER service must never be mistaken for sshd.
+  peek() {
+    case "$*" in
+      *ss*) printf 'LISTEN 0 128 0.0.0.0:25 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:443 0.0.0.0:*\n' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  }
+  out="$(current_ssh_port 2>/dev/null || true)"
+  if [[ -n $out ]]; then
+    printf '        current_ssh_port reported %s for a socket that is not sshd\n' "$out"
+    rc=1
+  fi
+
+  teardown_destdir
+  return $rc
+}
+
+test_key_files_for_user_splits_multiple_paths() {
+  # Regression, and the worst bug CodeRabbit found on this PR. `sshd -T`
+  # prints every AuthorizedKeysFile space-separated on ONE line, so a
+  # `while read` over it produced a single value with both default paths glued
+  # together: "/home/u/.ssh/authorized_keys .ssh/authorized_keys2". Neither was
+  # ever checked, so the lockout check reported "no usable key" on a box with
+  # a perfectly good key in the first file - and the whole point of the check
+  # is to know whether you can get back in.
+  setup_destdir
+  local rc=0 out
+  stub getent
+  getent() { echo "x:x:1000:1000::/home/tester:/bin/bash"; return 0; }
+  stub peek
+  peek() {
+    case "$*" in
+      *sshd*) printf 'authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2\n' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  }
+  out="$(key_files_for_user tester)"
+  [[ $(wc -l <<<"$out") -eq 2 ]] || {
+    printf '        expected 2 paths, got %s: [%s]\n' "$(wc -l <<<"$out")" "$out"
+    rc=1
+  }
+  grep -qx '/home/tester/.ssh/authorized_keys'  <<<"$out" || rc=1
+  grep -qx '/home/tester/.ssh/authorized_keys2' <<<"$out" || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_key_files_expands_percent_U_to_the_numeric_uid() {
+  # %U is the numeric UID. It was expanded to the username, so
+  # `AuthorizedKeysFile .ssh/authorized_keys_%U` checked a username-suffixed
+  # file instead of the UID-suffixed one sshd actually reads.
+  setup_destdir
+  local rc=0
+  stub getent
+  getent() { echo "x:x:1000:1000::/home/tester:/bin/bash"; return 0; }
+  stub peek
+  peek() {
+    case "$*" in
+      *sshd*) printf 'authorizedkeysfile .ssh/authorized_keys_%%U\n' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  }
+  local out; out="$(key_files_for_user tester)"
+  grep -qx '/home/tester/.ssh/authorized_keys_1000' <<<"$out" || {
+    printf '        %%U did not expand to the uid: [%s]\n' "$out"
+    rc=1
+  }
+  # The exact-match above is the assertion. A substring check for the username
+  # is not: the username is legitimately part of the path, so it is always
+  # present whether or not %U was expanded wrongly. This version of the test
+  # failed against correct code for that reason.
+  teardown_destdir
+  return $rc
+}
+
+test_a_failing_awk_in_the_port_rewrite_is_not_silent() {
+  # GLM finding 3. A failure inside `awk && cat && rm` is exempt from set -e, so
+  # the Port rewrite used to fail silently: harden_ssh returned 0, printed
+  # "sshd accepts the new config", left two active `Port` lines and a stray
+  # .omapi-tmp, and warned about nothing. A config write that failed silently
+  # is the worst case there is here.
+  setup_destdir
+  local rc=0
+  stub current_ssh_port
+  current_ssh_port() { printf '2222\n'; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "/home/x/.ssh/authorized_keys"; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'keyful\n'; }
+  stub ask
+  ask() { return 1; }
+  # A failing awk: any call at all fails.
+  stub awk
+  awk() { return 3; }
+
+  mkdir -p "$CONF_DEST/etc/ssh"
+  printf 'Port 2222\nPermitRootLogin yes\n' >"$CONF_DEST/etc/ssh/sshd_config"
+
+  DRY_RUN=0
+  harden_ssh >/dev/null 2>&1
+  local hrc=$?
+  DRY_RUN=0
+
+  if ((hrc == 0)); then
+    printf '        harden_ssh reported success even though the Port rewrite failed\n'
+    rc=1
+  fi
+  # And no temp file left behind.
+  if [[ -n $(find "$CONF_DEST" -name '*.omapi-tmp' 2>/dev/null) ]]; then
+    printf '        a .omapi-tmp file was left behind after the failure\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_undetectable_ssh_port_leaves_the_firewall_untouched() {
+  # CodeRabbit finding, and the guard itself was mine - I added "not touching
+  # the firewall" but placed the check AFTER `ufw default deny incoming`. On a
+  # box where ufw was already active the script flipped the incoming policy to
+  # deny and then bailed, never adding the `ufw limit` rule for the SSH port.
+  # If that box relied on the broad allow policy, every new SSH connection was
+  # blocked while the script said it was not touching anything.
+  #
+  # Asserts the observable thing: no privileged call at all, so a reorder
+  # cannot reintroduce this without failing.
+  setup_destdir
+  local rc=0
+  stub current_ssh_port
+  current_ssh_port() { printf '\n'; return 1; }
+  stub docker_present
+  docker_present() { return 1; }
+  stub ask
+  ask() { return 1; }
+  local calls=""
+  stub run_root
+  run_root() { calls="$calls $* "; return 0; }
+
+  DRY_RUN=0
+  configure_firewall >/dev/null 2>&1
+  DRY_RUN=0
+
+  if [[ -n $calls ]]; then
+    printf '        the firewall was changed despite an undetectable ssh port: %s\n' "$calls"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_pi_is_not_locked_when_it_is_the_only_password_account() {
+  # Regression for a guard that did nothing at all. The first version read the
+  # password state from /etc/passwd field 2, which on every shadowed system is
+  # the literal "x" - so the filter matched EVERY account in the UID range,
+  # pi_would_be_last went to 0 the moment any normal user existed, and the
+  # guard never once prevented a lockout. It needs a fixture where another
+  # account exists but CANNOT log in with a password, and must still refuse.
+  #
+  # Reaching the pi block requires the passwordless list to be non-empty:
+  # check_users returns early at "no passwordless accounts" when it is empty.
+  # That is why an earlier hand-written probe of this guard appeared to fail -
+  # it never got past that branch.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  printf 'pi:x:1000::/home/pi:/bin/bash\nbob:x:1001::/home/bob:/bin/bash\n' >"$t/passwd"
+  # zed has an EMPTY shadow field, so the passwordless list is non-empty and
+  # execution continues to the pi block. bob's field 2 is "x" - the value that
+  # broke the old filter.
+  printf 'pi:!:19000:0:99999:7:::\nzed::19000:0:99999:7:::\nbob:x:19000:0:99999:7:::\n' >"$t/shadow"
+
+  stub peek
+  peek() {
+    local a=()
+    local c
+    for c in "$@"; do
+      case "$c" in
+        /etc/passwd) a+=("$t/passwd") ;;
+        /etc/shadow) a+=("$t/shadow") ;;
+        *) a+=("$c") ;;
+      esac
+    done
+    command "${a[@]}" 2>/dev/null
+  }
+  stub id
+  # `id pi` sets only $1. A stub keyed on $2 trips set -u when it is unset,
+  # which aborts check_users at that line - so match any argument instead.
+  # Must also answer `id -u`, which run_root calls to decide between exec'ing
+  # the command and going through priv. A stub that ignored it left the
+  # substitution empty, `[[ "" -eq 0 ]]` errored under set -e, and run_root
+  # aborted before recording anything - so the assertions saw no calls at all.
+  id() {
+    [[ $1 == -u ]] && { echo 1000; return 0; }
+    [[ " $* " == *" pi "* ]] && return 0
+    return 1
+  }
+  stub ask
+  ask() { return 0; }        # "yes" to every question, including locking pi
+  local calls=""
+  stub run_root
+  run_root() { calls="$calls $* "; return 0; }
+
+  check_users >/dev/null 2>&1
+
+  if grep -qE 'usermod .*([[:space:]])pi([[:space:]]|$)' <<<"$calls"; then
+    printf '        pi was locked even though bob cannot log in with a password\n'
+    rc=1
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_pi_is_locked_when_another_account_can_log_in() {
+  # The other half, without which the test above would also pass if the guard
+  # simply never locked anything. bob has a real crypt hash, so pi is not the
+  # last password account and locking it is safe.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  printf 'pi:x:1000::/home/pi:/bin/bash\nbob:x:1001::/home/bob:/bin/bash\n' >"$t/passwd"
+  printf 'pi:!:19000:0:99999:7:::\nzed::19000:0:99999:7:::\nbob:$6$abc$def:19000:0:99999:7:::\n' >"$t/shadow"
+
+  stub peek
+  peek() {
+    local a=()
+    local c
+    for c in "$@"; do
+      case "$c" in
+        /etc/passwd) a+=("$t/passwd") ;;
+        /etc/shadow) a+=("$t/shadow") ;;
+        *) a+=("$c") ;;
+      esac
+    done
+    command "${a[@]}" 2>/dev/null
+  }
+  stub id
+  # `id pi` sets only $1. A stub keyed on $2 trips set -u when it is unset,
+  # which aborts check_users at that line - so match any argument instead.
+  # Must also answer `id -u`, which run_root calls to decide between exec'ing
+  # the command and going through priv. A stub that ignored it left the
+  # substitution empty, `[[ "" -eq 0 ]]` errored under set -e, and run_root
+  # aborted before recording anything - so the assertions saw no calls at all.
+  id() {
+    [[ $1 == -u ]] && { echo 1000; return 0; }
+    [[ " $* " == *" pi "* ]] && return 0
+    return 1
+  }
+  stub ask
+  ask() { return 0; }
+  local calls=""
+  stub run_root
+  run_root() { calls="$calls $* "; return 0; }
+
+  check_users >/dev/null 2>&1
+
+  if ! grep -qE 'usermod .*([[:space:]])pi([[:space:]]|$)' <<<"$calls"; then
+    printf '        pi was not locked even though bob has a usable password\n'
+    rc=1
+  fi
+  rm -rf "$t"
   teardown_destdir
   return $rc
 }
@@ -978,6 +1408,7 @@ test_ip_forward_never_disabled_when_docker_runs() {
   # running containers, killing container networking with no error anywhere.
   setup_destdir
   # Force the Docker branch without depending on this box having Docker.
+  stub docker_present
   docker_present() { return 0; }
   configure_sysctl >/dev/null 2>&1
   local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
@@ -995,6 +1426,7 @@ test_ip_forward_zeroed_when_no_docker() {
   # The other direction, so the fix above cannot be gamed by simply removing
   # the setting.
   setup_destdir
+  stub docker_present
   docker_present() { return 1; }
   configure_sysctl >/dev/null 2>&1
   local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
@@ -1183,10 +1615,15 @@ test_firewall_loop_visits_every_port() {
   setup_destdir
   DRY_RUN=1
   local -a asked=()
+  stub listening_ports
   listening_ports() { printf 'tcp 80\ntcp 443\nudp 3478\n'; }
+  stub current_ssh_port
   current_ssh_port() { printf '22\n'; }
+  stub listening_process
   listening_process() { printf 'nginx\n'; }
+  stub docker_present
   docker_present() { return 1; }
+  stub docker_published_by
   docker_published_by() { printf ''; }
   stub have
   have() { return 0; }
@@ -1221,10 +1658,15 @@ test_firewall_skips_the_ssh_port() {
   setup_destdir
   DRY_RUN=1
   local -a asked=()
+  stub listening_ports
   listening_ports() { printf 'tcp 22\ntcp 80\n'; }
+  stub current_ssh_port
   current_ssh_port() { printf '22\n'; }
+  stub listening_process
   listening_process() { printf 'sshd\n'; }
+  stub docker_present
   docker_present() { return 1; }
+  stub docker_published_by
   docker_published_by() { printf ''; }
   stub have
   have() { return 0; }
@@ -1540,7 +1982,6 @@ t 'sshd config is created when absent'                  test_sshd_creates_missin
 t 'an empty authorized_keys blocks the lockout change'  test_no_lockout_without_key
 t 'a key in authorized_keys2 is found'                  test_no_lockout_with_second_path_only
 t 'a real private key is rejected'                      test_usable_key_rejects_real_private_key
-t 'a private key is not a usable key'                   test_usable_key_rejects_private_key
 t 'an empty file is not a usable key'                   test_usable_key_rejects_empty_file
 t 'a real public key is accepted'                       test_usable_key_accepts_real_key
 
@@ -1575,6 +2016,8 @@ t 'the port prompt is still callable'                   test_docker_offer_publis
 t 'loopback test is per protocol'                      test_docker_port_is_loopback_only_is_per_protocol
 t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
 t '--force is not accepted'                             test_force_flag_is_not_accepted
+t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
+t 'pi is locked when another account can log in'     test_pi_is_locked_when_another_account_can_log_in
 t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
 t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
 t 'dry run does not create directories'               test_dry_run_does_not_create_directories
@@ -1603,8 +2046,15 @@ t 'rpi origin survives the spaces in "Raspberry Pi Foundation"' test_rpi_origin_
 t 'a half-read release line yields no origin'          test_rpi_origin_combo_rejects_a_half_read_release_line
 t 'the rpi archive is auto-updated where present'       test_rpi_archive_is_allowed_when_this_box_has_it
 t 'docker/tailscale/github-cli stay out of unattended'  test_third_party_repos_are_never_auto_upgraded
-t 'held-back packages are parsed out of apt'            test_held_back_packages_are_named
-t 'a held-back package is actually reported'            test_held_back_warning_reaches_the_output
+t 'held-back packages are parsed out of apt'          test_held_back_packages_are_named
+t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
+t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_what_sshd_would_refuse
+t 'key_files_for_user splits multiple paths'         test_key_files_for_user_splits_multiple_paths
+t '%U expands to the numeric uid'                    test_key_files_expands_percent_U_to_the_numeric_uid
+t 'a failing awk in the Port rewrite is not silent'  test_a_failing_awk_in_the_port_rewrite_is_not_silent
+t 'an undetectable port leaves the firewall alone'  test_undetectable_ssh_port_leaves_the_firewall_untouched
+t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
+t 'current_ssh_port never guesses'                    test_current_ssh_port_never_guesses
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
 t 'initrd/cmdline are not false positives'              test_untracked_kernels_ignores_files_that_are_untracked_by_design
 t 'running kernel owner resolves on this box'           test_running_kernel_owner_reads_the_real_boot_dir

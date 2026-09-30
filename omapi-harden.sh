@@ -374,10 +374,12 @@ replace_managed_block() {
     # 200-line stock sshd_config to say "these 10 lines would be added" buries
     # the useful part.
     #
-    # Nothing above this point may touch the filesystem. `install -d` used to
-    # run just above this check, so a dry run created /etc/ssh (and /etc/ufw on
-    # a box that lacked it) - a real mutation, and the one guarantee a dry run
-    # exists to provide.
+    # Nothing between here and the return may touch a real path. `install -d`
+    # used to run just above this check, so a dry run created /etc/ssh (and
+    # /etc/ufw on a box that lacked it) - a real mutation, and the one
+    # guarantee a dry run exists to provide. Scratch files in $TMPDIR from
+    # `mktemp` are still made above and still cleaned up below; that is the
+    # only filesystem effect a dry run has.
     printf '  %s•%s would write %s (managed block on top, rest untouched):%s\n' \
       "$C_DIM" "$C_OFF" "$path" "$C_OFF"
     if [[ -f $block ]]; then
@@ -387,7 +389,10 @@ replace_managed_block() {
     return 0
   fi
 
-  install -d -m 0755 "$(dirname "$target")" 2>/dev/null || true
+  # No `|| true`: the `cat > "$target"` below fails loudly if this did not
+  # work, and swallowing it here only turned a clear error into a confusing
+  # one three lines later.
+  install -d -m 0755 "$(dirname "$target")"
 
   cat "$body" >"$target"
   rm -f "$body"
@@ -405,6 +410,14 @@ have_usable_key() {
   local found=1 f
   while IFS= read -r f; do
     [[ -n $f && -s $f ]] || continue
+    # sshd's StrictModes (on by default) silently IGNORES an authorized_keys
+    # whose own mode, or whose .ssh or home directory, is group- or
+    # world-writable. `ssh-keygen -l` does not care about any of that, so a
+    # key sshd would refuse is indistinguishable here from one it would
+    # accept - and the difference is the difference between "you can still get
+    # in" and "you cannot". Check the same way sshd does, so this cannot report
+    # a key is usable when it is not.
+    key_strict_modes_ok "$f" || continue
     # A private key is not a usable authorized_keys entry. ssh-keygen -l will
     # happily print a fingerprint for one, because it can read the public half
     # embedded in it, so it has to be rejected explicitly.
@@ -420,11 +433,101 @@ have_usable_key() {
   return $found
 }
 
+# True when sshd would not reject this path over file permissions.
+# Mirrors sshd's StrictModes check: the file, its .ssh directory and the
+# user's home directory must not be group- or world-writable. Read-only, and
+# every path involved is owned by the user being checked, so no privilege is
+# needed.
+key_strict_modes_ok() {
+  local f="$1" d
+  # The uid the key must be owned by: the owner of the .ssh directory it lives
+  # in, which is the account sshd would be checking. Derived here rather than
+  # passed, because this is also called from tests that build their own tree.
+  local target_uid
+  target_uid="$(stat -Lc '%u' "$(dirname "$f")" 2>/dev/null || echo '')"
+  # Ownership, checked on the key file itself. sshd's StrictModes rejects an
+  # authorized_keys owned by neither the user nor root even at 0600 - the file
+  # is then writable by whoever owns it. `find -perm` cannot see that, so a
+  # third party's key looked "usable" here, PasswordAuthentication was written
+  # on the strength of it, and sshd ignored the key. Wrong direction: this
+  # function's false positives become lockouts.
+  local owner
+  owner="$(stat -Lc '%u' "$f" 2>/dev/null || echo '')"
+  if [[ -n $owner && $owner != 0 && -n $target_uid && $owner != "$target_uid" ]]; then
+    return 1
+  fi
+
+  # Every directory from the file up to /, not just three levels. sshd walks
+  # the whole canonical parent path, so a writable /home or /home/shared
+  # above a correctly-permissioned .ssh still gets the key refused - and
+  # that is the case a fixed three-level check cannot see.
+  #
+  # `pwd -P`, not `pwd`: a symlinked $HOME (/home -> /data/home is common) kept
+  # the symlink in the logical path, and `find` does not follow a symlink in
+  # its starting path, so it stat'ed the link itself - mode 777, always
+  # group/world-writable - and rejected a key sshd would have accepted. That
+  # blocks --lockdown-ssh on an entirely legitimate setup. The kernel's view
+  # is what sshd uses, so ask for that. -L does the same for the walk.
+  local d dircount=0
+  # Resolve the FILE itself, not just its parent. `pwd -P` canonicalises the
+  # directory, so a symlinked authorized_keys kept a clean link-path while
+  # `find -L "$f"` only checked the target file's own mode - the target's
+  # parents were never walked. sshd realpath()s the file and walks the
+  # resolved chain, so a key under a group-writable directory was ACCEPTED
+  # here and REFUSED by sshd. False "usable" is the lockout direction.
+  f="$(readlink -f "$f" 2>/dev/null || echo '')"
+  [[ -n $f && -e $f ]] || return 1
+  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 1
+  # No iteration cap: dirname converges to / on its own, so a cap bounds
+  # nothing except the number of components actually checked. One version had
+  # `&& ((dircount < 64))`, which on a path deeper than 64 SILENTLY SKIPPED the
+  # remaining checks - so a group-writable ancestor 70 levels up was accepted
+  # while the same tree two levels deep was rejected. That is the lockout
+  # direction, and it was a "safety" cap that reduced safety. If the path is
+  # pathological, fail rather than check part of it.
+  while [[ -n $d && $d != "/" ]]; do
+    dircount=$((dircount + 1))
+    if ((dircount > 64)); then
+      return 1
+    fi
+    # The 022 part: group or other has any write bit.
+    [[ -n $(find -L "$d" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
+    # Ownership of EVERY component, not just the file: sshd's secure_filename
+    # requires each path component to be owned by the user or root. Checking
+    # only the key file and its .ssh missed an intermediate directory owned by
+    # a third party at 0755 - accepted here, refused by sshd, which is the
+    # direction that ends in a lockout.
+    local downer
+    downer="$(stat -Lc '%u' "$d" 2>/dev/null || echo '')"
+    # Every component must be the user's or root's. When the uid could not be
+    # determined at all, treat it as a failure rather than skipping the check:
+    # an unverified permission is exactly the case that turns into a lockout,
+    # and the caller can still fall back to PasswordAuthentication being left
+    # alone. Skipping silently would report "usable" for a key sshd may ignore.
+    if [[ -z $target_uid ]]; then
+      return 1
+    fi
+    if [[ -n $downer && $downer != 0 && $downer != "$target_uid" ]]; then
+      return 1
+    fi
+    [[ $d == "/" ]] && break
+    d="$(dirname "$d")"
+  done
+  # The file itself, which is not a directory on the walk above.
+  [[ -n $(find -L "$f" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
+  return 0
+}
+
 # Resolve the real home directory rather than assuming /home/$user, and honour
 # the AuthorizedKeysFile setting if sshd has been told to use something else.
 key_files_for_user() {
-  local user="${1:-$(id -un)}" home auth
+  local user="${1:-$(id -un)}" home auth target_uid
   home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"
+  # %U is the numeric UID. Resolved here rather than substituted with the
+  # username, which is what a previous version did and which checked
+  # authorized_keys_<username> instead of the authorized_keys_<uid> sshd
+  # actually reads.
+  target_uid="$(getent passwd "$user" 2>/dev/null | cut -d: -f3)"
   if [[ -z $home ]]; then
     # No passwd entry, or no getent. Fall back to the convention rather than
     # silently checking nothing.
@@ -435,11 +538,37 @@ key_files_for_user() {
   auth="$(peek sshd -T -C "user=$user,host=localhost,addr=127.0.0.1" 2>/dev/null |
     awk '/^authorizedkeysfile /{ $1=""; sub(/^ +/, ""); print; exit }' || true)"
   if [[ -n $auth ]]; then
+    # `sshd -T` prints every AuthorizedKeysFile path space-separated on ONE
+    # line, so a `while read` over it yields a single value containing all of
+    # them glued together: "/home/u/.ssh/authorized_keys .ssh/authorized_keys2".
+    # have_usable_key then tests that as one non-existent filename, so on a box
+    # with two default paths NEITHER is ever checked - and the lockout check
+    # reports "no usable key" while a perfectly good key sits in the first
+    # file. Split on whitespace into separate entries, then expand each.
+    local -a auth_paths=()
     local f
-    while IFS= read -r f; do
+    read -r -a auth_paths <<<"$auth"
+    for f in "${auth_paths[@]}"; do
       [[ -n $f ]] || continue
-      printf '%s\n' "$f" | sed "s|^%[hHd]|$home|; s|^%[uU]|$user|"
-    done <<<"$auth"
+      f="${f//\%h/$home}"
+      f="${f//\%H/$home}"
+      f="${f//\%d/$home}"
+      f="${f//\%u/$user}"
+      # %U is the numeric UID, not the username. Expanding it to $user checked
+      # a username-suffixed file instead of the UID-suffixed one sshd actually
+      # reads, so a key in the real file was never found.
+      f="${f//\%U/$target_uid}"
+      # `sshd -T` prints the *effective* setting, and sshd's own default is
+      # the relative `.ssh/authorized_keys` - it does not expand it to an
+      # absolute path. The sed above only fired when the token literally
+      # started with %h, so the default came back as a bare relative path and
+      # `have_usable_key` tested it against the current working directory.
+      # Every box therefore reported "no usable key" even with a perfectly
+      # good authorized_keys: a false negative that makes the lockout check
+      # meaningless and refuses --lockdown-ssh every time.
+      [[ $f == /* ]] || f="$home/$f"
+      printf '%s\n' "$f"
+    done
   else
     printf '%s\n' "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"
   fi
@@ -478,10 +607,19 @@ install_hardening_packages() {
   step "installing: ${missing[*]}"
   run_root apt-get update -qq
   # apt pulling new things in mid-run is normal; the point of this script is
-  # to not fail halfway through a hardening pass because of it.
+  # to not fail halfway through a hardening pass because of it. But the
+  # success line used to be unconditional, so a failed install still printed
+  # "packages present" with a check mark - for packages that are not present.
+  # Later tasks re-guard on `have`, so continuing is right; claiming success
+  # is not.
+  local install_ok=1
   run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    "${missing[@]}" || warn "apt-get install returned non-zero, continuing with what is installed"
-  ok "packages present"
+    "${missing[@]}" || { warn "apt-get install returned non-zero, continuing with what is installed"; install_ok=0; }
+  if ((install_ok)); then
+    ok "packages present"
+  else
+    warn "some packages are still missing; later tasks will skip anything that needs them"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -520,9 +658,53 @@ check_users() {
   # or hand-built image still can.
   if id pi &>/dev/null; then
     warn "the default 'pi' account still exists"
-    if ask "lock the 'pi' account (reversible, /home/pi is left untouched)?"; then
+    # Refuse to lock the last password-login account. `ask` defaults to yes,
+    # and a headless run - a pipe, cron, CI, or an `ssh host sudo ...` with no
+    # tty - takes that default, so on an image where `pi` is the ONLY account
+    # with a usable password this would lock the box with no way back in over
+    # SSH. The existing session survives, which is exactly why this is easy to
+    # miss until the next login fails.
+    #
+    # Read the real password state from /etc/shadow, not /etc/passwd. Field 2
+    # of passwd is the literal "x" on every shadowed system, so the first
+    # version of this filter - `$2 != "*" && $2 != ""` - matched EVERY account
+    # in the UID range, counted any normal user as a password account, and the
+    # guard did nothing. Verified on this box: woodcox's passwd field 2 is "x".
+    #
+    # Require a real crypt-hash prefix rather than merely "not empty and not
+    # !/*": that weaker test still counts "x" and "NP", neither of which
+    # pam_unix can match, so an account that cannot log in with a password
+    # would satisfy it and pi would be locked anyway - the unsafe direction. A
+    # field starting with "$" plus an identifier character is a hash ($1$,
+    # $2b$, $5$, $6$, $y$, $argon2...); anything else ("x", "NP", "", "!", "!!")
+    # cannot log in, the guard stays on the safe side, and pi is not locked.
+    #
+    # /etc/shadow is root-only. `peek` runs the whole awk as one unit, so when it
+    # cannot get root the substitution is empty, the loop reads nothing, and
+    # pi_would_be_last stays 1 - the safe default, matching how the rest of
+    # this script treats a precondition it cannot verify.
+    local pi_would_be_last=1
+    local other_pw
+    while read -r other_pw; do
+      [[ -n $other_pw && $other_pw != pi ]] || continue
+      pi_would_be_last=0
+      break
+    done < <(peek awk -F: '
+      NR == FNR { if ($3 >= 1000 && $3 < 65534) uid_ok[$1] = 1; next }
+      ($1 in uid_ok) && $1 != "pi" && $2 ~ /^\$[0-9a-z]/ { print $1 }
+    ' /etc/passwd /etc/shadow 2>/dev/null || true)
+
+    if ((pi_would_be_last)); then
+      warn "not locking 'pi': it is the only account with a usable password"
+      note "locking it would leave no password login at all; add another admin account first"
+      note "to lock it anyway once you have a key-based way in: sudo usermod -L -s /usr/sbin/nologin pi"
+    elif ask "lock the 'pi' account (reversible, /home/pi is left untouched)?"; then
       run_root usermod -L -s /usr/sbin/nologin pi
-      ok "locked pi - undo with: sudo usermod -L -s /bin/bash pi && sudo passwd -u pi"
+      # -U, not -L. The undo message used to repeat the lock flag, so running
+      # it as printed left the password locked and only restored the shell -
+      # the opposite of undoing. It has to be the exact inverse of the line
+      # above: unlock the password AND put a real shell back.
+      ok "locked pi - undo with: sudo usermod -U -s /bin/bash pi"
     else
       skip "left the pi account alone"
     fi
@@ -559,19 +741,71 @@ check_users() {
 # drop-in in /etc/ssh/sshd_config.d can move it and the file would not say so.
 current_ssh_port() {
   local port=""
-  port="$(peek sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+  # What the RUNNING daemon is listening on, not what the config file says.
+  # `sshd -T` parses the config, so under --no-restart - where the new port
+  # has been written but sshd has not been restarted - it happily reports the
+  # new port while the daemon is still on the old one. The firewall then opens
+  # the port nobody is listening on and offers to close the one that is in
+  # use, which with default-deny enabled is how you lock yourself out of a
+  # box you are still connected to.
+  #
+  # Sources are tried in order of trustworthiness, and NO source is allowed to
+  # guess. A wrong guess here decides which port the firewall protects, so an
+  # earlier version's "any listening port in 20-30 must be sshd" heuristic was
+  # removed: on this box it matched Postfix on 25 before it ever reached
+  # sshd on 1199, which would have had the firewall protecting the mail server.
+  # Being wrong in the direction of 22 is not safer - the script would open
+  # 22 and offer to close the port the user is actually on.
+  #
+  # `sshd -T` is the most authoritative answer but needs root to read the host
+  # keys, and peek cannot elevate in a non-interactive dry run - so it comes
+  # last, not first. Reading the config file is unprivileged and reflects the
+  # first Port directive, which is what sshd will honour.
+  #
+  # 1. A socket that sshd itself is holding, when the process list is readable.
+  #    Matched on the process name, never on a port range.
+  port="$(peek ss -Hltnp 2>/dev/null |
+    awk '/sshd/ && $4 ~ /:([0-9]+)$/ { n = $4; sub(/^.*:/, "", n); print n; exit }' || true)"
   if [[ -z $port ]]; then
+    # 2. The first Port directive in the effective config. sshd takes the
+    #    first value for Port, and the managed block is prepended, so this is
+    #    the port a restart would use. Read through ${CONF_DEST} so a test can
+    #    point this at an empty tree: it reads the real /etc otherwise, and a
+    #    test that cannot silence this source tests the host, not the function.
     port="$(grep -hsiE '^[[:space:]]*Port[[:space:]]+[0-9]+' \
-      /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null |
+      "${CONF_DEST}"/etc/ssh/sshd_config "${CONF_DEST}"/etc/ssh/sshd_config.d/*.conf 2>/dev/null |
       awk '{print $2; exit}' || true)"
   fi
-  printf '%s\n' "${port:-22}"
+  if [[ -z $port ]]; then
+    # 3. Needs root, so usually only reachable on a real run.
+    port="$(peek sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+  fi
+  if [[ -z $port ]]; then
+    # Nothing authoritative. Do not invent a number: the caller decides what
+    # to do about a port it cannot determine.
+    printf '\n'
+    return 1
+  fi
+  printf '%s\n' "$port"
 }
 
 non_root_sudoer_with_key() {
-  local user
+  local user groups
+  # The "way back in" has to be an account that can actually repair whatever
+  # this script changed. Being able to log in is not enough: without sudo you
+  # cannot undo a bad sshd_config or reopen a closed firewall, so a key on a
+  # non-admin account is not a way back in, it is a way to sit and watch.
+  #
+  # Membership of `docker` counts as well. The daemon socket is root
+  # equivalent - a container can mount the host filesystem - so a user in it
+  # can do everything sudo could, and this box puts the installing user in
+  # docker. Counting only sudo would have rejected the sole real admin here.
   while read -r user; do
     [[ -n $user && $user != root ]] || continue
+    groups="$(id -nG "$user" 2>/dev/null || true)"
+    if [[ " $groups " != *" sudo "* && " $groups " != *" docker "* ]]; then
+      continue
+    fi
     if have_usable_key "$(key_files_for_user "$user")"; then
       printf '%s\n' "$user"
       return 0
@@ -585,7 +819,16 @@ harden_ssh() {
 
   local conf="/etc/ssh/sshd_config"
   local port
-  port="$(current_ssh_port)"
+  # `|| true` because current_ssh_port returns 1 when it cannot determine the
+  # port, and under set -e that would abort the whole ssh task. Handled
+  # explicitly below instead of being allowed to look like port 0.
+  port="$(current_ssh_port || true)"
+  if [[ -z $port ]]; then
+    warn "cannot determine which port sshd is on; skipping SSH hardening"
+    note "this is fail-safe: nothing is written, so the current config stays in force"
+    note "run 'sudo sshd -T | grep ^port' to see the port, then re-run this task"
+    return 1
+  fi
   note "sshd is on port ${port}"
 
   if ! [[ -f $conf ]] && ! ((DRY_RUN)); then
@@ -646,7 +889,29 @@ harden_ssh() {
   # Moving the port only removes noise from the logs; it is not a control.
   # Offered because it is in the guides and because it is harmless, but
   # never the reason a box is called secure.
-  if ask "move sshd off port ${port}? (noise reduction only, not security)" n; then
+  #
+  # Refused outright under --no-restart. That flag exists so a config change
+  # can be staged and activated by hand, but the firewall stage runs in the
+  # same pass and has to decide which port sshd is on. While sshd is still
+  # running the old one, the two disagree: the config says the new port, the
+  # daemon listens on the old. The firewall would then open a port nothing
+  # listens on and offer to close the one in use - and with default-deny
+  # enabled, accepting that is a lockout on a live port. A staged port change
+  # and a firewall that is meant to follow it cannot coexist in one run.
+  #
+  # Asked once, and the answer is not re-offered on the other branch: an
+  # earlier version used `if ((NO_RESTART)) && ask ...; then <refuse> elif ask
+  # ...`, so answering "no" to the deferred question fell straight through to
+  # the ordinary one, which had no --no-restart protection at all. That wrote
+  # `Port 2222` while sshd stayed on 22, and the box locked out the moment
+  # the user ran `systemctl restart ssh` by hand. Reproduced before fixing.
+  if ((NO_RESTART)); then
+    if ask "move sshd off port ${port}? (not possible: --no-restart is set)" n; then
+      warn "not moving the port: --no-restart means sshd would keep listening on ${port}"
+      note "the firewall stage protects the port sshd is really on, so a staged move would not be followed"
+      note "move the port in a run WITHOUT --no-restart, or apply it by hand once"
+    fi
+  elif ask "move sshd off port ${port}? (noise reduction only, not security)" n; then
     local candidate=""
     # Read directly rather than through a process substitution: a `read` inside
     # `< <(...)` runs in a subshell, so the value it captured was discarded and
@@ -694,13 +959,24 @@ ClientAliveCountMax 2
 # AllowTcpForwarding is intentionally untouched: config/shell/fns/ssh-port-forwarding
 # relies on it.
 EOF
-    ((change_port)) && printf 'Port %s\n' "$new_port"
+    # Always written, not only when this run moved the port. sshd's `Port` is
+    # additive and the first value wins, so the managed block is what makes the
+    # choice stick. When `Port` was emitted only on a move, re-running after a
+    # move and declining it rewrote the block with no Port line at all while
+    # the old `Port 22` stayed commented out from the previous run - so sshd
+    # silently reverted to 22 while the script went on protecting 2222, on a
+    # path the block comment explicitly invites users to take.
+    printf 'Port %s\n' "$new_port"
     ((LOCKDOWN_SSH)) && printf 'AllowUsers %s\n' "${SUDO_USER:-$(id -un)}"
     printf '%s\n' "$MANAGED_END"
   } >"$block"
 
   local target="${CONF_DEST}${conf}"
   local backup=""
+  # Backups of the sshd_config.d drop-ins, populated when they are rewritten
+  # and consumed by the rollback below. Declared here, not inside the rewrite
+  # block, because the rollback is outside it and would otherwise see nothing.
+  local dropin_backups=""
   if ((!DRY_RUN)) && [[ -f $target ]]; then
     backup="${target}.omapi-backup"
     cp -p "$target" "$backup"
@@ -708,15 +984,92 @@ EOF
 
   replace_managed_block "$block" "$conf"
 
-  # Port is additive in sshd: the first-value-wins rule that makes prepending
-  # work for everything else does NOT apply to it. A `Port 22` left further
-  # down the file means sshd ends up listening on both, so the old line has to
-  # be commented out rather than merely outranked. Done by sed on the whole
-  # file, outside the managed block, and only when we are actually moving.
-  if ((change_port)) && ((!DRY_RUN)); then
-    sed -i -E "s|^[[:space:]]*Port[[:space:]]+[0-9]+|# &|" "$target"
-    # Put back the one line that should still be live.
-    sed -i "s|^# Port ${new_port}\$|Port ${new_port}|" "$target"
+  # Port is ADDITIVE in sshd: unlike every other directive here, first value
+  # does not win, and two active `Port` lines for the same port make sshd die
+  # with "Address already in use" at bind time. `sshd -t` does not bind, so
+  # validation does not catch it.
+  #
+  # So every active `Port` line OUTSIDE the managed block is commented out on
+  # every run, not only on a run that moves the port. Gating this on
+  # change_port meant that on a box which had already moved ssh off 22 - the
+  # exact box most likely to be run through a hardening script - a run that did
+  # not move the port wrote `Port 2222` into the block and left the existing
+  # `Port 2222` active, and the box came back unreachable after
+  # `systemctl restart ssh`.
+  #
+  # awk rather than sed, so the managed block's own line is skipped by
+  # position: a blanket regex cannot tell the block's `Port` from the
+  # stock file's, and commenting out both would leave sshd with no port at all.
+  if ((!DRY_RUN)); then
+    if ! awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" '
+      $0 == b1 { inside = 1; print; next }
+      $0 == b2 { inside = 0; print; next }
+      inside != 1 && $0 ~ /^[[:space:]]*[#[:space:]]*Port[[:space:]]+[0-9]+/ {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        if (line ~ /^#/) { print; next }          # already commented
+        print "# " line                           # was active: disable it
+        next
+      }
+      { print }
+    ' "$target" >"$target.omapi-tmp"; then
+      # A failure inside `awk && cat && rm` is exempt from set -e, so this
+      # used to fail silently: harden_ssh returned 0, printed "sshd accepts
+      # the new config", and left two active Port lines plus a stray temp file
+      # with no warning anywhere. Verified with an injected failing awk. Treat
+      # it as the config-write failure it is.
+      warn "could not rewrite the Port lines in ${conf}"
+      rm -f "$target.omapi-tmp"
+      if [[ -n $backup && -f $backup ]]; then
+        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+      fi
+      return 1
+    fi
+    # cat into the original rather than mv, so mode, owner and inode survive.
+    cat "$target.omapi-tmp" >"$target"
+    rm -f "$target.omapi-tmp"
+
+    # The same pass over /etc/ssh/sshd_config.d drop-ins. sshd reads those, and
+    # current_ssh_port reads them, but the main-file pass cannot see them - so
+    # a drop-in carrying an active `Port` was left untouched and sshd ended up
+    # with the port twice. Reproduced end to end: drop-in `Port 2222` plus the
+    # managed block's `Port 2222` gave `sshd -T` reporting the port twice.
+    local dropin
+    for dropin in "${CONF_DEST}"/etc/ssh/sshd_config.d/*.conf; do
+      [[ -f $dropin ]] || continue
+      # Back the drop-in up before rewriting it. `backup` covers only the main
+      # file, so a failed `sshd -t` rolled the main config back and left the
+      # drop-ins modified - a config inconsistency that would only bite on the
+      # next sshd start, which is exactly the kind of thing that surfaces hours
+      # later as "ssh won't come back".
+      local dbak="${dropin}.omapi-backup"
+      # Do not rewrite a file we could not back up. The sshd -t rollback
+      # restores from these backups, so rewriting without one leaves an
+      # unrestorable change on a file sshd reads.
+      if ! cp -p "$dropin" "$dbak" 2>/dev/null; then
+        warn "could not back up ${dropin}; leaving it untouched"
+        continue
+      fi
+      dropin_backups+="$dbak"$'\n'
+      if awk '
+        $0 ~ /^[[:space:]]*Port[[:space:]]+[0-9]+/ {
+          line = $0
+          sub(/^[[:space:]]*/, "", line)
+          if (line ~ /^#/) { print; next }
+          print "# " line
+          next
+        }
+        { print }
+      ' "$dropin" >"$dropin.omapi-tmp"; then
+        cat "$dropin.omapi-tmp" >"$dropin"
+        rm -f "$dropin.omapi-tmp"
+      else
+        # Never rewrite a file we cannot read back correctly: a half-written
+        # drop-in is a box that may not come back.
+        warn "could not rewrite Port lines in ${dropin}; leaving it untouched"
+        rm -f "$dropin.omapi-tmp"
+      fi
+    done
   fi
 
   rm -f "$block"
@@ -739,9 +1092,16 @@ EOF
   fi
 
   if ! peek sshd -t -f "$conf" >/dev/null 2>&1; then
+    # Drop-ins first: they were rewritten before this validation, and the
+    # main file's rollback does not touch them.
+    local dbak
+    while read -r dbak; do
+      [[ -n $dbak && -f $dbak ]] || continue
+      cp -p "$dbak" "${dbak%.omapi-backup}" || warn "could not restore ${dbak%.omapi-backup}"
+    done <<<"${dropin_backups:-}"
     if [[ -n $backup ]]; then
       warn "sshd rejected the new config, rolling ${conf} back"
-      peek cp -p "$backup" "$conf" || true
+      peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"
     else
       warn "sshd rejected the new config and there is no backup to roll back to"
     fi
@@ -749,8 +1109,24 @@ EOF
   fi
   ok "sshd accepts the new config"
 
+  # The config is good, so the drop-in backups have served their purpose.
+  # Leaving them behind would accumulate one file per drop-in on every run.
+  local dbak
+  while read -r dbak; do
+    [[ -n $dbak ]] && rm -f "$dbak"
+  done <<<"${dropin_backups:-}"
+
   if ((NO_RESTART)); then
-    note "--no-restart: run 'sudo systemctl restart ssh' yourself when ready"
+    if peek systemctl is-active --quiet ssh.socket; then
+      # The instruction has to name the unit that will actually take effect.
+      # On Ubuntu 22.10+ ssh.socket owns the port and a plain `restart ssh` is
+      # masked by it, so telling the user to run that would look like it worked
+      # and leave the staged change unapplied.
+      note "--no-restart: ssh.socket is active, so run:"
+      note "  sudo systemctl daemon-reload && sudo systemctl restart ssh.socket"
+    else
+      note "--no-restart: run 'sudo systemctl restart ssh' yourself when ready"
+    fi
     return 0
   fi
 
@@ -775,7 +1151,7 @@ EOF
   if ((socket_activated)); then
     if ! peek systemctl restart ssh.socket; then
       warn "ssh.socket failed to restart, rolling back"
-      [[ -n $backup ]] && peek cp -p "$backup" "$conf" || true
+      [[ -n $backup ]] && { peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
       peek systemctl daemon-reload || true
       peek systemctl restart ssh.socket || true
       return 1
@@ -796,7 +1172,7 @@ EOF
     printf '\n  %sKeep this session open and open a second one before you rely on it.%s\n' "$C_BOLD" "$C_OFF"
   else
     warn "ssh failed to restart, rolling back"
-    [[ -n $backup ]] && peek cp -p "$backup" "$conf" || true
+    [[ -n $backup ]] && { peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
     peek systemctl restart ssh || true
     return 1
   fi
@@ -1259,6 +1635,40 @@ configure_firewall() {
     return 0
   fi
 
+  # The SSH port is resolved BEFORE any policy change, and its failure guard
+  # returns before the first `ufw` command runs. This guard used to sit after
+  # `ufw default deny incoming`, so on a box where ufw was already active the
+  # script flipped the incoming policy to deny and then bailed out - never
+  # adding the `ufw limit` rule for the SSH port. If that box relied on the
+  # broad allow policy, every new SSH connection was blocked while the script
+  # reported "not touching the firewall".
+  local ssh_port
+  ssh_port="$(current_ssh_port || true)"
+  # Stop rather than guess. A `ufw limit /tcp` with an empty port is silently
+  # malformed, and carrying on to default-deny would close the port the user is
+  # connected on. This is the one place in the script where not knowing the
+  # answer must mean doing nothing.
+  if [[ -z $ssh_port ]]; then
+    warn "cannot determine which port sshd is on; not touching the firewall"
+    note "sshd -T and ss both came back empty, so the port cannot be trusted"
+    note "run 'sudo sshd -T | grep ^port' to see it, then re-run this task"
+    return 1
+  fi
+
+  # Allow BEFORE deny, not after. ufw evaluates rules in order, and a
+  # `default deny` that lands before the SSH rule leaves a window in which
+  # new inbound connections are denied with nothing to permit them. On a box
+  # where ufw is ALREADY active that is a real reconnect lockout: the current
+  # session survives on ufw's ESTABLISHED rule, so it looks fine, and the next
+  # login is refused. Adding the permit first means the deny can never be the
+  # last thing standing between an arriving connection and a closed door.
+  if ((DRY_RUN)); then
+    printf '  %s•%s would allow: ufw limit %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
+  else
+    run_root ufw limit "$ssh_port/tcp"
+    ok "ssh rate-limited on port ${ssh_port}"
+  fi
+
   if ((DRY_RUN)); then
     note "would set: ufw default deny incoming / allow outgoing, logging on"
   else
@@ -1266,15 +1676,6 @@ configure_firewall() {
     run_root ufw default allow outgoing
     run_root ufw logging on
     ok "default policies set (incoming denied, outgoing allowed, logging on)"
-  fi
-
-  local ssh_port
-  ssh_port="$(current_ssh_port)"
-  if ((DRY_RUN)); then
-    printf '  %s•%s would allow: ufw limit %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
-  else
-    run_root ufw limit "$ssh_port/tcp"
-    ok "ssh rate-limited on port ${ssh_port}"
   fi
 
   # Tailscale's interface is not a public interface, but ufw still counts
@@ -1345,6 +1746,12 @@ configure_firewall() {
     if ((DRY_RUN)); then
       printf '  %s•%s would deny: ufw deny %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
     else
+      # `delete limit`, not `delete allow`: the rule added above is a
+      # `ufw limit` one, so `delete allow` matches nothing and leaves it in
+      # place. The `|| true` hid that, and a stale limit rule reappears the
+      # moment the deny is ever removed. Delete both forms so a box that
+      # predates this script is handled too.
+      run_root ufw delete limit "$ssh_port/tcp" || true
       run_root ufw delete allow "$ssh_port/tcp" || true
       run_root ufw deny "$ssh_port/tcp" comment "omapi: ssh over tailscale only"
       warn "port ${ssh_port} is now denied - make sure a tailscale session works"
@@ -1442,9 +1849,19 @@ docker_offer_published_ports() {
         ok "${name}: container port ${cport}/${proto} reachable from the network"
       fi
     else
-      warn "${name} publishes ${cport}/${proto} on all interfaces and is now BLOCKED"
-      note "if something should reach it: sudo ufw route allow proto ${proto} from any to any port ${cport}"
-      note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+      if ((DRY_RUN)); then
+        # Past tense here is a lie in a dry run: nothing is written and no
+        # reload happens, so no port is actually blocked. The plan is the whole
+        # point of a dry run, and it should not claim an outcome that has not
+        # occurred.
+        note "${name} publishes ${cport}/${proto} on all interfaces and WOULD BE BLOCKED"
+        note "  to let it through: sudo ufw route allow proto ${proto} from any to any port ${cport}"
+        note "  or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+      else
+        warn "${name} publishes ${cport}/${proto} on all interfaces and is now BLOCKED"
+        note "if something should reach it: sudo ufw route allow proto ${proto} from any to any port ${cport}"
+        note "or publish it on loopback only: -p 127.0.0.1:${cport}:${cport}/${proto}"
+      fi
     fi
   done 3< <(docker_published_pairs)
 }
@@ -1462,20 +1879,33 @@ configure_docker_ufw() {
   # Snapshot BEFORE anything is written. Taking it after the install would
   # back up the file we are trying to protect against, so a failed reload
   # would "restore" the broken rules and leave ufw just as dead.
-  local rules_backup=""
+  #
+  # after6.rules needs the same protection. It is written in the same pass and
+  # reloaded in the same `ufw reload`, but it previously had no snapshot, no
+  # validation and no rollback - so a bad v6 block would survive on disk and
+  # break ufw's own boot-time restore on every boot after that, which is the
+  # "no firewall at all" outcome rather than a slightly wrong one.
+  local rules_backup="" rules6_backup=""
   if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after.rules ]]; then
     rules_backup="$(mktemp)"
     cp -p "${CONF_DEST}/etc/ufw/after.rules" "$rules_backup" || rules_backup=""
+  fi
+  if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after6.rules ]]; then
+    rules6_backup="$(mktemp)"
+    cp -p "${CONF_DEST}/etc/ufw/after6.rules" "$rules6_backup" || rules6_backup=""
   fi
 
   # Restoring puts the pre-change file back and reloads, so it is used both
   # when the fragment is malformed and when the reload itself fails.
   restore_rules() {
     if [[ -n $rules_backup ]]; then
-      run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || true
+      run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || warn "could not restore after.rules from the backup; ufw may fail to reload"
     fi
-    rm -f "$rules_backup"
-    rules_backup=""
+    if [[ -n ${rules6_backup:-} ]]; then
+      run_root cp -p "$rules6_backup" "${CONF_DEST}/etc/ufw/after6.rules" || warn "could not restore after6.rules from the backup; ufw may fail to reload"
+    fi
+    rm -f "$rules_backup" ${rules6_backup:-}
+    rules_backup="" rules6_backup=""
   }
 
   # Checked through CONF_DEST so this works against a temporary tree, and so
@@ -1526,7 +1956,8 @@ configure_docker_ufw() {
 
     if run_root ufw reload; then
       ok "ufw reloaded with the DOCKER-USER chain in place"
-      rm -f "$rules_backup"
+      rm -f "$rules_backup" ${rules6_backup:-}
+      rules6_backup=""
     else
       warn "ufw reload failed; restoring the previous rules and reloading again"
       restore_rules
@@ -1577,7 +2008,12 @@ configure_fail2ban() {
   fi
 
   local ssh_port
-  ssh_port="$(current_ssh_port)"
+  ssh_port="$(current_ssh_port || true)"
+  if [[ -z $ssh_port ]]; then
+    warn "cannot determine which port sshd is on; skipping fail2ban setup"
+    note "a jail with an empty port would ban nothing and look configured"
+    return 1
+  fi
 
   # ufw ships an action in fail2ban; without it a ban would be written to an
   # iptables chain ufw does not read, which looks configured and bans nothing.
@@ -1630,26 +2066,51 @@ EOF
     return 0
   fi
 
-  if ! peek fail2ban-client -t >/dev/null 2>&1; then
+  # Capture the rejection output. It used to go to /dev/null, and the
+  # "show the error" line below re-ran `fail2ban-client -t` AFTER the rollback -
+  # so it validated the restored config, printed nothing, and the user never
+  # saw the error explaining what was wrong with the jail they needed to fix.
+  local f2b_err=""
+  if ! f2b_err="$(peek fail2ban-client -t 2>&1)"; then
     warn "fail2ban rejected the jail file, rolling ${jail} back"
     if ((had_prev)); then
-      peek cp -p "$prev" "$jail" || true
-      ok "previous jail file restored"
+      # The three lines here used to be: `cp ... || true`, then an
+      # unconditional "previous jail file restored", then `rm -f "$prev"`. If
+      # the copy failed that sequence lied about success, left the rejected
+      # jail in place, and then deleted the only good copy. Order matters
+      # here: restore, verify, and only discard the backup once it worked.
+      if peek cp -p "$prev" "$jail"; then
+        ok "previous jail file restored"
+        rm -f "$prev"
+      else
+        warn "could not restore ${jail} from the backup - the rejected jail is still in place"
+        note "the good copy is kept at ${prev}; fix the jail and re-run, or restore it by hand"
+      fi
     else
       # There was no previous file, so the correct rollback is to remove the
       # one we just wrote rather than leave fail2ban unable to start.
       rm -f "$jail"
       ok "no previous jail file existed, removed the rejected one"
     fi
-    rm -f "$prev"
-    peek fail2ban-client -t 2>&1 | tail -3 >&2 || true
+    # Show the error from the run that actually failed, not a fresh -t against
+    # the restored config - which validates fine and tells the user nothing.
+    if [[ -n ${f2b_err//[[:space:]]/} ]]; then
+      note "fail2ban said:"
+      printf '%s\n' "$f2b_err" | tail -5 | sed 's/^/  /'
+    fi
     return 1
   fi
   [[ -n $prev ]] && rm -f "$prev"
   ok "fail2ban config accepted (banaction ${banaction})"
 
-  run_root systemctl enable --now fail2ban
-  ok "fail2ban running"
+  # Loud on failure, like the equivalent enable in configure_updates. A bare
+  # `systemctl enable` here aborted the whole script under set -e with no
+  # message of our own, and took every later task with it.
+  if run_root systemctl enable --now fail2ban; then
+    ok "fail2ban running"
+  else
+    warn "could not enable fail2ban; brute-force protection is NOT active"
+  fi
   note "$(peek fail2ban-client status sshd 2>/dev/null | grep -i "currently banned" || true)"
 }
 
@@ -1729,10 +2190,17 @@ running_kernel_owner() {
 # configured repo carries and sat there indefinitely. A simulated upgrade is
 # the only way to see this without changing anything, hence -s.
 held_back_packages() {
+  # `|| true` is load-bearing, not decoration. `peek` returns 1 whenever it
+  # cannot get root, which is the normal case in a non-interactive dry run;
+  # under `set -euo pipefail` that made the pipeline non-zero, and the bare
+  # `kept_back="$(held_back_packages)"` at the call site then aborted the ENTIRE
+  # script - after the unattended-upgrades config had already been written and
+  # the service enabled, so apparmor, sysctl, aide and audit silently never
+  # ran. Same class as the fix at the rpi origin line, which this one missed.
   peek apt-get -s upgrade 2>/dev/null | awk '
     /^The following packages have been kept back:/ {f=1; next}
     f && /^[[:space:]]+[^[:space:]]/ {print $1}
-    f && !/^[[:space:]]/ {exit}'
+    f && !/^[[:space:]]/ {exit}' || true
 }
 
 configure_updates() {
@@ -1787,7 +2255,11 @@ configure_updates() {
   if grep -rqs 'archive\.raspberrypi\.com' \
     /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     local rpi_combo
-    rpi_combo="$(apt_release_origin_combo "$(apt_release_line_for archive.raspberrypi.com)")"
+    # `|| rpi_combo=""` matters: without root, and with stdin not a tty, peek
+    # cannot run, the inner substitution returns non-zero, and under set -e
+    # this line aborts the whole task. Reproduced as
+    # `./omapi-harden.sh --dry-run updates` exiting 1 on the section header.
+    rpi_combo="$(apt_release_origin_combo "$(apt_release_line_for archive.raspberrypi.com)" || true)" || rpi_combo=""
     if [[ -n $rpi_combo ]]; then
       origins+=("\"${rpi_combo}\"")
     else
@@ -1861,7 +2333,12 @@ EOF
     return 0
   fi
 
-  run_root systemctl enable --now unattended-upgrades 2>/dev/null || true
+  if ! run_root systemctl enable --now unattended-upgrades 2>/dev/null; then
+    # Not swallowed: the check below reads apt-config and would otherwise
+    # report "configured" while the service is disabled, which is precisely
+    # the silent-failure class the rest of this script exists to prevent.
+    warn "could not enable unattended-upgrades; automatic security updates are NOT active"
+  fi
   if peek apt-config dump | grep -q Unattended-Upgrade; then
     ok "unattended-upgrades configured for ${origins[*]}"
   else
@@ -2057,8 +2534,18 @@ audit() {
   # `grep -c` prints a 0 and still exits 1 when nothing matches, so the
   # `|| echo` used to fire as well and emit a stray '?' under the count.
   if [[ -r /var/lib/dpkg/status ]]; then
-    upgradable="$(peek apt list --upgradable 2>/dev/null |
-      awk '/^[^ ]+\/[^ ]+ .*upgradable from/{n++} END{print n + 0}')"
+    # The `|| true` added when this aborting under set -e also let awk's
+    # `END{print n+0}` print 0 when the lookup failed, so a peek that could
+    # not run reported "pending updates: 0" - indistinguishable from a fully
+    # patched box, and the more dangerous direction. Check the lookup's status
+    # first and only accept its count when it actually succeeded.
+    local apt_out=""
+    if apt_out="$(peek apt list --upgradable 2>/dev/null)"; then
+      upgradable="$(printf '%s' "$apt_out" |
+        awk '/^[^ ]+\/[^ ]+ .*upgradable from/{n++} END{print n + 0}')"
+    else
+      upgradable="unknown (needs root)"
+    fi
     [[ -n $upgradable ]] || upgradable="unknown (needs root)"
   fi
 
@@ -2138,7 +2625,6 @@ audit() {
     else
       printf '  every kernel image in /boot is owned by a package\n'
     fi
-
     printf '\n-- apparmor --\n'
     peek aa-status 2>/dev/null | head -6 | sed 's/^/  /' || printf '  not installed\n'
 
