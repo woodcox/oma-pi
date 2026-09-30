@@ -664,13 +664,35 @@ check_users() {
     # with a usable password this would lock the box with no way back in over
     # SSH. The existing session survives, which is exactly why this is easy to
     # miss until the next login fails.
+    #
+    # Read the real password state from /etc/shadow, not /etc/passwd. Field 2
+    # of passwd is the literal "x" on every shadowed system, so the first
+    # version of this filter - `$2 != "*" && $2 != ""` - matched EVERY account
+    # in the UID range, counted any normal user as a password account, and the
+    # guard did nothing. Verified on this box: woodcox's passwd field 2 is "x".
+    #
+    # Require a real crypt-hash prefix rather than merely "not empty and not
+    # !/*": that weaker test still counts "x" and "NP", neither of which
+    # pam_unix can match, so an account that cannot log in with a password
+    # would satisfy it and pi would be locked anyway - the unsafe direction. A
+    # field starting with "$" plus an identifier character is a hash ($1$,
+    # $2b$, $5$, $6$, $y$, $argon2...); anything else ("x", "NP", "", "!", "!!")
+    # cannot log in, the guard stays on the safe side, and pi is not locked.
+    #
+    # /etc/shadow is root-only. `peek` runs the whole awk as one unit, so when it
+    # cannot get root the substitution is empty, the loop reads nothing, and
+    # pi_would_be_last stays 1 - the safe default, matching how the rest of
+    # this script treats a precondition it cannot verify.
     local pi_would_be_last=1
     local other_pw
     while read -r other_pw; do
       [[ -n $other_pw && $other_pw != pi ]] || continue
       pi_would_be_last=0
       break
-    done < <(peek awk -F: '($2 != "*" && $2 != "" && $1 != "pi" && $3 >= 1000 && $3 < 65534) {print $1}' /etc/passwd 2>/dev/null || true)
+    done < <(peek awk -F: '
+      NR == FNR { if ($3 >= 1000 && $3 < 65534) uid_ok[$1] = 1; next }
+      ($1 in uid_ok) && $1 != "pi" && $2 ~ /^\$[0-9a-z]/ { print $1 }
+    ' /etc/passwd /etc/shadow 2>/dev/null || true)
 
     if ((pi_would_be_last)); then
       warn "not locking 'pi': it is the only account with a usable password"

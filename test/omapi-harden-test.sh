@@ -1204,6 +1204,121 @@ test_undetectable_ssh_port_leaves_the_firewall_untouched() {
   return $rc
 }
 
+test_pi_is_not_locked_when_it_is_the_only_password_account() {
+  # Regression for a guard that did nothing at all. The first version read the
+  # password state from /etc/passwd field 2, which on every shadowed system is
+  # the literal "x" - so the filter matched EVERY account in the UID range,
+  # pi_would_be_last went to 0 the moment any normal user existed, and the
+  # guard never once prevented a lockout. It needs a fixture where another
+  # account exists but CANNOT log in with a password, and must still refuse.
+  #
+  # Reaching the pi block requires the passwordless list to be non-empty:
+  # check_users returns early at "no passwordless accounts" when it is empty.
+  # That is why an earlier hand-written probe of this guard appeared to fail -
+  # it never got past that branch.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  printf 'pi:x:1000::/home/pi:/bin/bash\nbob:x:1001::/home/bob:/bin/bash\n' >"$t/passwd"
+  # zed has an EMPTY shadow field, so the passwordless list is non-empty and
+  # execution continues to the pi block. bob's field 2 is "x" - the value that
+  # broke the old filter.
+  printf 'pi:!:19000:0:99999:7:::\nzed::19000:0:99999:7:::\nbob:x:19000:0:99999:7:::\n' >"$t/shadow"
+
+  stub peek
+  peek() {
+    local a=()
+    local c
+    for c in "$@"; do
+      case "$c" in
+        /etc/passwd) a+=("$t/passwd") ;;
+        /etc/shadow) a+=("$t/shadow") ;;
+        *) a+=("$c") ;;
+      esac
+    done
+    command "${a[@]}" 2>/dev/null
+  }
+  stub id
+  # `id pi` sets only $1. A stub keyed on $2 trips set -u when it is unset,
+  # which aborts check_users at that line - so match any argument instead.
+  # Must also answer `id -u`, which run_root calls to decide between exec'ing
+  # the command and going through priv. A stub that ignored it left the
+  # substitution empty, `[[ "" -eq 0 ]]` errored under set -e, and run_root
+  # aborted before recording anything - so the assertions saw no calls at all.
+  id() {
+    [[ $1 == -u ]] && { echo 1000; return 0; }
+    [[ " $* " == *" pi "* ]] && return 0
+    return 1
+  }
+  stub ask
+  ask() { return 0; }        # "yes" to every question, including locking pi
+  local calls=""
+  stub run_root
+  run_root() { calls="$calls $* "; return 0; }
+
+  check_users >/dev/null 2>&1
+
+  if grep -qE 'usermod .*([[:space:]])pi([[:space:]]|$)' <<<"$calls"; then
+    printf '        pi was locked even though bob cannot log in with a password\n'
+    rc=1
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_pi_is_locked_when_another_account_can_log_in() {
+  # The other half, without which the test above would also pass if the guard
+  # simply never locked anything. bob has a real crypt hash, so pi is not the
+  # last password account and locking it is safe.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  printf 'pi:x:1000::/home/pi:/bin/bash\nbob:x:1001::/home/bob:/bin/bash\n' >"$t/passwd"
+  printf 'pi:!:19000:0:99999:7:::\nzed::19000:0:99999:7:::\nbob:$6$abc$def:19000:0:99999:7:::\n' >"$t/shadow"
+
+  stub peek
+  peek() {
+    local a=()
+    local c
+    for c in "$@"; do
+      case "$c" in
+        /etc/passwd) a+=("$t/passwd") ;;
+        /etc/shadow) a+=("$t/shadow") ;;
+        *) a+=("$c") ;;
+      esac
+    done
+    command "${a[@]}" 2>/dev/null
+  }
+  stub id
+  # `id pi` sets only $1. A stub keyed on $2 trips set -u when it is unset,
+  # which aborts check_users at that line - so match any argument instead.
+  # Must also answer `id -u`, which run_root calls to decide between exec'ing
+  # the command and going through priv. A stub that ignored it left the
+  # substitution empty, `[[ "" -eq 0 ]]` errored under set -e, and run_root
+  # aborted before recording anything - so the assertions saw no calls at all.
+  id() {
+    [[ $1 == -u ]] && { echo 1000; return 0; }
+    [[ " $* " == *" pi "* ]] && return 0
+    return 1
+  }
+  stub ask
+  ask() { return 0; }
+  local calls=""
+  stub run_root
+  run_root() { calls="$calls $* "; return 0; }
+
+  check_users >/dev/null 2>&1
+
+  if ! grep -qE 'usermod .*([[:space:]])pi([[:space:]]|$)' <<<"$calls"; then
+    printf '        pi was not locked even though bob has a usable password\n'
+    rc=1
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1901,6 +2016,8 @@ t 'the port prompt is still callable'                   test_docker_offer_publis
 t 'loopback test is per protocol'                      test_docker_port_is_loopback_only_is_per_protocol
 t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
 t '--force is not accepted'                             test_force_flag_is_not_accepted
+t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
+t 'pi is locked when another account can log in'     test_pi_is_locked_when_another_account_can_log_in
 t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
 t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
 t 'dry run does not create directories'               test_dry_run_does_not_create_directories
