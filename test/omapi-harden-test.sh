@@ -64,6 +64,14 @@ setup_destdir() {
     case $1 in
       cp) command cp "${@:2}" ;;
       install) command install "${@:2}" ;;
+      # These must be real. replace_managed_block reads the target's mode and
+      # owner through run_root stat and restores them with run_root chmod and
+      # chown; stubbing them to a no-op made every mode assertion pass while
+      # the restore did nothing.
+      stat) command stat "${@:2}" ;;
+      chmod) command chmod "${@:2}" ;;
+      chown) command chown "${@:2}" ;;
+      rm) command rm "${@:2}" ;;
     esac
     return 0
   }
@@ -251,7 +259,12 @@ test_sshd_preserves_mode_and_owner() {
   mkdir -p "$CONF_DEST/etc/ssh"
   local f="$CONF_DEST/etc/ssh/sshd_config"
   printf 'Port 22\n' >"$f"
-  chmod 600 "$f"
+  # 640, NOT 600. `cp -p` copies the body's metadata, and $body is a mktemp
+  # file, so a 600 target is indistinguishable from "cp -p preserved it" - the
+  # test passed with the restore deleted. 640 is the mode ufw/sshd actually
+  # ship, and is a value mktemp never produces, so this now actually exercises
+  # the mode/owner restore.
+  chmod 640 "$f"
   local before; before="$(stat -c '%a %U' "$f")"
 
   local block; block="$(mktemp)"
@@ -1350,10 +1363,12 @@ test_ask_never_passes_a_flag_gum_will_reject() {
   fi
   # The flag must also be one the installed gum accepts. `gum confirm --help`
   # is the only reliable check from inside the suite: a live confirm needs a
-  # controlling terminal, and the test runner does not have one. Verified
-  # manually on this box's v2.0.2 - --default-no exits 80, --default=false
-  # parses - so a help listing it is sufficient here.
-  if have gum; then
+  # controlling terminal, and the test runner does not have one.
+  #
+  # `command -v`, NOT `have gum`: setup_destdir stubs have() to always return 0,
+  # so gating on it made this block run unconditionally and the suite failed
+  # on any host without gum installed. The suite is meant to run anywhere.
+  if command -v gum >/dev/null 2>&1; then
     local out
     out="$(gum confirm --help 2>&1 || true)"
     if ! grep -q -- '--default' <<<"$out"; then
@@ -1424,6 +1439,84 @@ test_ufw_snapshot_cleanup_uses_run_root() {
   local n; n="$(grep -c 'run_root rm -f "\$rules_backup" \${rules6_backup:-}' "$f")"
   if [[ $n -ne 2 ]]; then
     printf '        expected 2 privileged snapshot cleanups, found %s\n' "$n"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_write_preserves_mode_and_owner_in_practice() {
+  # The behaviour, not the source text. The grep-based test next to this one
+  # would pass even with the restore deleted; this one runs the function.
+  #
+  # The mode is 0640 deliberately: cp -p carries the mktemp body's 0600 onto
+  # the target, so a 0600 target is indistinguishable from "cp -p preserved
+  # it". 0640 is a value mktemp never produces and is what ufw ships.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ufw"
+  mkdir -p "$d"
+  local f="$d/after.rules"
+  printf '*filter\n-A keepme -j ACCEPT\nCOMMIT\n' >"$f"
+  chmod 640 "$f"
+  local before; before="$(stat -c '%a %U:%G' "$f")"
+
+  local block; block="$(mktemp)"
+  printf '%s\n*filter\nCOMMIT\n%s\n' "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$block"
+  replace_managed_block "$block" /etc/ufw/after.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
+  rm -f "$block"
+
+  local after; after="$(stat -c '%a %U:%G' "$f")"
+  if [[ $after != "$before" ]]; then
+    printf '        metadata changed: %s -> %s\n' "$before" "$after"
+    rc=1
+  fi
+  # And the pre-existing rule must survive.
+  if ! grep -q -- '-A keepme -j ACCEPT' "$f"; then
+    printf '        the existing rule was lost\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_refuses_rather_than_truncating_an_unreadable_target() {
+  # The behaviour behind the grep test. An unreadable non-empty target must be
+  # left byte-for-byte alone - this is the bug that emptied after.rules.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ufw"
+  mkdir -p "$d"
+  local f="$d/locked.rules"
+  printf '*filter\n-A critical -j ACCEPT\nCOMMIT\n' >"$f"
+  # Checksum BEFORE locking it down: a 0000 file cannot be read by the test
+  # user, so an md5 taken afterwards is the empty string and the comparison
+  # below would pass vacuously.
+  local before; before="$(md5sum "$f" | cut -d" " -f1)"
+  chmod 000 "$f"
+
+  local block; block="$(mktemp)"
+  printf '%s\n*filter\nCOMMIT\n%s\n' "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$block"
+  # peek must also fail, so simulate no root at all: both reads fail.
+  stub peek
+  peek() { return 1; }
+  replace_managed_block "$block" /etc/ufw/locked.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom >/dev/null 2>&1
+  local r=$?
+  chmod 644 "$f"
+  rm -f "$block"
+
+  local after; after="$(md5sum "$f" | cut -d" " -f1)"
+  if [[ -z $before || -z $after ]]; then
+    printf '        could not checksum the target (before=%q after=%q)\n' "$before" "$after"
+    rc=1
+  elif [[ $before != "$after" ]]; then
+    printf '        an unreadable target was modified (md5 %s -> %s)\n' "$before" "$after"
+    rc=1
+  fi
+  if ((r == 0)); then
+    printf '        the rewrite reported success on an unreadable target\n'
     rc=1
   fi
   teardown_destdir
@@ -2189,6 +2282,8 @@ t '--force is not accepted'                             test_force_flag_is_not_a
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
 t 'managed block preserves mode and owner'   test_managed_block_preserves_target_mode_and_owner
+t 'managed block keeps mode in practice'   test_managed_block_write_preserves_mode_and_owner_in_practice
+t 'unreadable target is refused not truncated' test_managed_block_refuses_rather_than_truncating_an_unreadable_target
 t 'block rewrite allowed on empty remainder' test_managed_block_rewrite_allowed_when_remainder_is_empty
 t 'ufw snapshot cleanup uses run_root'       test_ufw_snapshot_cleanup_uses_run_root
 t 'ufw rules snapshot uses run_root'         test_ufw_rules_snapshot_is_taken_with_run_root

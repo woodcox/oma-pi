@@ -440,13 +440,29 @@ replace_managed_block() {
   # invoking user - replacing the 0640 root:root that ufw ships and that
   # `ufw` expects to find. Preserve the target's own mode and owner when it
   # exists, and set 0644 root:root when creating it.
+  local tmode towner tgroup
   if [[ -e $target ]]; then
-    local tmode towner tgroup
-    tmode="$(run_root stat -c %a "$target" 2>/dev/null || printf 644)"
-    towner="$(run_root stat -c %u "$target" 2>/dev/null || printf 0)"
-    tgroup="$(run_root stat -c %g "$target" 2>/dev/null || printf 0)"
+    # Preserve exactly what the target already has. A stat failure must NOT
+    # fall back to a mode and then apply it: for the ufw rule files that is
+    # 0640 root:root, and writing 0644 over a root-only file weakens it.
+    tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
+    towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
+    tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
+    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
+      warn "could not read the mode/owner of $target; leaving its permissions untouched"
+      run_root cp -p "$body" "$target"
+      rm -f "$body"
+      return 0
+    fi
   else
-    tmode=644 towner=0 tgroup=0
+    # 0640 root:root is what ufw ships for after.rules/after6.rules; 0644 is
+    # right for sshd_config. Defaulting to 0644 would make a hardening script
+    # create a world-readable rules file.
+    case $target in
+      */ufw/after.rules|*/ufw/after6.rules) tmode=640 ;;
+      *) tmode=644 ;;
+    esac
+    towner=0 tgroup=0
   fi
   run_root cp -p "$body" "$target"
   run_root chown "$towner:$tgroup" "$target"
@@ -2010,7 +2026,15 @@ configure_docker_ufw() {
         # boot-time restore - trips over it, and the user gets no firewall.
         warn "the DOCKER-USER rules are malformed; not reloading ufw"
         restore_rules
-        note "the previous /etc/ufw/after.rules has been restored"
+        # Only claim a restore when one actually happened. restore_rules is a no-op
+  # with no snapshot - which is the case when after.rules did not exist when
+  # the task started - and reporting a restore that never occurred is exactly
+  # the sort of false success this script is supposed to avoid.
+  if [[ -n ${rules_backup:-} ]]; then
+    note "the previous /etc/ufw/after.rules has been restored"
+  else
+    warn "no snapshot of /etc/ufw/after.rules was taken; it has NOT been restored"
+  fi
         return 1
         ;;
       *)
