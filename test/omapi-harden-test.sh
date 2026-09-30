@@ -20,6 +20,20 @@ _SEEN_TESTS=()
 # shellcheck source=../omapi-harden.sh
 source "$SCRIPT"
 
+# Snapshot the script's own functions, so t() can tell when a test has
+# redefined one without registering it. Built once, immediately after the
+# source, before any test has run.
+declare -A _ORIG_FN_SNAPSHOT=()
+_SCRIPT_FNS=()
+for _f in $(declare -F | awk '{print $3}'); do
+  case "$_f" in
+    test_*|t|assert_*|setup_destdir|teardown_destdir|stub|s$) continue ;;
+  esac
+  _SCRIPT_FNS+=("$_f")
+  _ORIG_FN_SNAPSHOT["$_f"]="$(declare -f "$_f" 2>/dev/null)"
+done
+unset _f
+
 setup_destdir() {
   OMAPI_SECURITY_DESTDIR="$(mktemp -d)"
   export OMAPI_SECURITY_DESTDIR
@@ -135,6 +149,21 @@ t() {
   else
     printf '  FAIL  %s\n' "$name"
     FAIL=$((FAIL + 1))
+  fi
+  # Catch the leak this suite has been bitten by twice: a test that redefines
+  # one of the script's functions with a bare `name() { ... }` and no matching
+  # `stub name` leaves that definition in place for every later test, which
+  # then fail - or worse, silently pass - for reasons unrelated to what they
+  # claim to test. Both times it surfaced as a test reporting a value it had
+  # no way of producing.
+  local fn2 leaked=""
+  for fn2 in "${_SCRIPT_FNS[@]}"; do
+    if [[ ${_ORIG_FN_SNAPSHOT[$fn2]:-} != "$(declare -f "$fn2" 2>/dev/null)" ]]; then
+      leaked+=" $fn2"
+    fi
+  done
+  if [[ -n $leaked ]]; then
+    printf '        WARNING: %s left these redefined without a stub call:%s\n' "$fn" "$leaked"
   fi
 }
 
@@ -784,10 +813,12 @@ test_lockdown_ssh_refuses_a_keyless_target_user() {
   local rc=0
   LOCKDOWN_SSH=1
   SUDO_USER="keyless-user"
+  stub have_usable_key
   have_usable_key() {
     [[ $1 == *keyless-user* ]] && return 1
     return 0   # the backdoor account has a key
   }
+  stub key_files_for_user
   key_files_for_user() { printf '%s\n' "/home/$1/.ssh/authorized_keys"; }
   # The backdoor check enumerates accounts through non_root_sudoer_with_key,
   # which reads /etc/passwd via peek. Stub the helper itself: leaving peek
@@ -795,6 +826,11 @@ test_lockdown_ssh_refuses_a_keyless_target_user() {
   # a key", and harden_ssh returns before the --lockdown-ssh guard is reached.
   stub non_root_sudoer_with_key
   non_root_sudoer_with_key() { printf '%s\n' "keyful-user"; }
+  # harden_ssh now refuses to do anything when it cannot determine the sshd
+  # port, and on a test host nothing can determine it. Pin it, or this test
+  # passes or fails on the guard rather than on the lockdown behaviour.
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
   stub ask
   ask() { return 1; }   # decline the port move and the key-only override
 
@@ -891,6 +927,10 @@ test_ssh_port_change_handles_socket_activated_units() {
   have() { [[ $1 == gum ]] && return 1; return 0; }
   stub gum
   gum() { printf '2222\n'; }
+  # Pinned for the same reason: harden_ssh bails out when the port cannot be
+  # determined, which on a test host is always.
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
 
   DRY_RUN=1
   local out
@@ -1051,6 +1091,47 @@ test_dry_run_updates_and_audit_do_not_die() {
   return $rc
 }
 
+test_current_ssh_port_never_guesses() {
+  # The 20-30 "must be sshd" heuristic that used to live here matched Postfix
+  # on 25 on this very box before it ever reached sshd on 1199 - it would have
+  # had the firewall protecting the mail server. So no source is allowed to
+  # invent a port: when nothing authoritative answers, the function returns
+  # empty and fails, and each caller refuses to act.
+  local rc=0 out
+
+  # Nothing answers: ss finds no sshd, no config has a Port, sshd -T is dead.
+  # setup_destdir goes FIRST because it installs its own `peek` stub; calling
+  # `stub peek` before that would save the stub as the "original" and leave
+  # teardown restoring a stub rather than the real function, which poisons
+  # every later test. Its empty CONF_DEST tree is also what silences the
+  # config-file source - otherwise that read answers with this box's real port
+  # (1199), which is correct behaviour and makes this test meaningless.
+  setup_destdir
+  peek() { return 1; }
+  out="$(current_ssh_port 2>/dev/null || true)"
+  if [[ -n $out ]]; then
+    printf '        current_ssh_port invented the port %s when nothing could confirm it\n' "$out"
+    rc=1
+  fi
+
+  # A port on some OTHER service must never be mistaken for sshd.
+  peek() {
+    case "$*" in
+      *ss*) printf 'LISTEN 0 128 0.0.0.0:25 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:443 0.0.0.0:*\n' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  }
+  out="$(current_ssh_port 2>/dev/null || true)"
+  if [[ -n $out ]]; then
+    printf '        current_ssh_port reported %s for a socket that is not sshd\n' "$out"
+    rc=1
+  fi
+
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1140,6 +1221,7 @@ test_ip_forward_never_disabled_when_docker_runs() {
   # running containers, killing container networking with no error anywhere.
   setup_destdir
   # Force the Docker branch without depending on this box having Docker.
+  stub docker_present
   docker_present() { return 0; }
   configure_sysctl >/dev/null 2>&1
   local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
@@ -1157,6 +1239,7 @@ test_ip_forward_zeroed_when_no_docker() {
   # The other direction, so the fix above cannot be gamed by simply removing
   # the setting.
   setup_destdir
+  stub docker_present
   docker_present() { return 1; }
   configure_sysctl >/dev/null 2>&1
   local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
@@ -1345,10 +1428,15 @@ test_firewall_loop_visits_every_port() {
   setup_destdir
   DRY_RUN=1
   local -a asked=()
+  stub listening_ports
   listening_ports() { printf 'tcp 80\ntcp 443\nudp 3478\n'; }
+  stub current_ssh_port
   current_ssh_port() { printf '22\n'; }
+  stub listening_process
   listening_process() { printf 'nginx\n'; }
+  stub docker_present
   docker_present() { return 1; }
+  stub docker_published_by
   docker_published_by() { printf ''; }
   stub have
   have() { return 0; }
@@ -1383,10 +1471,15 @@ test_firewall_skips_the_ssh_port() {
   setup_destdir
   DRY_RUN=1
   local -a asked=()
+  stub listening_ports
   listening_ports() { printf 'tcp 22\ntcp 80\n'; }
+  stub current_ssh_port
   current_ssh_port() { printf '22\n'; }
+  stub listening_process
   listening_process() { printf 'sshd\n'; }
+  stub docker_present
   docker_present() { return 1; }
+  stub docker_published_by
   docker_published_by() { printf ''; }
   stub have
   have() { return 0; }
@@ -1771,6 +1864,7 @@ t 'audit reports rc-state kernel packages'            test_audit_reports_removed
 t 'audit output names rc packages and the purge'      test_audit_output_mentions_rc_packages_and_the_purge
 t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_what_sshd_would_refuse
 t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
+t 'current_ssh_port never guesses'                    test_current_ssh_port_never_guesses
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
 t 'initrd/cmdline are not false positives'              test_untracked_kernels_ignores_files_that_are_untracked_by_design
 t 'running kernel owner resolves on this box'           test_running_kernel_owner_reads_the_real_boot_dir

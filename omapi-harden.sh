@@ -598,19 +598,71 @@ check_users() {
 # drop-in in /etc/ssh/sshd_config.d can move it and the file would not say so.
 current_ssh_port() {
   local port=""
-  port="$(peek sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+  # What the RUNNING daemon is listening on, not what the config file says.
+  # `sshd -T` parses the config, so under --no-restart - where the new port
+  # has been written but sshd has not been restarted - it happily reports the
+  # new port while the daemon is still on the old one. The firewall then opens
+  # the port nobody is listening on and offers to close the one that is in
+  # use, which with default-deny enabled is how you lock yourself out of a
+  # box you are still connected to.
+  #
+  # Sources are tried in order of trustworthiness, and NO source is allowed to
+  # guess. A wrong guess here decides which port the firewall protects, so an
+  # earlier version's "any listening port in 20-30 must be sshd" heuristic was
+  # removed: on this box it matched Postfix on 25 before it ever reached
+  # sshd on 1199, which would have had the firewall protecting the mail server.
+  # Being wrong in the direction of 22 is not safer - the script would open
+  # 22 and offer to close the port the user is actually on.
+  #
+  # `sshd -T` is the most authoritative answer but needs root to read the host
+  # keys, and peek cannot elevate in a non-interactive dry run - so it comes
+  # last, not first. Reading the config file is unprivileged and reflects the
+  # first Port directive, which is what sshd will honour.
+  #
+  # 1. A socket that sshd itself is holding, when the process list is readable.
+  #    Matched on the process name, never on a port range.
+  port="$(peek ss -Hltnp 2>/dev/null |
+    awk '/sshd/ && $4 ~ /:([0-9]+)$/ { n = $4; sub(/^.*:/, "", n); print n; exit }' || true)"
   if [[ -z $port ]]; then
+    # 2. The first Port directive in the effective config. sshd takes the
+    #    first value for Port, and the managed block is prepended, so this is
+    #    the port a restart would use. Read through ${CONF_DEST} so a test can
+    #    point this at an empty tree: it reads the real /etc otherwise, and a
+    #    test that cannot silence this source tests the host, not the function.
     port="$(grep -hsiE '^[[:space:]]*Port[[:space:]]+[0-9]+' \
-      /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null |
+      "${CONF_DEST}"/etc/ssh/sshd_config "${CONF_DEST}"/etc/ssh/sshd_config.d/*.conf 2>/dev/null |
       awk '{print $2; exit}' || true)"
   fi
-  printf '%s\n' "${port:-22}"
+  if [[ -z $port ]]; then
+    # 3. Needs root, so usually only reachable on a real run.
+    port="$(peek sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+  fi
+  if [[ -z $port ]]; then
+    # Nothing authoritative. Do not invent a number: the caller decides what
+    # to do about a port it cannot determine.
+    printf '\n'
+    return 1
+  fi
+  printf '%s\n' "$port"
 }
 
 non_root_sudoer_with_key() {
-  local user
+  local user groups
+  # The "way back in" has to be an account that can actually repair whatever
+  # this script changed. Being able to log in is not enough: without sudo you
+  # cannot undo a bad sshd_config or reopen a closed firewall, so a key on a
+  # non-admin account is not a way back in, it is a way to sit and watch.
+  #
+  # Membership of `docker` counts as well. The daemon socket is root
+  # equivalent - a container can mount the host filesystem - so a user in it
+  # can do everything sudo could, and this box puts the installing user in
+  # docker. Counting only sudo would have rejected the sole real admin here.
   while read -r user; do
     [[ -n $user && $user != root ]] || continue
+    groups="$(id -nG "$user" 2>/dev/null || true)"
+    if [[ " $groups " != *" sudo "* && " $groups " != *" docker "* ]]; then
+      continue
+    fi
     if have_usable_key "$(key_files_for_user "$user")"; then
       printf '%s\n' "$user"
       return 0
@@ -624,7 +676,16 @@ harden_ssh() {
 
   local conf="/etc/ssh/sshd_config"
   local port
-  port="$(current_ssh_port)"
+  # `|| true` because current_ssh_port returns 1 when it cannot determine the
+  # port, and under set -e that would abort the whole ssh task. Handled
+  # explicitly below instead of being allowed to look like port 0.
+  port="$(current_ssh_port || true)"
+  if [[ -z $port ]]; then
+    warn "cannot determine which port sshd is on; skipping SSH hardening"
+    note "this is fail-safe: nothing is written, so the current config stays in force"
+    note "run 'sudo sshd -T | grep ^port' to see the port, then re-run this task"
+    return 1
+  fi
   note "sshd is on port ${port}"
 
   if ! [[ -f $conf ]] && ! ((DRY_RUN)); then
@@ -685,7 +746,20 @@ harden_ssh() {
   # Moving the port only removes noise from the logs; it is not a control.
   # Offered because it is in the guides and because it is harmless, but
   # never the reason a box is called secure.
-  if ask "move sshd off port ${port}? (noise reduction only, not security)" n; then
+  #
+  # Refused outright under --no-restart. That flag exists so a config change
+  # can be staged and activated by hand, but the firewall stage runs in the
+  # same pass and has to decide which port sshd is on. While sshd is still
+  # running the old one, the two disagree: the config says the new port, the
+  # daemon listens on the old. The firewall would then open a port nothing
+  # listens on and offer to close the one in use - and with default-deny
+  # enabled, accepting that is a lockout on a live port. A staged port change
+  # and a firewall that is meant to follow it cannot coexist in one run.
+  if ((NO_RESTART)) && ask "move sshd off port ${port}? (deferred: --no-restart is set)"; then
+    warn "not moving the port: --no-restart means sshd would keep listening on ${port}"
+    note "the firewall stage protects the port sshd is really on, so a staged move would not be followed"
+    note "move the port in a run WITHOUT --no-restart, or apply it by hand once"
+  elif ask "move sshd off port ${port}? (noise reduction only, not security)" n; then
     local candidate=""
     # Read directly rather than through a process substitution: a `read` inside
     # `< <(...)` runs in a subshell, so the value it captured was discarded and
@@ -733,7 +807,14 @@ ClientAliveCountMax 2
 # AllowTcpForwarding is intentionally untouched: config/shell/fns/ssh-port-forwarding
 # relies on it.
 EOF
-    ((change_port)) && printf 'Port %s\n' "$new_port"
+    # Always written, not only when this run moved the port. sshd's `Port` is
+    # additive and the first value wins, so the managed block is what makes the
+    # choice stick. When `Port` was emitted only on a move, re-running after a
+    # move and declining it rewrote the block with no Port line at all while
+    # the old `Port 22` stayed commented out from the previous run - so sshd
+    # silently reverted to 22 while the script went on protecting 2222, on a
+    # path the block comment explicitly invites users to take.
+    printf 'Port %s\n' "$new_port"
     ((LOCKDOWN_SSH)) && printf 'AllowUsers %s\n' "${SUDO_USER:-$(id -un)}"
     printf '%s\n' "$MANAGED_END"
   } >"$block"
@@ -1308,7 +1389,17 @@ configure_firewall() {
   fi
 
   local ssh_port
-  ssh_port="$(current_ssh_port)"
+  ssh_port="$(current_ssh_port || true)"
+  # Stop rather than guess. A `ufw limit /tcp` with an empty port is silently
+  # malformed, and carrying on to default-deny would close the port the user is
+  # connected on. This is the one place in the script where not knowing the
+  # answer must mean doing nothing.
+  if [[ -z $ssh_port ]]; then
+    warn "cannot determine which port sshd is on; not touching the firewall"
+    note "sshd -T and ss both came back empty, so the port cannot be trusted"
+    note "run 'sudo sshd -T | grep ^port' to see it, then re-run this task"
+    return 1
+  fi
   if ((DRY_RUN)); then
     printf '  %s•%s would allow: ufw limit %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
   else
@@ -1622,7 +1713,12 @@ configure_fail2ban() {
   fi
 
   local ssh_port
-  ssh_port="$(current_ssh_port)"
+  ssh_port="$(current_ssh_port || true)"
+  if [[ -z $ssh_port ]]; then
+    warn "cannot determine which port sshd is on; skipping fail2ban setup"
+    note "a jail with an empty port would ban nothing and look configured"
+    return 1
+  fi
 
   # ufw ships an action in fail2ban; without it a ban would be written to an
   # iptables chain ufw does not read, which looks configured and bans nothing.
