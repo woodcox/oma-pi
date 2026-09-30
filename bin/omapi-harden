@@ -435,38 +435,29 @@ replace_managed_block() {
   # unprivileged shell, not by the privileged child, so it fails on a root-only
   # file with the same permission error.
   #
-  # Not `cp -p`: that would carry the body's metadata across, and $body is a
-  # mktemp file, so /etc/ufw/after.rules would be rewritten 0600 owned by the
-  # invoking user - replacing the 0640 root:root that ufw ships and that
-  # `ufw` expects to find. Preserve the target's own mode and owner when it
-  # exists, and set 0644 root:root when creating it.
-  local tmode towner tgroup
+  # `cp` WITHOUT `-p`, and no stat/chmod/chown round-trip for an existing
+  # target. When the target already exists, cp opens and truncates the existing
+  # inode, so its mode and owner are preserved exactly - there is no window in
+  # which the file is 0600 or owned by the caller. `cp -p` carries the mktemp
+  # body's metadata (0600, owned by the invoking user) across, and undoing that
+  # needed a fragile stat-then-chown round-trip whose failure path silently
+  # handed a root config to the caller. Only a brand-new target needs an
+  # explicit mode; it has no metadata of its own to preserve.
   if [[ -e $target ]]; then
-    # Preserve exactly what the target already has. A stat failure must NOT
-    # fall back to a mode and then apply it: for the ufw rule files that is
-    # 0640 root:root, and writing 0644 over a root-only file weakens it.
-    tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
-    towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
-    tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
-    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
-      warn "could not read the mode/owner of $target; leaving its permissions untouched"
-      run_root cp -p "$body" "$target"
-      rm -f "$body"
-      return 0
-    fi
+    run_root cp "$body" "$target"
   else
     # 0640 root:root is what ufw ships for after.rules/after6.rules; 0644 is
     # right for sshd_config. Defaulting to 0644 would make a hardening script
     # create a world-readable rules file.
+    local tmode
     case $target in
       */ufw/after.rules|*/ufw/after6.rules) tmode=640 ;;
       *) tmode=644 ;;
     esac
-    towner=0 tgroup=0
+    run_root cp "$body" "$target"
+    run_root chown 0:0 "$target"
+    run_root chmod "$tmode" "$target"
   fi
-  run_root cp -p "$body" "$target"
-  run_root chown "$towner:$tgroup" "$target"
-  run_root chmod "$tmode" "$target"
   rm -f "$body"
 }
 
@@ -1975,8 +1966,18 @@ configure_docker_ufw() {
   # Restoring puts the pre-change file back and reloads, so it is used both
   # when the fragment is malformed and when the reload itself fails.
   restore_rules() {
+    # Return the real outcome so the caller can report it, rather than the
+    # caller re-checking a variable restore_rules has already cleared (which
+    # made the success branch dead code and always printed the warning).
+    #   0 = after.rules restored, 1 = no snapshot to restore, 2 = cp failed.
+    local rstatus=1
     if [[ -n $rules_backup ]]; then
-      run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || warn "could not restore after.rules from the backup; ufw may fail to reload"
+      if run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules"; then
+        rstatus=0
+      else
+        warn "could not restore after.rules from the backup; ufw may fail to reload"
+        rstatus=2
+      fi
     fi
     if [[ -n ${rules6_backup:-} ]]; then
       run_root cp -p "$rules6_backup" "${CONF_DEST}/etc/ufw/after6.rules" || warn "could not restore after6.rules from the backup; ufw may fail to reload"
@@ -1987,6 +1988,7 @@ configure_docker_ufw() {
     # no IPv6 ruleset, and an unquoted-unset under set -u would abort.
     run_root rm -f "$rules_backup" ${rules6_backup:-}
     rules_backup="" rules6_backup=""
+    return $rstatus
   }
 
   # Checked through CONF_DEST so this works against a temporary tree, and so
@@ -2014,7 +2016,7 @@ configure_docker_ufw() {
     # is the normal case for `omapi-harden` run as a normal user, and refusing
     # to configure Docker at all there would be worse than proceeding with a
     # loud warning; a real run of this script is `sudo omapi-harden`.
-    local vrc=0
+    local vrc=0 rrc=0
     validate_docker_ufw_rules "${CONF_DEST}/etc/ufw/after.rules" || vrc=$?
     case $vrc in
       0)
@@ -2025,16 +2027,15 @@ configure_docker_ufw() {
         # disk means the next `ufw reload` by anything - including ufw's own
         # boot-time restore - trips over it, and the user gets no firewall.
         warn "the DOCKER-USER rules are malformed; not reloading ufw"
-        restore_rules
-        # Only claim a restore when one actually happened. restore_rules is a no-op
-  # with no snapshot - which is the case when after.rules did not exist when
-  # the task started - and reporting a restore that never occurred is exactly
-  # the sort of false success this script is supposed to avoid.
-  if [[ -n ${rules_backup:-} ]]; then
-    note "the previous /etc/ufw/after.rules has been restored"
-  else
-    warn "no snapshot of /etc/ufw/after.rules was taken; it has NOT been restored"
-  fi
+        restore_rules || rrc=$?
+        # Report what restore_rules actually did, not whether a snapshot
+        # variable still exists (restore_rules clears it, so that check was
+        # always false and the success note was dead code).
+        case $rrc in
+          0) note "the previous /etc/ufw/after.rules has been restored" ;;
+          2) warn "could not restore the previous /etc/ufw/after.rules; ufw may fail to reload" ;;
+          *) warn "no snapshot of /etc/ufw/after.rules was taken; it has NOT been restored" ;;
+        esac
         return 1
         ;;
       *)
@@ -2053,7 +2054,7 @@ configure_docker_ufw() {
       rules6_backup=""
     else
       warn "ufw reload failed; restoring the previous rules and reloading again"
-      restore_rules
+      restore_rules || true
       run_root ufw reload || warn "ufw is still not reloading - check 'ufw status' and the journal"
       return 1
     fi

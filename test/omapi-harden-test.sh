@@ -1382,24 +1382,19 @@ test_ask_never_passes_a_flag_gum_will_reject() {
 
 test_managed_block_preserves_target_mode_and_owner() {
   # `cp -p "$body" "$target"` imported mktemp's 0600 and the invoking user's
-  # ownership, replacing the 0640 root:root that ufw ships. Assert the mode is
-  # restored after the copy rather than taken from the temp file.
+  # ownership, replacing the 0640 root:root that ufw ships. The write must use
+  # a plain `cp` (no -p): overwriting the existing inode preserves the
+  # target's own mode and owner, so no stat/chown round-trip - and no failure
+  # path that silently hands the file to the caller - is needed.
   setup_destdir
   local rc=0
   local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
-  # A bare `run_root cp -p "$body" "$target"` is still fine PROVIDED mode and
-  # owner are restored straight after it, which is what F1 asked for. So this
-  # asserts the restore exists, not that the cp is absent.
-  if ! grep -q 'run_root chmod "\$tmode" "\$target"' "$f"; then
-    printf '        the target mode is not restored after the copy\n'
+  if grep -q 'run_root cp -p "\$body" "\$target"' "$f"; then
+    printf '        the target is written with cp -p, importing the temp file metadata\n'
     rc=1
   fi
-  if ! grep -q 'run_root chmod "\$tmode" "\$target"' "$f"; then
-    printf '        the target mode is not restored after the copy\n'
-    rc=1
-  fi
-  if ! grep -q 'run_root chown "\$towner:\$tgroup" "\$target"' "$f"; then
-    printf '        the target owner is not restored after the copy\n'
+  if ! grep -q 'run_root cp "\$body" "\$target"' "$f"; then
+    printf '        the target is not written with a plain run_root cp\n'
     rc=1
   fi
   teardown_destdir
@@ -1501,6 +1496,18 @@ test_managed_block_refuses_rather_than_truncating_an_unreadable_target() {
   # peek must also fail, so simulate no root at all: both reads fail.
   stub peek
   peek() { return 1; }
+  # The direct read must fail deterministically, whatever uid runs the suite.
+  # root bypasses chmod 000, so relying on the permissions wall makes the read
+  # succeed on a CI runner and the rewrite happen even though the code under
+  # test is correct. Stub awk to fail only when its last argument is this
+  # target, forwarding every other awk call to the real binary.
+  stub awk
+  awk() {
+    if [[ ${@: -1} == "$f" ]]; then
+      return 1
+    fi
+    command awk "$@"
+  }
   replace_managed_block "$block" /etc/ufw/locked.rules \
     "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom >/dev/null 2>&1
   local r=$?
@@ -1574,8 +1581,72 @@ test_replace_managed_block_writes_target_with_run_root() {
     printf '        the target is written by an unprivileged redirection\n'
     rc=1
   fi
-  if ! grep -q 'run_root cp -p "\$body" "\$target"' "$f"; then
+  if ! grep -q 'run_root cp "\$body" "\$target"' "$f"; then
     printf '        the target is not written with run_root cp\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_malformed_restore_reports_success() {
+  # When a snapshot was taken and restore_rules copies it back, the caller must
+  # say so. The old code checked `[[ -n ${rules_backup:-} ]]` AFTER restore_rules
+  # had cleared it, so the success note was dead and the "no snapshot" warning
+  # printed even on a perfect restore.
+  setup_destdir
+  local rc=0
+  mkdir -p "$CONF_DEST/etc/ufw"
+  printf '*filter\n-A original -j ACCEPT\nCOMMIT\n' >"$CONF_DEST/etc/ufw/after.rules"
+
+  stub docker_present
+  docker_present() { return 0; }
+  stub docker_ufw_installed
+  docker_ufw_installed() { return 0; }
+  stub validate_docker_ufw_rules
+  validate_docker_ufw_rules() { return 1; }
+  stub docker_offer_published_ports
+  docker_offer_published_ports() { return 0; }
+
+  local out r
+  out="$(configure_docker_ufw 2>&1)"; r=$?
+
+  if ! grep -q 'the previous /etc/ufw/after.rules has been restored' <<<"$out"; then
+    printf '        did not report a successful restore (rc=%s):\n%s\n' "$r" "$out"
+    rc=1
+  fi
+  if grep -q 'no snapshot of /etc/ufw/after.rules was taken' <<<"$out"; then
+    printf '        reported "no snapshot" despite a successful restore\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_malformed_restore_reports_no_snapshot() {
+  # With no snapshot at all the caller must say so distinctly, not claim a
+  # restore happened.
+  setup_destdir
+  local rc=0
+
+  stub docker_present
+  docker_present() { return 0; }
+  stub docker_ufw_installed
+  docker_ufw_installed() { return 0; }
+  stub validate_docker_ufw_rules
+  validate_docker_ufw_rules() { return 1; }
+  stub docker_offer_published_ports
+  docker_offer_published_ports() { return 0; }
+
+  local out r
+  out="$(configure_docker_ufw 2>&1)"; r=$?
+
+  if ! grep -q 'no snapshot of /etc/ufw/after.rules was taken' <<<"$out"; then
+    printf '        did not report the missing snapshot (rc=%s):\n%s\n' "$r" "$out"
+    rc=1
+  fi
+  if grep -q 'the previous /etc/ufw/after.rules has been restored' <<<"$out"; then
+    printf '        claimed a restore happened when there was no snapshot\n'
     rc=1
   fi
   teardown_destdir
@@ -2289,6 +2360,8 @@ t 'ufw snapshot cleanup uses run_root'       test_ufw_snapshot_cleanup_uses_run_
 t 'ufw rules snapshot uses run_root'         test_ufw_rules_snapshot_is_taken_with_run_root
 t 'managed block reads target via peek'      test_replace_managed_block_reads_target_via_peek
 t 'managed block writes target with run_root' test_replace_managed_block_writes_target_with_run_root
+t 'ufw malformed restore reports success'    test_ufw_malformed_restore_reports_success
+t 'ufw malformed restore reports no snapshot' test_ufw_malformed_restore_reports_no_snapshot
 t 'pi is locked when another account can log in'     test_pi_is_locked_when_another_account_can_log_in
 t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
 t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
