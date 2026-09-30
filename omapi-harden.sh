@@ -458,21 +458,32 @@ key_strict_modes_ok() {
     fi
   fi
 
-  for d in "$f" "$(dirname "$f")" "$(dirname "$(dirname "$f")")"; do
-    [[ -e $d ]] || continue
-    # -A: group or other has any write bit.
-    if [[ -n $(find "$d" -maxdepth 0 -perm /022 2>/dev/null) ]]; then
-      return 1
-    fi
+  # Every directory from the file up to /, not just three levels. sshd walks
+  # the whole canonical parent path, so a writable /home or /home/shared
+  # above a correctly-permissioned .ssh still gets the key refused - and
+  # that is the case a fixed three-level check cannot see.
+  local d
+  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd)" || return 1
+  while [[ -n $d && $d != "/" ]]; do
+    [[ -n $(find "$d" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
+    [[ $d == "$(dirname "$d")" ]] && break
+    d="$(dirname "$d")"
   done
+  # The file itself, which is not a directory on the walk above.
+  [[ -n $(find "$f" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
   return 0
 }
 
 # Resolve the real home directory rather than assuming /home/$user, and honour
 # the AuthorizedKeysFile setting if sshd has been told to use something else.
 key_files_for_user() {
-  local user="${1:-$(id -un)}" home auth
+  local user="${1:-$(id -un)}" home auth target_uid
   home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"
+  # %U is the numeric UID. Resolved here rather than substituted with the
+  # username, which is what a previous version did and which checked
+  # authorized_keys_<username> instead of the authorized_keys_<uid> sshd
+  # actually reads.
+  target_uid="$(getent passwd "$user" 2>/dev/null | cut -d: -f3)"
   if [[ -z $home ]]; then
     # No passwd entry, or no getent. Fall back to the convention rather than
     # silently checking nothing.
@@ -483,14 +494,26 @@ key_files_for_user() {
   auth="$(peek sshd -T -C "user=$user,host=localhost,addr=127.0.0.1" 2>/dev/null |
     awk '/^authorizedkeysfile /{ $1=""; sub(/^ +/, ""); print; exit }' || true)"
   if [[ -n $auth ]]; then
+    # `sshd -T` prints every AuthorizedKeysFile path space-separated on ONE
+    # line, so a `while read` over it yields a single value containing all of
+    # them glued together: "/home/u/.ssh/authorized_keys .ssh/authorized_keys2".
+    # have_usable_key then tests that as one non-existent filename, so on a box
+    # with two default paths NEITHER is ever checked - and the lockout check
+    # reports "no usable key" while a perfectly good key sits in the first
+    # file. Split on whitespace into separate entries, then expand each.
+    local -a auth_paths=()
     local f
-    while IFS= read -r f; do
+    read -r -a auth_paths <<<"$auth"
+    for f in "${auth_paths[@]}"; do
       [[ -n $f ]] || continue
       f="${f//\%h/$home}"
       f="${f//\%H/$home}"
       f="${f//\%d/$home}"
       f="${f//\%u/$user}"
-      f="${f//\%U/$user}"
+      # %U is the numeric UID, not the username. Expanding it to $user checked
+      # a username-suffixed file instead of the UID-suffixed one sshd actually
+      # reads, so a key in the real file was never found.
+      f="${f//\%U/$target_uid}"
       # `sshd -T` prints the *effective* setting, and sshd's own default is
       # the relative `.ssh/authorized_keys` - it does not expand it to an
       # absolute path. The sed above only fired when the token literally
@@ -501,7 +524,7 @@ key_files_for_user() {
       # meaningless and refuses --lockdown-ssh every time.
       [[ $f == /* ]] || f="$home/$f"
       printf '%s\n' "$f"
-    done <<<"$auth"
+    done
   else
     printf '%s\n' "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"
   fi
@@ -2239,12 +2262,18 @@ audit() {
   # `grep -c` prints a 0 and still exits 1 when nothing matches, so the
   # `|| echo` used to fire as well and emit a stray '?' under the count.
   if [[ -r /var/lib/dpkg/status ]]; then
-    # `|| upgradable=""` for the same reason: peek returns 1 when it cannot
-    # get root, pipefail propagates that, and set -e kills the script before
-    # the audit prints anything. Reproduced as
-    # `./omapi-harden.sh --dry-run audit` exiting 1 on the section header.
-    upgradable="$(peek apt list --upgradable 2>/dev/null |
-      awk '/^[^ ]+\/[^ ]+ .*upgradable from/{n++} END{print n + 0}' || true)"
+    # The `|| true` added when this aborting under set -e also let awk's
+    # `END{print n+0}` print 0 when the lookup failed, so a peek that could
+    # not run reported "pending updates: 0" - indistinguishable from a fully
+    # patched box, and the more dangerous direction. Check the lookup's status
+    # first and only accept its count when it actually succeeded.
+    local apt_out=""
+    if apt_out="$(peek apt list --upgradable 2>/dev/null)"; then
+      upgradable="$(printf '%s' "$apt_out" |
+        awk '/^[^ ]+\/[^ ]+ .*upgradable from/{n++} END{print n + 0}')"
+    else
+      upgradable="unknown (needs root)"
+    fi
     [[ -n $upgradable ]] || upgradable="unknown (needs root)"
   fi
 

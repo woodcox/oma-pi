@@ -1056,6 +1056,66 @@ test_current_ssh_port_never_guesses() {
   return $rc
 }
 
+test_key_files_for_user_splits_multiple_paths() {
+  # Regression, and the worst bug CodeRabbit found on this PR. `sshd -T`
+  # prints every AuthorizedKeysFile space-separated on ONE line, so a
+  # `while read` over it produced a single value with both default paths glued
+  # together: "/home/u/.ssh/authorized_keys .ssh/authorized_keys2". Neither was
+  # ever checked, so the lockout check reported "no usable key" on a box with
+  # a perfectly good key in the first file - and the whole point of the check
+  # is to know whether you can get back in.
+  setup_destdir
+  local rc=0 out
+  stub getent
+  getent() { echo "x:x:1000:1000::/home/tester:/bin/bash"; return 0; }
+  stub peek
+  peek() {
+    case "$*" in
+      *sshd*) printf 'authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2\n' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  }
+  out="$(key_files_for_user tester)"
+  [[ $(wc -l <<<"$out") -eq 2 ]] || {
+    printf '        expected 2 paths, got %s: [%s]\n' "$(wc -l <<<"$out")" "$out"
+    rc=1
+  }
+  grep -qx '/home/tester/.ssh/authorized_keys'  <<<"$out" || rc=1
+  grep -qx '/home/tester/.ssh/authorized_keys2' <<<"$out" || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_key_files_expands_percent_U_to_the_numeric_uid() {
+  # %U is the numeric UID. It was expanded to the username, so
+  # `AuthorizedKeysFile .ssh/authorized_keys_%U` checked a username-suffixed
+  # file instead of the UID-suffixed one sshd actually reads.
+  setup_destdir
+  local rc=0
+  stub getent
+  getent() { echo "x:x:1000:1000::/home/tester:/bin/bash"; return 0; }
+  stub peek
+  peek() {
+    case "$*" in
+      *sshd*) printf 'authorizedkeysfile .ssh/authorized_keys_%%U\n' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  }
+  local out; out="$(key_files_for_user tester)"
+  grep -qx '/home/tester/.ssh/authorized_keys_1000' <<<"$out" || {
+    printf '        %%U did not expand to the uid: [%s]\n' "$out"
+    rc=1
+  }
+  # The exact-match above is the assertion. A substring check for the username
+  # is not: the username is legitimately part of the path, so it is always
+  # present whether or not %U was expanded wrongly. This version of the test
+  # failed against correct code for that reason.
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1784,6 +1844,8 @@ t 'docker/tailscale/github-cli stay out of unattended'  test_third_party_repos_a
 t 'held-back packages are parsed out of apt'          test_held_back_packages_are_named
 t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
 t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_what_sshd_would_refuse
+t 'key_files_for_user splits multiple paths'         test_key_files_for_user_splits_multiple_paths
+t '%U expands to the numeric uid'                    test_key_files_expands_percent_U_to_the_numeric_uid
 t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
 t 'current_ssh_port never guesses'                    test_current_ssh_port_never_guesses
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
