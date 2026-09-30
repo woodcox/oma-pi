@@ -1116,6 +1116,49 @@ test_key_files_expands_percent_U_to_the_numeric_uid() {
   return $rc
 }
 
+test_a_failing_awk_in_the_port_rewrite_is_not_silent() {
+  # GLM finding 3. A failure inside `awk && cat && rm` is exempt from set -e, so
+  # the Port rewrite used to fail silently: harden_ssh returned 0, printed
+  # "sshd accepts the new config", left two active `Port` lines and a stray
+  # .omapi-tmp, and warned about nothing. A config write that failed silently
+  # is the worst case there is here.
+  setup_destdir
+  local rc=0
+  stub current_ssh_port
+  current_ssh_port() { printf '2222\n'; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "/home/x/.ssh/authorized_keys"; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'keyful\n'; }
+  stub ask
+  ask() { return 1; }
+  # A failing awk: any call at all fails.
+  stub awk
+  awk() { return 3; }
+
+  mkdir -p "$CONF_DEST/etc/ssh"
+  printf 'Port 2222\nPermitRootLogin yes\n' >"$CONF_DEST/etc/ssh/sshd_config"
+
+  DRY_RUN=0
+  harden_ssh >/dev/null 2>&1
+  local hrc=$?
+  DRY_RUN=0
+
+  if ((hrc == 0)); then
+    printf '        harden_ssh reported success even though the Port rewrite failed\n'
+    rc=1
+  fi
+  # And no temp file left behind.
+  if [[ -n $(find "$CONF_DEST" -name '*.omapi-tmp' 2>/dev/null) ]]; then
+    printf '        a .omapi-tmp file was left behind after the failure\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -1846,6 +1889,7 @@ t 'the held-back warning reaches the output'          test_held_back_warning_rea
 t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_what_sshd_would_refuse
 t 'key_files_for_user splits multiple paths'         test_key_files_for_user_splits_multiple_paths
 t '%U expands to the numeric uid'                    test_key_files_expands_percent_U_to_the_numeric_uid
+t 'a failing awk in the Port rewrite is not silent'  test_a_failing_awk_in_the_port_rewrite_is_not_silent
 t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
 t 'current_ssh_port never guesses'                    test_current_ssh_port_never_guesses
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image

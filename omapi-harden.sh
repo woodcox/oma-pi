@@ -469,9 +469,27 @@ key_strict_modes_ok() {
   # blocks --lockdown-ssh on an entirely legitimate setup. The kernel's view
   # is what sshd uses, so ask for that. -L does the same for the walk.
   local d dircount=0
+  # Resolve the FILE itself, not just its parent. `pwd -P` canonicalises the
+  # directory, so a symlinked authorized_keys kept a clean link-path while
+  # `find -L "$f"` only checked the target file's own mode - the target's
+  # parents were never walked. sshd realpath()s the file and walks the
+  # resolved chain, so a key under a group-writable directory was ACCEPTED
+  # here and REFUSED by sshd. False "usable" is the lockout direction.
+  f="$(readlink -f "$f" 2>/dev/null || echo '')"
+  [[ -n $f && -e $f ]] || return 1
   d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 1
-  while [[ -n $d && $d != "/" ]] && ((dircount < 64)); do
+  # No iteration cap: dirname converges to / on its own, so a cap bounds
+  # nothing except the number of components actually checked. One version had
+  # `&& ((dircount < 64))`, which on a path deeper than 64 SILENTLY SKIPPED the
+  # remaining checks - so a group-writable ancestor 70 levels up was accepted
+  # while the same tree two levels deep was rejected. That is the lockout
+  # direction, and it was a "safety" cap that reduced safety. If the path is
+  # pathological, fail rather than check part of it.
+  while [[ -n $d && $d != "/" ]]; do
     dircount=$((dircount + 1))
+    if ((dircount > 64)); then
+      return 1
+    fi
     # The 022 part: group or other has any write bit.
     [[ -n $(find -L "$d" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
     # Ownership of EVERY component, not just the file: sshd's secure_filename
@@ -926,7 +944,7 @@ EOF
   # position: a blanket regex cannot tell the block's `Port` from the
   # stock file's, and commenting out both would leave sshd with no port at all.
   if ((!DRY_RUN)); then
-    awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" -v keep="$new_port" '
+    if ! awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" '
       $0 == b1 { inside = 1; print; next }
       $0 == b2 { inside = 0; print; next }
       inside != 1 && $0 ~ /^[[:space:]]*[#[:space:]]*Port[[:space:]]+[0-9]+/ {
@@ -937,8 +955,50 @@ EOF
         next
       }
       { print }
-    ' "$target" >"$target.omapi-tmp" && cat "$target.omapi-tmp" >"$target" \
-      && rm -f "$target.omapi-tmp"
+    ' "$target" >"$target.omapi-tmp"; then
+      # A failure inside `awk && cat && rm` is exempt from set -e, so this
+      # used to fail silently: harden_ssh returned 0, printed "sshd accepts
+      # the new config", and left two active Port lines plus a stray temp file
+      # with no warning anywhere. Verified with an injected failing awk. Treat
+      # it as the config-write failure it is.
+      warn "could not rewrite the Port lines in ${conf}"
+      rm -f "$target.omapi-tmp"
+      if [[ -n $backup && -f $backup ]]; then
+        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+      fi
+      return 1
+    fi
+    # cat into the original rather than mv, so mode, owner and inode survive.
+    cat "$target.omapi-tmp" >"$target"
+    rm -f "$target.omapi-tmp"
+
+    # The same pass over /etc/ssh/sshd_config.d drop-ins. sshd reads those, and
+    # current_ssh_port reads them, but the main-file pass cannot see them - so
+    # a drop-in carrying an active `Port` was left untouched and sshd ended up
+    # with the port twice. Reproduced end to end: drop-in `Port 2222` plus the
+    # managed block's `Port 2222` gave `sshd -T` reporting the port twice.
+    local dropin
+    for dropin in "${CONF_DEST}"/etc/ssh/sshd_config.d/*.conf; do
+      [[ -f $dropin ]] || continue
+      if awk '
+        $0 ~ /^[[:space:]]*Port[[:space:]]+[0-9]+/ {
+          line = $0
+          sub(/^[[:space:]]*/, "", line)
+          if (line ~ /^#/) { print; next }
+          print "# " line
+          next
+        }
+        { print }
+      ' "$dropin" >"$dropin.omapi-tmp"; then
+        cat "$dropin.omapi-tmp" >"$dropin"
+        rm -f "$dropin.omapi-tmp"
+      else
+        # Never rewrite a file we cannot read back correctly: a half-written
+        # drop-in is a box that may not come back.
+        warn "could not rewrite Port lines in ${dropin}; leaving it untouched"
+        rm -f "$dropin.omapi-tmp"
+      fi
+    done
   fi
 
   rm -f "$block"
