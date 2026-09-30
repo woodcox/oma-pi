@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for omapi-harden.sh. Sourced, never executed, so main() never runs.
+# Tests for omapi-harden. Sourced, never executed, so main() never runs.
 #
 # The interesting tests here are the ones that check the script cannot lock
 # you out of your own machine. A hardening script is only ever as good as
@@ -10,14 +10,14 @@
 set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$TEST_DIR/omapi-harden.sh"
+SCRIPT="$TEST_DIR/bin/omapi-harden"
 PASS=0
 FAIL=0
 # Test functions already run, so t() can reject a duplicate registration
 # rather than silently running the same test twice and counting it twice.
 _SEEN_TESTS=()
 
-# shellcheck source=../omapi-harden.sh
+# shellcheck source=../bin/omapi-harden
 source "$SCRIPT"
 
 # Snapshot the script's own functions, so t() can tell when a test has
@@ -404,7 +404,7 @@ EOF
   [[ $parsed == *"tcp 22"* ]]
 }
 
-# Runs the REAL parser from omapi-harden.sh against the given fixture. A copied
+# Runs the REAL parser from omapi-harden against the given fixture. A copied
 # duplicate of the awk program is what let a broken parser pass its own test.
 _parse_ports() {
   listening_ports "$1"
@@ -800,7 +800,7 @@ test_force_flag_is_not_accepted() {
   # script must never offer. It has been removed, so it must now be rejected.
   #
   # Uses `bash "$SCRIPT"` and the same rc-then-assert shape as
-  # test_unknown_option_rejected: the earlier version ran ./omapi-harden.sh with
+  # test_unknown_option_rejected: the earlier version ran omapi-harden with
   # `|| rc=1` under a test-local `local rc=0`, so the non-zero exit it saw
   # from the rejection and the non-zero exit it expected were indistinguishable.
   local out rc
@@ -882,7 +882,7 @@ test_docker_loopback_survives_a_missing_protocol_suffix() {
 
 test_dry_run_does_not_create_directories() {
   # `install -d` used to run before the dry-run return in
-  # replace_managed_block, so `./omapi-harden.sh --dry-run` created /etc/ssh and
+  # replace_managed_block, so `omapi-harden --dry-run` created /etc/ssh and
   # /etc/ufw. A dry run that mutates the filesystem is not a dry run.
   setup_destdir
   local rc=0 d="$CONF_DEST/etc/brand-new-dir"
@@ -1530,7 +1530,7 @@ test_ask_uses_gum_not_a_tty_check() {
 }
 
 test_lockout_prompt_defaults_to_no() {
-  # `sudo ./omapi-harden.sh --yes` must NOT be able to disable SSH passwords with
+  # `sudo omapi-harden --yes` must NOT be able to disable SSH passwords with
   # no verified way back in. ask returning its default under --yes means the
   # default has to be n.
   local body rc=0
@@ -1552,7 +1552,7 @@ test_lockout_prompt_defaults_to_no() {
 }
 
 test_lockdown_ssh_never_writes_allowusers_root() {
-  # Under `sudo ./omapi-harden.sh`, id -un is root. AllowUsers root next to
+  # Under `sudo omapi-harden`, id -un is root. AllowUsers root next to
   # PermitRootLogin no is a config sshd -t accepts and that locks out every
   # account, so the bare $(id -un) must not be what gets written.
   local body rc=0

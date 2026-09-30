@@ -8,7 +8,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
   - Tested on Raspberry Pi OS Lite / Debian 12 (bookworm).
   - **Ubuntu 24.04 (noble) or newer.** Ubuntu moved sshd to systemd socket
     activation in 22.10. On 24.04 and later a `Port` change in
-    `sshd_config` is read by a systemd generator, so `omapi-harden.sh` can move
+    `sshd_config` is read by a systemd generator, so `omapi-harden` can move
     the port by reloading and restarting `ssh.socket`. On 22.10 through
     23.10 there is no such generator: `ssh.socket` uses a fixed
     `ListenStream=22`, the `Port` directive is ignored, and the script would
@@ -18,13 +18,9 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
     enable. The installer skips it and says so rather than failing the run.
     Enable it with `sudo add-apt-repository universe` to get the file manager.
 - Harden the RPi / VM by following: 
-  - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
-  - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)
-  - [Raspberry Pi hardening tips](https://raspberrytips.com/security-tips-raspberry-pi/)
+  
 
-`omapi-harden.sh` automates the hardening those three guides describe, if you would rather not do it by hand.
-- Internet connection
-- `sudo` privileges
+  - `omapi-harden` automates the hardening those three guides describe, 
 
 ## Install
 
@@ -33,28 +29,90 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 
 ```
 
+## What it sets up
+
+- **Shell**: Bash with starship prompt, fzf, eza, zoxide
+- **Files**: nnn as the interactive file manager
+- **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
+- **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
+- **Dev tools**: deno, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
+- **Optional AI tools**: opencode, claude-code, hermes-agent
+- **Networking**: SSH, tailscale
+- **Git**: Interactive config for user name/email, helpful aliases
+
+## Interactive prompts
+
+During installation you'll be asked for:
+
+- Git user name
+- Git email address
+
+And you'll be offered to setup:
+
+- GitHub
+- Root level user permissions for Docker
+- SSH public keys
+- Tailscale
+- Optional editor (Fresh)
+- Optional AI assistants (opencode, claude-code and hermes-agent)
+
+> Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
+
+> Security note: the installer adds the user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
+
+## Commands
+See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omapi-manual/113/hotkeys) for using:
+
+ - `omapi-setup`: Git name and email and github cli
+ - `omapi-refresh`: Reinstall Oma-pi with initial configs
+ - `omapi-ssh`: Add SSH key for remote access
+ - `omapi-harden`: One-time security hardening — run `omapi-harden --dry-run` first. See security hardening section for further details
+
+ - [opencode](https://opencode.ai/): alias `c`
+ - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
+ - Hermes: alias `ha=hermes`
+ - Docker: alias `d`
+ - Lazydocker: alias `lzd`
+ - Tmux alias: 
+      - `t=tmux attach || tmux new -s Work`
+      - `ic=tdl c`
+      - `ix=tdl cx`
+      - `icx=tdl c cx`
+ - Github: alias `gh`
+ - Git alias:   
+      - `g=git`
+      - `gcm=git commit -m`
+      - `gcam=git commit -a -m`
+ - [Fzf](https://junegunn.github.io/fzf/): alias `ff`
+ - [Zoxide](https://github.com/ajeetdsouza/zoxide): alias `cd`
+ - [Eza](https://eza.rocks/) alias:
+      - `ls`
+      - `lt` for listing of two-deep levels of nesting
+      - `lsa` for listing including hidden files
+      - `lta` for a nested listing with hidden files
+ - [Btop](https://github.com/aristocratos/btop)
+ - [nnn](https://github.com/jarun/nnn) file manager
+ - [tldr](https://tldr.sh/)
+
 ## Security hardening
 
-```bash
-git clone https://github.com/woodcox/oma-pi.git
-cd oma-pi
-
-./omapi-harden.sh --dry-run     # read the plan, change nothing
-sudo ./omapi-harden.sh           # do it
-```
-
-`omapi-harden.sh` applies the advice from the three hardening guides linked under Requirements:
+After installing you can run `omapi-harden` which applies the following hardening: 
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
-security updates, AppArmor, and kernel and network sysctls. File-integrity monitoring
-(aide) is opt-in — ask for it by name, since building the baseline reads the whole
+security updates, AppArmor, and kernel and network sysctls. 
+
+File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 
 ```bash
-./omapi-harden.sh --list                 # available tasks
-sudo ./omapi-harden.sh ssh firewall      # just these two
-sudo ./omapi-harden.sh --yes             # take the recommended defaults
+omapi-harden --list               # available tasks
+omapi-harden ssh firewall        # just these two
+omapi-harden --yes               # take the recommended defaults
 ./test/omapi-harden-test.sh              # 77 tests, no root needed
 ```
+If you would rather do it by hand, please see the three hardening guides below:
+  - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
+  - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)
+  - [Raspberry Pi hardening tips](https://raspberrytips.com/security-tips-raspberry-pi/)
 
 Some deliberate choices worth knowing before you run it:
 
@@ -115,68 +173,3 @@ Some deliberate choices worth knowing before you run it:
 - **Wi-Fi and Bluetooth are not disabled.** That needs a `/boot/config.txt`
   dtoverlay and a reboot, and getting it wrong drops the box off the network you
   are managing it over. The exact lines are printed at the end of a run.
-
-## What it sets up
-
-- **Shell**: Bash with starship prompt, fzf, eza, zoxide
-- **Files**: nnn as the interactive file manager
-- **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
-- **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
-- **Dev tools**: deno, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
-- **Optional AI tools**: opencode, claude-code, hermes-agent
-- **Networking**: SSH, tailscale
-- **Git**: Interactive config for user name/email, helpful aliases
-
-## Interactive prompts
-
-During installation you'll be asked for:
-
-- Git user name
-- Git email address
-
-And you'll be offered to setup:
-
-- GitHub
-- Root level user permissions for Docker
-- SSH public keys
-- Tailscale
-- Optional editor (Fresh)
-- Optional AI assistants (opencode, claude-code and hermes-agent)
-
-> Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
-
-> Security note: the installer adds the user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
-
-## Commands
-See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omapi-manual/113/hotkeys) for using:
-
- - `omapi-setup`: Git name and email and github cli
- - `omapi-refresh`: Reinstall Oma-pi with initial configs
-  - `omapi-ssh`: Add SSH key for remote access
-  - `omapi-harden`: One-time security hardening — run `./omapi-harden.sh --dry-run` first
-
- - [opencode](https://opencode.ai/): alias `c`
- - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
- - Hermes: alias `ha=hermes`
- - Docker: alias `d`
- - Lazydocker: alias `lzd`
- - Tmux alias: 
-      - `t=tmux attach || tmux new -s Work`
-      - `ic=tdl c`
-      - `ix=tdl cx`
-      - `icx=tdl c cx`
- - Github: alias `gh`
- - Git alias:   
-      - `g=git`
-      - `gcm=git commit -m`
-      - `gcam=git commit -a -m`
- - [Fzf](https://junegunn.github.io/fzf/): alias `ff`
- - [Zoxide](https://github.com/ajeetdsouza/zoxide): alias `cd`
- - [Eza](https://eza.rocks/) alias:
-      - `ls`
-      - `lt` for listing of two-deep levels of nesting
-      - `lsa` for listing including hidden files
-      -  `lta` for a nested listing with hidden files
- - [Btop](https://github.com/aristocratos/btop)
- - [nnn](https://github.com/jarun/nnn) file manager
- - [tldr](https://tldr.sh/)
