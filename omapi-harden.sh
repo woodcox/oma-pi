@@ -440,6 +440,11 @@ have_usable_key() {
 # needed.
 key_strict_modes_ok() {
   local f="$1" d
+  # The uid the key must be owned by: the owner of the .ssh directory it lives
+  # in, which is the account sshd would be checking. Derived here rather than
+  # passed, because this is also called from tests that build their own tree.
+  local target_uid
+  target_uid="$(stat -Lc '%u' "$(dirname "$f")" 2>/dev/null || echo '')"
   # Ownership, checked on the key file itself. sshd's StrictModes rejects an
   # authorized_keys owned by neither the user nor root even at 0600 - the file
   # is then writable by whoever owns it. `find -perm` cannot see that, so a
@@ -447,30 +452,51 @@ key_strict_modes_ok() {
   # on the strength of it, and sshd ignored the key. Wrong direction: this
   # function's false positives become lockouts.
   local owner
-  owner="$(stat -c '%u' "$f" 2>/dev/null || echo '')"
-  if [[ -n $owner && $owner != 0 ]]; then
-    local target_uid
-    # The owner of the .ssh directory is the user the key is being checked for;
-    # that is the uid that has to match, not the uid running this script.
-    target_uid="$(stat -c '%u' "$(dirname "$f")" 2>/dev/null || echo '')"
-    if [[ -n $target_uid && $owner != "$target_uid" ]]; then
-      return 1
-    fi
+  owner="$(stat -Lc '%u' "$f" 2>/dev/null || echo '')"
+  if [[ -n $owner && $owner != 0 && -n $target_uid && $owner != "$target_uid" ]]; then
+    return 1
   fi
 
   # Every directory from the file up to /, not just three levels. sshd walks
   # the whole canonical parent path, so a writable /home or /home/shared
   # above a correctly-permissioned .ssh still gets the key refused - and
   # that is the case a fixed three-level check cannot see.
-  local d
-  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd)" || return 1
-  while [[ -n $d && $d != "/" ]]; do
-    [[ -n $(find "$d" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
-    [[ $d == "$(dirname "$d")" ]] && break
+  #
+  # `pwd -P`, not `pwd`: a symlinked $HOME (/home -> /data/home is common) kept
+  # the symlink in the logical path, and `find` does not follow a symlink in
+  # its starting path, so it stat'ed the link itself - mode 777, always
+  # group/world-writable - and rejected a key sshd would have accepted. That
+  # blocks --lockdown-ssh on an entirely legitimate setup. The kernel's view
+  # is what sshd uses, so ask for that. -L does the same for the walk.
+  local d dircount=0
+  d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || return 1
+  while [[ -n $d && $d != "/" ]] && ((dircount < 64)); do
+    dircount=$((dircount + 1))
+    # The 022 part: group or other has any write bit.
+    [[ -n $(find -L "$d" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
+    # Ownership of EVERY component, not just the file: sshd's secure_filename
+    # requires each path component to be owned by the user or root. Checking
+    # only the key file and its .ssh missed an intermediate directory owned by
+    # a third party at 0755 - accepted here, refused by sshd, which is the
+    # direction that ends in a lockout.
+    local downer
+    downer="$(stat -Lc '%u' "$d" 2>/dev/null || echo '')"
+    # Every component must be the user's or root's. When the uid could not be
+    # determined at all, treat it as a failure rather than skipping the check:
+    # an unverified permission is exactly the case that turns into a lockout,
+    # and the caller can still fall back to PasswordAuthentication being left
+    # alone. Skipping silently would report "usable" for a key sshd may ignore.
+    if [[ -z $target_uid ]]; then
+      return 1
+    fi
+    if [[ -n $downer && $downer != 0 && $downer != "$target_uid" ]]; then
+      return 1
+    fi
+    [[ $d == "/" ]] && break
     d="$(dirname "$d")"
   done
   # The file itself, which is not a directory on the walk above.
-  [[ -n $(find "$f" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
+  [[ -n $(find -L "$f" -maxdepth 0 -perm /022 2>/dev/null) ]] && return 1
   return 0
 }
 
@@ -883,15 +909,36 @@ EOF
 
   replace_managed_block "$block" "$conf"
 
-  # Port is additive in sshd: the first-value-wins rule that makes prepending
-  # work for everything else does NOT apply to it. A `Port 22` left further
-  # down the file means sshd ends up listening on both, so the old line has to
-  # be commented out rather than merely outranked. Done by sed on the whole
-  # file, outside the managed block, and only when we are actually moving.
-  if ((change_port)) && ((!DRY_RUN)); then
-    sed -i -E "s|^[[:space:]]*Port[[:space:]]+[0-9]+|# &|" "$target"
-    # Put back the one line that should still be live.
-    sed -i "s|^# Port ${new_port}\$|Port ${new_port}|" "$target"
+  # Port is ADDITIVE in sshd: unlike every other directive here, first value
+  # does not win, and two active `Port` lines for the same port make sshd die
+  # with "Address already in use" at bind time. `sshd -t` does not bind, so
+  # validation does not catch it.
+  #
+  # So every active `Port` line OUTSIDE the managed block is commented out on
+  # every run, not only on a run that moves the port. Gating this on
+  # change_port meant that on a box which had already moved ssh off 22 - the
+  # exact box most likely to be run through a hardening script - a run that did
+  # not move the port wrote `Port 2222` into the block and left the existing
+  # `Port 2222` active, and the box came back unreachable after
+  # `systemctl restart ssh`.
+  #
+  # awk rather than sed, so the managed block's own line is skipped by
+  # position: a blanket regex cannot tell the block's `Port` from the
+  # stock file's, and commenting out both would leave sshd with no port at all.
+  if ((!DRY_RUN)); then
+    awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" -v keep="$new_port" '
+      $0 == b1 { inside = 1; print; next }
+      $0 == b2 { inside = 0; print; next }
+      inside != 1 && $0 ~ /^[[:space:]]*[#[:space:]]*Port[[:space:]]+[0-9]+/ {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        if (line ~ /^#/) { print; next }          # already commented
+        print "# " line                           # was active: disable it
+        next
+      }
+      { print }
+    ' "$target" >"$target.omapi-tmp" && cat "$target.omapi-tmp" >"$target" \
+      && rm -f "$target.omapi-tmp"
   fi
 
   rm -f "$block"
