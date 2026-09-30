@@ -1331,35 +1331,100 @@ test_pi_is_locked_when_another_account_can_log_in() {
 }
 
 test_ask_never_passes_a_flag_gum_will_reject() {
-  # gum v2.0.2 has no --default-no (added in 2.1) and treats an unknown flag as
-  # a hard error, so every question whose default is "no" died on a real run.
-  # The fix feature-detects the flag. Rather than driving ask() - which needs a
-  # tty this test cannot have - assert the property directly: the script must
-  # not pass --default-no unconditionally, and must only pass it if the
-  # installed gum advertises it.
+  # gum v2.0.2 has no --default-no (added in 2.1) and exits 80 on it, so every
+  # prompt whose default is "no" died. The v2.0.x spelling is --default=false,
+  # accepted by both versions. Assert neither the old flag nor a bare confirm
+  # (whose default is Yes) is used for a default-n prompt.
   setup_destdir
   local rc=0
   local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
-  if grep -q 'gum confirm "\$question" --default-no' "$f"; then
-    printf '        --default-no is still passed unconditionally\n'
+  # Only actual invocations, not the comment that explains why the flag is
+  # wrong - the file legitimately mentions it there.
+  if grep -qE '^[[:space:]]*gum confirm .*--default-no' "$f"; then
+    printf '        --default-no is still passed to gum\n'
     rc=1
   fi
-  if ! grep -q 'gum confirm --help 2>&1 | grep -q -- ' "$f"; then
-    printf '        the --default-no flag is not feature-detected\n'
+  if ! grep -q 'gum confirm "\$question" --default=false' "$f"; then
+    printf '        a default-n prompt does not pass --default=false\n'
     rc=1
   fi
-  # And the detection must be true of the gum actually installed here, or the
-  # fix is not exercised by anything.
+  # The flag must also be one the installed gum accepts. `gum confirm --help`
+  # is the only reliable check from inside the suite: a live confirm needs a
+  # controlling terminal, and the test runner does not have one. Verified
+  # manually on this box's v2.0.2 - --default-no exits 80, --default=false
+  # parses - so a help listing it is sufficient here.
   if have gum; then
-    if gum confirm --help 2>&1 | grep -q -- '--default-no'; then
-      :
-    else
-      # v2.0.x: the safe default is to omit the flag entirely.
-      if ! grep -q 'gum_args=(--default-no)' "$f"; then
-        printf '        no conditional --default-no path for a gum without it\n'
-        rc=1
-      fi
+    local out
+    out="$(gum confirm --help 2>&1 || true)"
+    if ! grep -q -- '--default' <<<"$out"; then
+      printf '        installed gum advertises no --default option at all\n'
+      rc=1
     fi
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_preserves_target_mode_and_owner() {
+  # `cp -p "$body" "$target"` imported mktemp's 0600 and the invoking user's
+  # ownership, replacing the 0640 root:root that ufw ships. Assert the mode is
+  # restored after the copy rather than taken from the temp file.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  # A bare `run_root cp -p "$body" "$target"` is still fine PROVIDED mode and
+  # owner are restored straight after it, which is what F1 asked for. So this
+  # asserts the restore exists, not that the cp is absent.
+  if ! grep -q 'run_root chmod "\$tmode" "\$target"' "$f"; then
+    printf '        the target mode is not restored after the copy\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root chmod "\$tmode" "\$target"' "$f"; then
+    printf '        the target mode is not restored after the copy\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root chown "\$towner:\$tgroup" "\$target"' "$f"; then
+    printf '        the target owner is not restored after the copy\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_rewrite_allowed_when_remainder_is_empty() {
+  # A file whose entire contents are one managed block has a legitimately EMPTY
+  # remainder. Judging readability by emptiness would refuse the rewrite
+  # forever, so the block could never be updated on such a file. The check must
+  # use the exit status, and only refuse when BOTH reads fail.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q '\[\[ -s \$target && -z \$tail \]\]' "$f"; then
+    printf '        readability is still judged by an empty remainder\n'
+    rc=1
+  fi
+  if ! grep -q 'if ((rc != 0)) && \[\[ -s \$target \]\]' "$f"; then
+    printf '        the read-failure check does not use the exit status\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_snapshot_cleanup_uses_run_root() {
+  # The snapshot is taken by root, so an unprivileged rm cannot unlink it and
+  # the temp file is left behind in /tmp on every run.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE '^[[:space:]]*rm -f "\$rules_backup"' "$f"; then
+    printf '        an unprivileged rm of the ufw snapshot is still present\n'
+    rc=1
+  fi
+  local n; n="$(grep -c 'run_root rm -f "\$rules_backup" \${rules6_backup:-}' "$f")"
+  if [[ $n -ne 2 ]]; then
+    printf '        expected 2 privileged snapshot cleanups, found %s\n' "$n"
+    rc=1
   fi
   teardown_destdir
   return $rc
@@ -2123,6 +2188,9 @@ t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_pr
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
+t 'managed block preserves mode and owner'   test_managed_block_preserves_target_mode_and_owner
+t 'block rewrite allowed on empty remainder' test_managed_block_rewrite_allowed_when_remainder_is_empty
+t 'ufw snapshot cleanup uses run_root'       test_ufw_snapshot_cleanup_uses_run_root
 t 'ufw rules snapshot uses run_root'         test_ufw_rules_snapshot_is_taken_with_run_root
 t 'managed block reads target via peek'      test_replace_managed_block_reads_target_via_peek
 t 'managed block writes target with run_root' test_replace_managed_block_writes_target_with_run_root
