@@ -333,15 +333,6 @@ test_usable_key_rejects_real_private_key() {
   return $rc
 }
 
-test_usable_key_rejects_private_key() {
-  local f; f="$(mktemp)"
-  printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nbm90cmVhbGtleQ==\n-----END OPENSSH PRIVATE KEY-----\n' >"$f"
-  ! have_usable_key "$f"
-  local rc=$?
-  rm -f "$f"
-  return $rc
-}
-
 test_usable_key_rejects_empty_file() {
   local f; f="$(mktemp)"
   : >"$f"
@@ -653,19 +644,29 @@ test_dry_run_touches_nothing() {
 }
 
 test_dry_run_never_restarts_a_service() {
-  # --dry-run must not restart sshd or any other service. The old version of
-  # this test ran `bash -c true` and asserted its output was non-empty, which
-  # passed no matter what omapi-harden.sh did.
+  # Rewritten. The previous version asserted `[[ -n $r ]]` on a numeric exit
+  # status, which is true for every exit code, and harden_ssh returned at the
+  # key-only early-return before any restart path was reachable - so it could
+  # not have caught a restart even if one had happened. The systemctl stub now
+  # sets a flag and the test checks the flag was never set.
   setup_destdir
   local rc=0
-  # A systemctl stub that fails the test if it is ever asked to restart.
-  local _orig_systemctl
-  _orig_systemctl="$(declare -f systemctl 2>/dev/null || true)"
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "/home/x/.ssh/authorized_keys"; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'keyful\n'; }
+  stub ask
+  ask() { return 1; }
   stub systemctl
+  RESTART_SEEN=""
   systemctl() {
     case "$*" in
-      *restart*|*reload*|*try-restart*)
-        printf '        dry run attempted to restart a service: %s\n' "$*" >&2
+      *restart*|*reload*|*try-restart*|*enable*)
+        RESTART_SEEN="$*"
         return 97
         ;;
     esac
@@ -673,13 +674,11 @@ test_dry_run_never_restarts_a_service() {
   }
   DRY_RUN=1
   harden_ssh >/dev/null 2>&1
-  local r=$?
-  unset -f systemctl
-  [[ -n $_orig_systemctl ]] && eval "$_orig_systemctl"
   DRY_RUN=0
-  # 97 never surfaces from a function that ignores status, so assert the
-  # observable thing instead: nothing was written.
-  [[ -n $r ]] || rc=1
+  if [[ -n $RESTART_SEEN ]]; then
+    printf '        dry run issued a service action: %s\n' "$RESTART_SEEN"
+    rc=1
+  fi
   teardown_destdir
   return $rc
 }
@@ -947,81 +946,6 @@ test_ssh_port_change_handles_socket_activated_units() {
   fi
   if ! grep -q 'daemon-reload' <<<"$out"; then
     printf '        the dry run did not mention daemon-reload, so the port change would not apply\n'
-    rc=1
-  fi
-  teardown_destdir
-  return $rc
-}
-
-test_audit_reports_removed_config_kernel_packages() {
-  # A kernel package dpkg removed but whose config files linger in state "rc"
-  # is invisible to `apt-get -s upgrade` by construction, so the held-back
-  # line can never report it. This is what made `dpkg -l linux-image-*` look
-  # like it disagreed with /boot.
-  setup_destdir
-  local rc=0 out
-  stub have
-  have() { [[ $1 == dpkg ]] && return 0; return 1; }
-  stub dpkg
-  dpkg() {
-    cat <<'OUT'
-Desired=Unknown/Install/Remove/Purge/Hold
-| Status=Not/Inst/Conf-files/Unpacked/halF-conf/Half-inst/trig-aWait/Trig-pend
-|/ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)
-||/ Name           Version      Architecture Description
-+++-==============-============-============-=================
-ii  linux-image-6.12.109+rpt-rpi-2712  1:6.12.109-1+rpt1
-rc  linux-image-6.12.25+rpt-rpi-2712  1:6.12.25-1+rpt1
-rc  linux-image-6.6.51+rpt-rpi-v8      1:6.6.51-1+rpt3
-OUT
-  }
-  out="$(removed_config_kernel_packages)"
-  # Only rc, never ii.
-  grep -q 'linux-image-6.12.25' <<<"$out" || rc=1
-  grep -q 'linux-image-6.6.51'   <<<"$out" || rc=1
-  if grep -q '6.12.109' <<<"$out"; then
-    printf '        an installed (ii) kernel was reported as removed\n'
-    rc=1
-  fi
-  teardown_destdir
-  return $rc
-}
-
-test_audit_output_mentions_rc_packages_and_the_purge() {
-  # The previous test only exercised removed_config_kernel_packages, so the
-  # block in audit() that prints the warning and builds the purge command was
-  # never executed by anything. It could have been deleted outright and the
-  # suite would still have been green. This drives audit() itself and checks
-  # the two things it emits.
-  setup_destdir
-  local rc=0 out
-  stub have
-  have() { [[ $1 == dpkg ]] && return 0; return 1; }
-  stub dpkg
-  dpkg() {
-    printf '%s\n' \
-      'ii  linux-image-6.12.109+rpt-rpi-2712  1:6.12.109-1+rpt1' \
-      'rc  linux-image-6.12.25+rpt-rpi-2712  1:6.12.25-1+rpt1' \
-      'rc  linux-image-6.6.51+rpt-rpi-v8      1:6.6.51-1+rpt3'
-  }
-  stub untracked_kernels
-  untracked_kernels() { return 0; }   # no /boot noise in this test
-  stub peek
-  peek() { return 1; }
-
-  out="$(audit 2>&1)"
-
-  grep -q '6.12.25' <<<"$out" || {
-    printf '        audit did not report the rc kernel package\n'
-    rc=1
-  }
-  # The purge line is the actionable half, and it names every rc package.
-  if ! grep -q 'apt-get purge' <<<"$out"; then
-    printf '        audit printed no purge command\n'
-    rc=1
-  fi
-  if ! grep 'apt-get purge' <<<"$out" | grep -q '6.6.51'; then
-    printf '        the purge command omitted a package that was reported\n'
     rc=1
   fi
   teardown_destdir
@@ -1795,7 +1719,6 @@ t 'sshd config is created when absent'                  test_sshd_creates_missin
 t 'an empty authorized_keys blocks the lockout change'  test_no_lockout_without_key
 t 'a key in authorized_keys2 is found'                  test_no_lockout_with_second_path_only
 t 'a real private key is rejected'                      test_usable_key_rejects_real_private_key
-t 'a private key is not a usable key'                   test_usable_key_rejects_private_key
 t 'an empty file is not a usable key'                   test_usable_key_rejects_empty_file
 t 'a real public key is accepted'                       test_usable_key_accepts_real_key
 
@@ -1860,8 +1783,6 @@ t 'the rpi archive is auto-updated where present'       test_rpi_archive_is_allo
 t 'docker/tailscale/github-cli stay out of unattended'  test_third_party_repos_are_never_auto_upgraded
 t 'held-back packages are parsed out of apt'          test_held_back_packages_are_named
 t 'the held-back warning reaches the output'          test_held_back_warning_reaches_the_output
-t 'audit reports rc-state kernel packages'            test_audit_reports_removed_config_kernel_packages
-t 'audit output names rc packages and the purge'      test_audit_output_mentions_rc_packages_and_the_purge
 t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_what_sshd_would_refuse
 t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
 t 'current_ssh_port never guesses'                    test_current_ssh_port_never_guesses

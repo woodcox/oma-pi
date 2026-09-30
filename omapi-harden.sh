@@ -374,10 +374,12 @@ replace_managed_block() {
     # 200-line stock sshd_config to say "these 10 lines would be added" buries
     # the useful part.
     #
-    # Nothing above this point may touch the filesystem. `install -d` used to
-    # run just above this check, so a dry run created /etc/ssh (and /etc/ufw on
-    # a box that lacked it) - a real mutation, and the one guarantee a dry run
-    # exists to provide.
+    # Nothing between here and the return may touch a real path. `install -d`
+    # used to run just above this check, so a dry run created /etc/ssh (and
+    # /etc/ufw on a box that lacked it) - a real mutation, and the one
+    # guarantee a dry run exists to provide. Scratch files in $TMPDIR from
+    # `mktemp` are still made above and still cleaned up below; that is the
+    # only filesystem effect a dry run has.
     printf '  %s•%s would write %s (managed block on top, rest untouched):%s\n' \
       "$C_DIM" "$C_OFF" "$path" "$C_OFF"
     if [[ -f $block ]]; then
@@ -387,7 +389,10 @@ replace_managed_block() {
     return 0
   fi
 
-  install -d -m 0755 "$(dirname "$target")" 2>/dev/null || true
+  # No `|| true`: the `cat > "$target"` below fails loudly if this did not
+  # work, and swallowing it here only turned a clear error into a confusing
+  # one three lines later.
+  install -d -m 0755 "$(dirname "$target")"
 
   cat "$body" >"$target"
   rm -f "$body"
@@ -435,6 +440,24 @@ have_usable_key() {
 # needed.
 key_strict_modes_ok() {
   local f="$1" d
+  # Ownership, checked on the key file itself. sshd's StrictModes rejects an
+  # authorized_keys owned by neither the user nor root even at 0600 - the file
+  # is then writable by whoever owns it. `find -perm` cannot see that, so a
+  # third party's key looked "usable" here, PasswordAuthentication was written
+  # on the strength of it, and sshd ignored the key. Wrong direction: this
+  # function's false positives become lockouts.
+  local owner
+  owner="$(stat -c '%u' "$f" 2>/dev/null || echo '')"
+  if [[ -n $owner && $owner != 0 ]]; then
+    local target_uid
+    # The owner of the .ssh directory is the user the key is being checked for;
+    # that is the uid that has to match, not the uid running this script.
+    target_uid="$(stat -c '%u' "$(dirname "$f")" 2>/dev/null || echo '')"
+    if [[ -n $target_uid && $owner != "$target_uid" ]]; then
+      return 1
+    fi
+  fi
+
   for d in "$f" "$(dirname "$f")" "$(dirname "$(dirname "$f")")"; do
     [[ -e $d ]] || continue
     # -A: group or other has any write bit.
@@ -755,10 +778,19 @@ harden_ssh() {
   # listens on and offer to close the one in use - and with default-deny
   # enabled, accepting that is a lockout on a live port. A staged port change
   # and a firewall that is meant to follow it cannot coexist in one run.
-  if ((NO_RESTART)) && ask "move sshd off port ${port}? (deferred: --no-restart is set)"; then
-    warn "not moving the port: --no-restart means sshd would keep listening on ${port}"
-    note "the firewall stage protects the port sshd is really on, so a staged move would not be followed"
-    note "move the port in a run WITHOUT --no-restart, or apply it by hand once"
+  #
+  # Asked once, and the answer is not re-offered on the other branch: an
+  # earlier version used `if ((NO_RESTART)) && ask ...; then <refuse> elif ask
+  # ...`, so answering "no" to the deferred question fell straight through to
+  # the ordinary one, which had no --no-restart protection at all. That wrote
+  # `Port 2222` while sshd stayed on 22, and the box locked out the moment
+  # the user ran `systemctl restart ssh` by hand. Reproduced before fixing.
+  if ((NO_RESTART)); then
+    if ask "move sshd off port ${port}? (not possible: --no-restart is set)" n; then
+      warn "not moving the port: --no-restart means sshd would keep listening on ${port}"
+      note "the firewall stage protects the port sshd is really on, so a staged move would not be followed"
+      note "move the port in a run WITHOUT --no-restart, or apply it by hand once"
+    fi
   elif ask "move sshd off port ${port}? (noise reduction only, not security)" n; then
     local candidate=""
     # Read directly rather than through a process substitution: a `read` inside
@@ -861,7 +893,7 @@ EOF
   if ! peek sshd -t -f "$conf" >/dev/null 2>&1; then
     if [[ -n $backup ]]; then
       warn "sshd rejected the new config, rolling ${conf} back"
-      peek cp -p "$backup" "$conf" || true
+      peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"
     else
       warn "sshd rejected the new config and there is no backup to roll back to"
     fi
@@ -895,7 +927,7 @@ EOF
   if ((socket_activated)); then
     if ! peek systemctl restart ssh.socket; then
       warn "ssh.socket failed to restart, rolling back"
-      [[ -n $backup ]] && peek cp -p "$backup" "$conf" || true
+      [[ -n $backup ]] && { peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
       peek systemctl daemon-reload || true
       peek systemctl restart ssh.socket || true
       return 1
@@ -916,7 +948,7 @@ EOF
     printf '\n  %sKeep this session open and open a second one before you rely on it.%s\n' "$C_BOLD" "$C_OFF"
   else
     warn "ssh failed to restart, rolling back"
-    [[ -n $backup ]] && peek cp -p "$backup" "$conf" || true
+    [[ -n $backup ]] && { peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
     peek systemctl restart ssh || true
     return 1
   fi
@@ -1608,7 +1640,7 @@ configure_docker_ufw() {
   # when the fragment is malformed and when the reload itself fails.
   restore_rules() {
     if [[ -n $rules_backup ]]; then
-      run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || true
+      run_root cp -p "$rules_backup" "${CONF_DEST}/etc/ufw/after.rules" || warn "could not restore after.rules from the backup; ufw may fail to reload"
     fi
     rm -f "$rules_backup"
     rules_backup=""
@@ -1837,19 +1869,6 @@ apt_release_origin_combo() {
 # untracked by design. Checking the whole directory would report all of them
 # on every single machine, and an audit that always has something to complain
 # about is an audit nobody reads.
-# Kernel packages dpkg has removed but whose config files linger in state "rc"
-# (removed, config-files remain). Invisible to `apt-get -s upgrade` by
-# construction, so the held-back check can never report them. Read-only, and
-# the package list needs no privilege.
-removed_config_kernel_packages() {
-  have dpkg || return 0
-  # `|| true` because `dpkg -l 'linux-image-*'` exits 1 when the pattern
-  # matches nothing, which is the normal case on a non-Pi host. Under set -e
-  # that propagated out of the command substitution and aborted audit().
-  dpkg -l 'linux-image-*' 2>/dev/null |
-    awk '$1 == "rc" { print $2, $3 }' || true
-}
-
 untracked_kernels() {
   # dpkg -S only reads the package database. Called without peek's sudo
   # fallback on purpose: an audit must never be able to stop on a password
@@ -2019,7 +2038,12 @@ EOF
     return 0
   fi
 
-  run_root systemctl enable --now unattended-upgrades 2>/dev/null || true
+  if ! run_root systemctl enable --now unattended-upgrades 2>/dev/null; then
+    # Not swallowed: the check below reads apt-config and would otherwise
+    # report "configured" while the service is disabled, which is precisely
+    # the silent-failure class the rest of this script exists to prevent.
+    warn "could not enable unattended-upgrades; automatic security updates are NOT active"
+  fi
   if peek apt-config dump | grep -q Unattended-Upgrade; then
     ok "unattended-upgrades configured for ${origins[*]}"
   else
@@ -2300,21 +2324,6 @@ audit() {
     else
       printf '  every kernel image in /boot is owned by a package\n'
     fi
-    # A third, quieter case: a kernel package that dpkg has removed but whose
-    # config files linger in "rc" (removed, config-files remain). apt considers
-    # it gone, so it never appears in `apt-get -s upgrade` and the held-back
-    # line above cannot see it either - yet the stale metadata is what makes
-    # `dpkg -l linux-image-*` disagree with /boot and look like a packaging
-    # bug. Harmless to security, worth a human knowing about.
-    local krc
-    krc="$(removed_config_kernel_packages)"
-    if [[ -n $krc ]]; then
-      printf '  removed kernel packages still holding config files (dpkg state rc):\n'
-      printf '%s\n' "$krc" | sed 's/^/    /'
-      printf '  cosmetic; clear with: sudo apt-get purge %s\n' \
-        "$(printf '%s' "$krc" | awk '{print $1}' | tr '\n' ' ')"
-    fi
-
     printf '\n-- apparmor --\n'
     peek aa-status 2>/dev/null | head -6 | sed 's/^/  /' || printf '  not installed\n'
 
