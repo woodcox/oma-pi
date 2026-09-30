@@ -55,7 +55,18 @@ setup_destdir() {
   stub have
   have() { return 0; }
   stub run_root
-  run_root() { printf '  [stub] run_root %s\n' "$*" >&2; return 0; }
+  # Really perform the writes: privileged writes go through run_root, so a
+  # logging-only stub would leave every file untouched and each test that
+  # inspects a result would see a missing file. cp/install are done for real
+  # (they are safe in a destdir); everything else is just logged.
+  run_root() {
+    printf '  [stub] run_root %s\n' "$*" >&2
+    case $1 in
+      cp) command cp "${@:2}" ;;
+      install) command install "${@:2}" ;;
+    esac
+    return 0
+  }
   stub priv
   priv() { printf '  [stub] priv %s\n' "$*" >&2; return 0; }
   # peek returns 1 (not found) for existence checks, so configure_updates
@@ -1319,6 +1330,100 @@ test_pi_is_locked_when_another_account_can_log_in() {
   return $rc
 }
 
+test_ask_never_passes_a_flag_gum_will_reject() {
+  # gum v2.0.2 has no --default-no (added in 2.1) and treats an unknown flag as
+  # a hard error, so every question whose default is "no" died on a real run.
+  # The fix feature-detects the flag. Rather than driving ask() - which needs a
+  # tty this test cannot have - assert the property directly: the script must
+  # not pass --default-no unconditionally, and must only pass it if the
+  # installed gum advertises it.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q 'gum confirm "\$question" --default-no' "$f"; then
+    printf '        --default-no is still passed unconditionally\n'
+    rc=1
+  fi
+  if ! grep -q 'gum confirm --help 2>&1 | grep -q -- ' "$f"; then
+    printf '        the --default-no flag is not feature-detected\n'
+    rc=1
+  fi
+  # And the detection must be true of the gum actually installed here, or the
+  # fix is not exercised by anything.
+  if have gum; then
+    if gum confirm --help 2>&1 | grep -q -- '--default-no'; then
+      :
+    else
+      # v2.0.x: the safe default is to omit the flag entirely.
+      if ! grep -q 'gum_args=(--default-no)' "$f"; then
+        printf '        no conditional --default-no path for a gum without it\n'
+        rc=1
+      fi
+    fi
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_rules_snapshot_is_taken_with_run_root() {
+  # /etc/ufw/after.rules is 0640 root:root. A bare `cp` fails unprivileged with
+  # "cannot open ... for reading", and because the caller does `|| backup=""`
+  # the snapshot was silently discarded - so the later restore was a no-op
+  # while the code reported that it had a backup. Assert it is privileged.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE '^[[:space:]]*cp -p "\$\{CONF_DEST\}/etc/ufw/after6?\.rules"' "$f"; then
+    printf '        an unprivileged cp of the ufw rules files is still present\n'
+    rc=1
+  fi
+  local n
+  n="$(grep -cE '^[[:space:]]*run_root cp -p "\$\{CONF_DEST\}/etc/ufw/after6?\.rules" "\$rules6?_backup"' "$f")"
+  if [[ $n -ne 2 ]]; then
+    printf '        expected 2 privileged ufw rules snapshots, found %s\n' "$n"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_replace_managed_block_reads_target_via_peek() {
+  # The same permission wall, in the awk that strips the old managed block.
+  # No test could catch it before: the suite runs against a destdir whose files
+  # the test user can read, and only /etc/ufw/*.rules is 0640 root:root.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE "^[[:space:]]*awk -v b1=.*\"\\\$target\" >\"\\\$body\.tail\"" "$f"; then
+    printf '        replace_managed_block still reads the target with a bare awk\n'
+    rc=1
+  fi
+  if ! grep -q 'peek awk -v b1=' "$f"; then
+    printf '        replace_managed_block does not read the target via peek\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_replace_managed_block_writes_target_with_run_root() {
+  # The write side. `run_root cat "$body" >"$target"` would still fail: the
+  # redirection is done by the unprivileged shell, not the privileged child.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE 'run_root cat "\$body" >"\$target"' "$f"; then
+    printf '        the target is written by an unprivileged redirection\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root cp -p "\$body" "\$target"' "$f"; then
+    printf '        the target is not written with run_root cp\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -2017,6 +2122,10 @@ t 'loopback test is per protocol'                      test_docker_port_is_loopb
 t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
+t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
+t 'ufw rules snapshot uses run_root'         test_ufw_rules_snapshot_is_taken_with_run_root
+t 'managed block reads target via peek'      test_replace_managed_block_reads_target_via_peek
+t 'managed block writes target with run_root' test_replace_managed_block_writes_target_with_run_root
 t 'pi is locked when another account can log in'     test_pi_is_locked_when_another_account_can_log_in
 t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
 t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
