@@ -1541,15 +1541,13 @@ configure_firewall() {
     return 0
   fi
 
-  if ((DRY_RUN)); then
-    note "would set: ufw default deny incoming / allow outgoing, logging on"
-  else
-    run_root ufw default deny incoming
-    run_root ufw default allow outgoing
-    run_root ufw logging on
-    ok "default policies set (incoming denied, outgoing allowed, logging on)"
-  fi
-
+  # The SSH port is resolved BEFORE any policy change, and its failure guard
+  # returns before the first `ufw` command runs. This guard used to sit after
+  # `ufw default deny incoming`, so on a box where ufw was already active the
+  # script flipped the incoming policy to deny and then bailed out - never
+  # adding the `ufw limit` rule for the SSH port. If that box relied on the
+  # broad allow policy, every new SSH connection was blocked while the script
+  # reported "not touching the firewall".
   local ssh_port
   ssh_port="$(current_ssh_port || true)"
   # Stop rather than guess. A `ufw limit /tcp` with an empty port is silently
@@ -1562,6 +1560,16 @@ configure_firewall() {
     note "run 'sudo sshd -T | grep ^port' to see it, then re-run this task"
     return 1
   fi
+
+  if ((DRY_RUN)); then
+    note "would set: ufw default deny incoming / allow outgoing, logging on"
+  else
+    run_root ufw default deny incoming
+    run_root ufw default allow outgoing
+    run_root ufw logging on
+    ok "default policies set (incoming denied, outgoing allowed, logging on)"
+  fi
+
   if ((DRY_RUN)); then
     printf '  %s•%s would allow: ufw limit %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
   else

@@ -50,7 +50,7 @@ filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 ./omapi-harden.sh --list                 # available tasks
 sudo ./omapi-harden.sh ssh firewall      # just these two
 sudo ./omapi-harden.sh --yes             # take the recommended defaults
-./test/omapi-harden-test.sh              # 74 tests, no root needed
+./test/omapi-harden-test.sh              # 75 tests, no root needed
 ```
 
 Some deliberate choices worth knowing before you run it:

@@ -672,6 +672,17 @@ test_dry_run_never_restarts_a_service() {
     esac
     return 0
   }
+  # harden_ssh dispatches service actions through `peek`, and setup_destdir
+  # replaces peek with a no-op stub - so without this forwarding, systemctl is
+  # never reached at all and this test could not fail however many restarts the
+  # code issued. CodeRabbit's point, and the test was decorative until now.
+  stub peek
+  peek() {
+    case "$1" in
+      systemctl) systemctl "${@:2}" ;;
+    esac
+    return 1
+  }
   DRY_RUN=1
   harden_ssh >/dev/null 2>&1
   DRY_RUN=0
@@ -1153,6 +1164,40 @@ test_a_failing_awk_in_the_port_rewrite_is_not_silent() {
   # And no temp file left behind.
   if [[ -n $(find "$CONF_DEST" -name '*.omapi-tmp' 2>/dev/null) ]]; then
     printf '        a .omapi-tmp file was left behind after the failure\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_undetectable_ssh_port_leaves_the_firewall_untouched() {
+  # CodeRabbit finding, and the guard itself was mine - I added "not touching
+  # the firewall" but placed the check AFTER `ufw default deny incoming`. On a
+  # box where ufw was already active the script flipped the incoming policy to
+  # deny and then bailed, never adding the `ufw limit` rule for the SSH port.
+  # If that box relied on the broad allow policy, every new SSH connection was
+  # blocked while the script said it was not touching anything.
+  #
+  # Asserts the observable thing: no privileged call at all, so a reorder
+  # cannot reintroduce this without failing.
+  setup_destdir
+  local rc=0
+  stub current_ssh_port
+  current_ssh_port() { printf '\n'; return 1; }
+  stub docker_present
+  docker_present() { return 1; }
+  stub ask
+  ask() { return 1; }
+  local calls=""
+  stub run_root
+  run_root() { calls="$calls $* "; return 0; }
+
+  DRY_RUN=0
+  configure_firewall >/dev/null 2>&1
+  DRY_RUN=0
+
+  if [[ -n $calls ]]; then
+    printf '        the firewall was changed despite an undetectable ssh port: %s\n' "$calls"
     rc=1
   fi
   teardown_destdir
@@ -1890,6 +1935,7 @@ t 'StrictModes rejects what sshd would refuse'        test_strictmodes_rejects_w
 t 'key_files_for_user splits multiple paths'         test_key_files_for_user_splits_multiple_paths
 t '%U expands to the numeric uid'                    test_key_files_expands_percent_U_to_the_numeric_uid
 t 'a failing awk in the Port rewrite is not silent'  test_a_failing_awk_in_the_port_rewrite_is_not_silent
+t 'an undetectable port leaves the firewall alone'  test_undetectable_ssh_port_leaves_the_firewall_untouched
 t 'dry-run updates and audit do not die'              test_dry_run_updates_and_audit_do_not_die
 t 'current_ssh_port never guesses'                    test_current_ssh_port_never_guesses
 t 'an untracked kernel image is detected'               test_untracked_kernels_flags_a_planted_image
