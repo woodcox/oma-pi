@@ -8,7 +8,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
   - Tested on Raspberry Pi OS Lite / Debian 12 (bookworm).
   - **Ubuntu 24.04 (noble) or newer.** Ubuntu moved sshd to systemd socket
     activation in 22.10. On 24.04 and later a `Port` change in
-    `sshd_config` is read by a systemd generator, so `omapi-harden.sh` can move
+    `sshd_config` is read by a systemd generator, so `omapi-harden` can move
     the port by reloading and restarting `ssh.socket`. On 22.10 through
     23.10 there is no such generator: `ssh.socket` uses a fixed
     `ListenStream=22`, the `Port` directive is ignored, and the script would
