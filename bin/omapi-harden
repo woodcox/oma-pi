@@ -215,7 +215,17 @@ ask() {
     if [[ $default == y ]]; then
       gum confirm "$question" </dev/tty
     else
-      gum confirm "$question" --default-no </dev/tty
+      # gum v2.0.2 has no --default-no (added in 2.1) and aborts with
+      # "unknown flag" - which is a hard error, not a fallback, so the prompt
+      # died on every question whose default is no. In v2.0.2 the default is
+      # already Yes, so omitting the flag is both compatible and safe.
+      # Feature-detect the flag rather than parsing the version, since a
+      # distro backport can have the flag without matching upstream numbering.
+      local gum_args=()
+      if gum confirm --help 2>&1 | grep -q -- '--default-no'; then
+        gum_args=(--default-no)
+      fi
+      gum confirm "$question" "${gum_args[@]}" </dev/tty
     fi
     return
   fi
@@ -291,11 +301,37 @@ replace_managed_block() {
   fi
 
   if [[ -f $target ]]; then
-    awk -v b1="$b1" -v b2="$b2" '
+    # Read the target without assuming we can read it. /etc/ufw/after.rules is
+    # 0640 root:root, so a bare `awk` dies with "Permission denied" when the
+    # script runs unprivileged - and because `> "$body.tail"` truncates
+    # regardless of whether awk succeeded, that failure produced an EMPTY file
+    # and the managed block was then written over the top of it, losing every
+    # rule ufw had. Try the direct read (correct for a destdir the caller owns,
+    # which is what the tests use), then peek for the root-only case, and if
+    # neither works leave the file alone rather than destroying it.
+    local tail
+    tail="$(awk -v b1="$b1" -v b2="$b2" '
       $0 == b1 { inblock = 1; next }
       $0 == b2 { inblock = 0; next }
       inblock != 1 { print }
-    ' "$target" >"$body.tail"
+    ' "$target" 2>/dev/null)" || tail=""
+    if [[ -z $tail && -s $target ]]; then
+      tail="$(peek awk -v b1="$b1" -v b2="$b2" '
+        $0 == b1 { inblock = 1; next }
+        $0 == b2 { inblock = 0; next }
+        inblock != 1 { print }
+      ' "$target" 2>/dev/null)" || tail=""
+    fi
+    if [[ -s $target && -z $tail ]]; then
+      rm -f "$body.tail"
+      warn "cannot read $target; leaving it untouched rather than losing its contents"
+      return 1
+    fi
+    # `printf '%s'` rather than `> "$body.tail"`: command substitution strips
+    # trailing newlines, so awk's output has to have one put back or the
+    # separator blank added below merges with the last line and a user blank
+    # run collapses.
+    printf '%s\n' "$tail" >"$body.tail"
 
     if [[ $where == bottom ]]; then
       # Existing content first, then the block.
@@ -392,9 +428,13 @@ replace_managed_block() {
   # No `|| true`: the `cat > "$target"` below fails loudly if this did not
   # work, and swallowing it here only turned a clear error into a confusing
   # one three lines later.
-  install -d -m 0755 "$(dirname "$target")"
+  run_root install -d -m 0755 "$(dirname "$target")"
 
-  cat "$body" >"$target"
+  # cp, not `run_root cat > "$target"`: the redirection is performed by the
+  # unprivileged shell, not by the privileged child, so it fails on a root-only
+  # file with the same permission error. cp is what the rest of the script uses
+  # for root-owned files.
+  run_root cp -p "$body" "$target"
   rm -f "$body"
 }
 
@@ -1886,13 +1926,18 @@ configure_docker_ufw() {
   # break ufw's own boot-time restore on every boot after that, which is the
   # "no firewall at all" outcome rather than a slightly wrong one.
   local rules_backup="" rules6_backup=""
+  # run_root, not a bare cp: /etc/ufw/after.rules is root-only (0640 root:root
+  # on this box), so unprivileged the copy fails with "cannot open ... for
+  # reading" and `|| rules_backup=""` silently threw the backup away - leaving
+  # the later "restore" a no-op while the code reported success. A snapshot
+  # that cannot be taken is not a snapshot.
   if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after.rules ]]; then
     rules_backup="$(mktemp)"
-    cp -p "${CONF_DEST}/etc/ufw/after.rules" "$rules_backup" || rules_backup=""
+    run_root cp -p "${CONF_DEST}/etc/ufw/after.rules" "$rules_backup" || rules_backup=""
   fi
   if ((!DRY_RUN)) && [[ -f ${CONF_DEST}/etc/ufw/after6.rules ]]; then
     rules6_backup="$(mktemp)"
-    cp -p "${CONF_DEST}/etc/ufw/after6.rules" "$rules6_backup" || rules6_backup=""
+    run_root cp -p "${CONF_DEST}/etc/ufw/after6.rules" "$rules6_backup" || rules6_backup=""
   fi
 
   # Restoring puts the pre-change file back and reloads, so it is used both
