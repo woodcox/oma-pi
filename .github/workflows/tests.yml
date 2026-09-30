@@ -1,0 +1,146 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # GitHub does not fire `push` workflows for the first commit that adds them
+  # on a fork, so this workflow would otherwise never run until the second
+  # push. Manual dispatch makes the first run possible.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04
+          # arm64 leg: the script is a Raspberry Pi hardening script, so arm64
+          # is the architecture that actually matters, and this repo is public
+          # so the runner is free. Verified against GitHub's docs: arm64 Linux
+          # hosted runners (ubuntu-24.04-arm) are free on public repositories
+          # and bill private ones. This repo is public (a fork of
+          # omacom/omaterm), so the label is valid here.
+          #
+          # If this repo is ever made private, this label HARD FAILS the
+          # workflow rather than skipping - GitHub does not silently ignore an
+          # unavailable label, it errors. Remove this line in that case.
+          - ubuntu-24.04-arm
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Run test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/omapi-harden-test.log"
+
+          # `tee` keeps the suite's own "  ok  /  FAIL" lines and the final
+          # "N passed, M failed" summary visible in the runner log, while we
+          # also capture them for the follow-up step.
+          set +e
+          bash test/omapi-harden-test.sh 2>&1 | tee "$log"
+          rc="${PIPESTATUS[0]}"
+          set -e
+
+          # A zero exit is meaningless if the suite died before printing its
+          # summary, so the summary line itself is a hard requirement.
+          if ! grep -Eq '[0-9]+ passed, [0-9]+ failed' "$log"; then
+            echo "::error::the suite printed no 'N passed, M failed' summary (exit $rc): it died before finishing"
+            exit 1
+          fi
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::the suite failed (exit $rc); see the ok/FAIL lines above"
+            exit "$rc"
+          fi
+
+      - name: Surface host-dependent tests that vacuous-skipped
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/omapi-harden-test.log"
+          skipped=0
+
+          skip() {
+            echo "::warning::VACUOUS SKIP: $1"
+            echo "           runner is missing: $2"
+            skipped=$((skipped + 1))
+          }
+
+          # The tests below gate on something the *runner* has, and their bodies
+          # `return 0` when it is absent, so a green "ok" is then a lie. Re-check
+          # each gate here and flag it loudly when the test could not have run.
+
+          # test_real_authorized_keys_parsed -> `[[ -s $f ]] || return 0`
+          if [[ ! -s "$HOME/.ssh/authorized_keys" ]]; then
+            skip "'this box authorized_keys parses'" "a non-empty ~/.ssh/authorized_keys"
+          fi
+
+          # test_rpi_archive_is_allowed_when_this_box_has_it -> grep ... || return 0
+          if ! grep -rqs 'archive\.raspberrypi\.com' \
+              /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+            skip "'the rpi archive is auto-updated where present'" "archive.raspberrypi.com in /etc/apt"
+          fi
+
+          # test_running_kernel_owner_reads_the_real_boot_dir -> [[ -f /boot/vmlinuz-$(uname -r) ]] || return 0
+          if [[ ! -f "/boot/vmlinuz-$(uname -r)" ]]; then
+            skip "'running kernel owner resolves on this box'" "/boot/vmlinuz-$(uname -r)"
+          fi
+
+          # test_apt_config_parses_with_real_apt gates on `have apt-config`, but
+          # setup_destdir stubs `have` to always succeed, so this one actually
+          # runs and FAILS (rather than skips) if apt-config is missing. Flag it
+          # anyway so a future stub change cannot make it pass silently.
+          if ! command -v apt-config >/dev/null 2>&1; then
+            skip "'apt accepts the generated config'" "the apt-config binary"
+          fi
+
+          # Confirm each host-dependent test name was REGISTERED and ran.
+          #
+          # This cannot detect a vacuous skip: a test whose body returns early
+          # still prints "  ok    <name>", so the name is present either way
+          # and its presence proves nothing. It only catches a test that was
+          # never registered, renamed, or dropped from the runner list - a
+          # different failure, and one a passing summary would otherwise hide.
+          # The vacuous-skip detection is the gate checks above.
+          missing=0
+          for name in \
+            'this box authorized_keys parses' \
+            'every sysctl key exists on this kernel' \
+            'apt accepts the generated config' \
+            'the rpi archive is auto-updated where present' \
+            'running kernel owner resolves on this box' \
+            'port parser handles ss output'; do
+            if ! grep -Fq "$name" "$log"; then
+              echo "::error::'$name' never appeared in the suite output"
+              missing=$((missing + 1))
+            fi
+          done
+
+          if [[ $skipped -gt 0 ]]; then
+            echo ""
+            echo "============================================================"
+            echo "NOTICE: $skipped host-dependent test(s) vacuous-skipped here."
+            echo "        A green check does NOT prove those paths on a real Pi."
+            echo "============================================================"
+          fi
+
+          if [[ $missing -gt 0 ]]; then
+            echo "::error::$missing host-dependent test name(s) were missing from the output"
+            exit 1
+          fi
