@@ -849,6 +849,12 @@ test_lockdown_ssh_refuses_a_keyless_target_user() {
   # test passes or fails for the wrong reason.
   setup_destdir
   local rc=0
+  # harden_ssh checks [[ -f ${CONF_DEST}${conf} ]] and returns early when it
+  # is absent. Without this the guard matched the REAL /etc/ssh/sshd_config on
+  # whichever host ran the suite, so this test passed or failed depending on
+  # that host's sshd rather than on the --lockdown-ssh behaviour it is about.
+  mkdir -p "$CONF_DEST/etc/ssh"
+  printf 'Port 22\nPermitRootLogin yes\n' >"$CONF_DEST/etc/ssh/sshd_config"
   LOCKDOWN_SSH=1
   SUDO_USER="keyless-user"
   stub have_usable_key
