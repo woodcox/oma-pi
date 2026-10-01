@@ -103,27 +103,16 @@ security updates, AppArmor, and kernel and network sysctls.
 File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 
+Run it under `sudo`, with the full path as the validator also needs
+root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the
+`DOCKER-USER` rules are reported as unverified rather than checked.
+
 ```bash
 sudo /home/[user]/.local/bin/omapi-harden --list       # available tasks
 sudo /home/[user]/.local/bin/omapi-harden ssh firewall  # just these two
 sudo /home/[user]/.local/bin/omapi-harden --yes         # take the recommended defaults
-./test/omapi-harden-test.sh              # 77 tests, no root needed
+./test/omapi-harden-test.sh              # test suite does not need root access
 ```
-
-Run it under `sudo`, with the full path. `sudo` replaces `PATH` with the
-`secure_path` from `/etc/sudoers`, which does not include `~/.local/bin`, so
-bare `sudo omapi-harden` fails with `command not found`. Add a symlink to
-`/usr/local/bin` if you would rather type the short form:
-
-```bash
-sudo ln -s /home/[user]/.local/bin/omapi-harden /usr/local/bin/omapi-harden
-```
-
-Prefer the full path where you can. `omapi-refresh` reinstalls from this repo
-and overwrites `~/.local/bin/omapi-harden`, so a symlink left dangling by a
-partial reinstall points at whatever that put there. The validator also needs
-root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the
-`DOCKER-USER` rules are reported as unverified rather than checked.
 
 If you would rather do it by hand, please see the three hardening guides below:
   - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
