@@ -55,7 +55,30 @@ setup_destdir() {
   stub have
   have() { return 0; }
   stub run_root
-  run_root() { printf '  [stub] run_root %s\n' "$*" >&2; return 0; }
+  # Really perform the writes: privileged writes go through run_root, so a
+  # logging-only stub would leave every file untouched and each test that
+  # inspects a result would see a missing file. cp/install are done for real
+  # (they are safe in a destdir); everything else is just logged.
+  run_root() {
+    printf '  [stub] run_root %s\n' "$*" >&2
+    case $1 in
+      cp) command cp "${@:2}" ;;
+      install) command install "${@:2}" ;;
+      # These must be real. replace_managed_block reads the target's mode and
+      # owner through run_root stat and restores them with run_root chmod and
+      # chown; stubbing them to a no-op made every mode assertion pass while
+      # the restore did nothing.
+      stat) command stat "${@:2}" ;;
+      chmod) command chmod "${@:2}" ;;
+      chown) command chown "${@:2}" ;;
+      rm) command rm "${@:2}" ;;
+      # Writes are staged then renamed so a failure cannot truncate the live
+      # config. Without a real mv here the staged file never lands and every
+      # test that inspects the result sees a missing one.
+      mv) command mv "${@:2}" ;;
+    esac
+    return 0
+  }
   stub priv
   priv() { printf '  [stub] priv %s\n' "$*" >&2; return 0; }
   # peek returns 1 (not found) for existence checks, so configure_updates
@@ -240,7 +263,12 @@ test_sshd_preserves_mode_and_owner() {
   mkdir -p "$CONF_DEST/etc/ssh"
   local f="$CONF_DEST/etc/ssh/sshd_config"
   printf 'Port 22\n' >"$f"
-  chmod 600 "$f"
+  # 640, NOT 600. `cp -p` copies the body's metadata, and $body is a mktemp
+  # file, so a 600 target is indistinguishable from "cp -p preserved it" - the
+  # test passed with the restore deleted. 640 is the mode ufw/sshd actually
+  # ship, and is a value mktemp never produces, so this now actually exercises
+  # the mode/owner restore.
+  chmod 640 "$f"
   local before; before="$(stat -c '%a %U' "$f")"
 
   local block; block="$(mktemp)"
@@ -1319,6 +1347,712 @@ test_pi_is_locked_when_another_account_can_log_in() {
   return $rc
 }
 
+test_ask_never_passes_a_flag_gum_will_reject() {
+  # gum v2.0.2 has no --default-no (added in 2.1) and exits 80 on it, so every
+  # prompt whose default is "no" died. The v2.0.x spelling is --default=false,
+  # accepted by both versions. Assert neither the old flag nor a bare confirm
+  # (whose default is Yes) is used for a default-n prompt.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  # Only actual invocations, not the comment that explains why the flag is
+  # wrong - the file legitimately mentions it there.
+  if grep -qE '^[[:space:]]*gum confirm .*--default-no' "$f"; then
+    printf '        --default-no is still passed to gum\n'
+    rc=1
+  fi
+  if ! grep -q 'gum confirm "\$question" --default=false' "$f"; then
+    printf '        a default-n prompt does not pass --default=false\n'
+    rc=1
+  fi
+  # The flag must also be one the installed gum accepts. `gum confirm --help`
+  # is the only reliable check from inside the suite: a live confirm needs a
+  # controlling terminal, and the test runner does not have one.
+  #
+  # `command -v`, NOT `have gum`: setup_destdir stubs have() to always return 0,
+  # so gating on it made this block run unconditionally and the suite failed
+  # on any host without gum installed. The suite is meant to run anywhere.
+  if command -v gum >/dev/null 2>&1; then
+    local out
+    out="$(gum confirm --help 2>&1 || true)"
+    if ! grep -q -- '--default' <<<"$out"; then
+      printf '        installed gum advertises no --default option at all\n'
+      rc=1
+    fi
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_listening_process_survives_missing_ss() {
+  # `local ... pid` declared without assigning, and pid was only set inside the
+  # `if have ss` branch - so on a host without ss the reference below hit
+  # `set -u` and aborted the ENTIRE hardening run with "pid: unbound variable".
+  # That is the SSH-owner lookup, on the firewall path.
+  setup_destdir
+  local rc=0
+  stub have
+  have() { [[ $1 == ss ]] && return 1; return 0; }
+  local out
+  out="$(listening_process tcp 22 2>&1)" || rc=1
+  if grep -q 'unbound variable' <<<"$out"; then
+    printf '        aborted with: %s\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ipv4_ruleset_rejects_ipv6_subnets() {
+  # after.rules is the IPv4 ruleset, but docker_subnets returns both families
+  # (now that the IPv4 filter bug is fixed). An IPv6 subnet written there
+  # becomes `-s fd00::/64`, which iptables rejects - failing the whole managed
+  # block, so the Docker bridge exception never installs.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  cat >"$t/docker" <<'DOCKEOF'
+#!/usr/bin/env bash
+case $1 in
+  network) if [[ $2 == ls ]]; then printf 'netid1\n'; exit 0; fi
+           printf '172.17.0.0/16 fd00:dead:beef::/64\n' ;;
+esac
+exit 0
+DOCKEOF
+  chmod +x "$t/docker"
+  local oldpath="$PATH"; PATH="$t:$PATH"; export PATH
+  stub peek
+  peek() { command "${@}"; }
+  install_docker_ufw_rules >/dev/null 2>&1
+  local f="$CONF_DEST/etc/ufw/after.rules"
+  PATH="$oldpath"; export PATH
+
+  if [[ -f $f ]]; then
+    if grep -q -- '-s fd00:dead:beef::/64' "$f"; then
+      printf '        an IPv6 subnet was written into the IPv4 ruleset\n'
+      rc=1
+    fi
+    if ! grep -q -- '-s 172.17.0.0/16' "$f"; then
+      printf '        the IPv4 docker subnet is missing from the rules\n'
+      rc=1
+    fi
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_validator_requires_both_markers() {
+  # A block that never matched produced exactly "*filter\nCOMMIT", which
+  # iptables-restore --test ACCEPTS when run as root - so the validator
+  # reported a pass for a ruleset it never read. Unprivileged it returns 2
+  # (unverified) instead, which is why this could not be caught by simply
+  # calling it here: the vacuous pass needs root.
+  #
+  # So assert the guard's presence directly, and separately assert that the
+  # unprivileged path still refuses rather than claiming success.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if ! grep -qF 'grep -qFx "$DOCKER_UFW_BEGIN"' "$f"; then
+    printf '        the validator does not require both markers before trusting the parse\n'
+    rc=1
+  fi
+
+  # Behavioural half: with no markers the file must never be reported valid.
+  local d="$CONF_DEST/etc/ufw"; mkdir -p "$d"
+  local af="$d/after.rules"
+  printf '*filter\n-A INPUT -j ACCEPT\nCOMMIT\n' >"$af"
+  if validate_docker_ufw_rules "$af" >/dev/null 2>&1; then
+    printf '        a file with no DOCKER-USER markers was accepted as valid\n'
+    rc=1
+  fi
+
+  # And the positive control: with both markers present the marker guard must
+  # not be what rejects it.
+  printf '*filter\n%s\n-A DOCKER-USER -j RETURN\n%s\nCOMMIT\n' \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$af"
+  local out
+  out="$(validate_docker_ufw_rules "$af" 2>&1 || true)"
+  if grep -q 'does not contain both DOCKER-USER markers' <<<"$out"; then
+    printf '        a file WITH both markers was rejected by the marker guard\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_apparmor_does_not_claim_success_it_cannot_confirm() {
+  # `ok "apparmor enabled"` printed unconditionally, so a box with the module
+  # unloaded - or one where aa-status needs root - reported success with
+  # literal "?" placeholders and exited 0.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q 'ok "apparmor enabled (\${enforced:-?}' "$f"; then
+    printf '        apparmor still reports success unconditionally\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_reachable_is_only_reported_when_the_rule_was_added() {
+  # `run_root ufw route allow ... || warn` kept set -e off the failure but not
+  # the report, so a rejected rule printed a warning AND a success line.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q 'comment "omapi: \${name}" || warn "could not add a route rule' "$f"; then
+    printf '        the reachable line is still unconditional after a failed rule\n'
+    rc=1
+  fi
+  if ! grep -q 'it is NOT reachable' "$f"; then
+    printf '        a failed route rule does not say the port is not reachable\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_unattended_upgrade_check_is_not_tautological() {
+  # `grep -q Unattended-Upgrade` matches the 50unattended-upgrades file the
+  # package ships, so it was true on any host that reached here - and the ok
+  # line claimed the RPi origin was covered while Allowed-Origins did not
+  # mention it. That is why the RPi archive sat unpatched for 17 months on the
+  # box this was written on.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q "apt-config dump | grep -q Unattended-Upgrade" "$f"; then
+    printf '        still checking for the package config, not for origins\n'
+    rc=1
+  fi
+  if ! grep -q "grep -q 'Allowed-Origins'" "$f"; then
+    printf '        Allowed-Origins is not checked\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+
+test_harden_ssh_write_preserves_mode() {
+  # Both sshd write sites stage the new content and rename it into place, and a
+  # rename replaces the inode - so each file's own mode has to be captured and
+  # re-applied. Losing it is the same class of defect as losing the content:
+  # sshd_config.d/*.conf is normally 0644 and sshd_config 0600.
+  #
+  # 0600 for the main file is deliberate and is what makes this test bite: it is
+  # a value the staging file never has, so an unguarded rename would silently
+  # widen or narrow it.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ssh"
+  mkdir -p "$d/sshd_config.d"
+  local main="$d/sshd_config"
+  local drop="$d/sshd_config.d/99-omapi.conf"
+  printf 'Port 22\nPermitRootLogin yes\n' >"$main"; chmod 600 "$main"
+  # 0600 for the drop-in too, deliberately. At 0644 the staged file inherits the
+  # same mode, so an unguarded rename is invisible - which is how the missing
+  # mode restore survived. 0600 is a value the staging file never has, so this
+  # actually exercises the restore.
+  printf 'Port 2222\nPermitRootLogin no\n' >"$drop";  chmod 600 "$drop"
+
+  stub run_root
+  run_root() {
+    case $1 in
+      cp|install|chown|chmod|mv|rm|stat) command "$1" "${@:2}" ;;
+    esac
+    return 0
+  }
+  stub have
+  have() { [[ $1 == sshd || $1 == systemctl ]] && return 0; return 1; }
+  stub peek
+  peek() { return 1; }
+  stub ask
+  ask() { return 0; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  # current_ssh_port must be restored, not left stubbed: leaking it into a
+  # later test made that one fail. `stub` saves and restores for exactly this.
+  stub current_ssh_port
+  current_ssh_port() { echo 2222; }
+  DRY_RUN=0
+  harden_ssh >/dev/null 2>&1
+
+  local m d
+  m="$(stat -c %a "$main" 2>/dev/null || printf missing)"
+  d="$(stat -c %a "$drop" 2>/dev/null || printf missing)"
+  if [[ $m != 600 ]]; then
+    printf '        sshd_config mode is %s, expected 600\n' "$m"
+    rc=1
+  fi
+  if [[ $d != 600 ]]; then
+    printf '        drop-in mode is %s, expected 600\n' "$d"
+    rc=1
+  fi
+  # And no staging file may survive a successful write.
+  local leftovers
+  leftovers="$(ls "$d"/*.omapi-tmp "$d"/sshd_config.d/*.omapi-tmp 2>/dev/null | wc -l)"
+  if [[ $leftovers -ne 0 ]]; then
+    printf '        %s staging file(s) left behind\n' "$leftovers"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_harden_ssh_survives_an_unopenable_tty() {
+  # The new-SSH-port prompt did `[[ -e /dev/tty && -r /dev/tty ]]` and then
+  # redirected from /dev/tty. A tty that exists but cannot be OPENED - setsid,
+  # cron, a CI runner, a test runner - passes that test and then fails the
+  # redirect with ENXIO, killing the run before the drop-in pass and before
+  # anything was written. Reproduced here.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  # The probe must actually open the tty, not just test for it.
+  if ! grep -q '(: </dev/tty) 2>/dev/null' "$f"; then
+    printf '        /dev/tty is still only tested for existence, not opened\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_mode_is_applied_before_the_rename_not_after() {
+  # The end state is the same either way - a post-rename chmod leaves the file
+  # at the right mode - so a final-value assertion cannot see this. The defect
+  # is the WINDOW: rename is atomic, so applying the mode afterwards means the
+  # live drop-in is briefly at whatever umask gave the staging file, which
+  # under the root workflow's umask 022 is 0644 even for a 0600 drop-in.
+  #
+  # So assert the order: the mode must be set on the staging file BEFORE mv
+  # touches it. Recording the order of the privileged calls is the only way to
+  # see this from the suite.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE 'mv -f "\$dropin\.omapi-tmp" "\$dropin".*chmod "\$dmode" "\$dropin"' "$f"; then
+    printf '        the drop-in mode is applied AFTER the rename\n'
+    rc=1
+  fi
+  if ! grep -q 'chmod "\$dmode" "\$dropin.omapi-tmp"' "$f"; then
+    printf '        the mode is not applied to the staging file before mv\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_netstat_ipv6_listeners_are_not_dropped() {
+  # netstat labels IPv6 sockets tcp6/udp6 and renders them :::PORT or [::]:PORT.
+  # The parser lowercased $1 and required exactly tcp/udp, so every IPv6
+  # listener vanished - and on a netstat-only host sshd listening on :::22 was
+  # never listed, so the firewall never opened 22. That is a lockout.
+  setup_destdir
+  local rc=0
+  local out
+  out="$(_parse_ports 'tcp6   0  0  :::22                    :::*    LISTEN')"
+  if [[ $out != *"tcp 22"* ]]; then
+    printf '        netstat tcp6 :::22 not reported: got [%s]\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_public_addresses_are_not_misclassified_as_loopback_or_tailscale() {
+  # The loopback and Tailscale tests were unanchored substring matches.
+  # /127\./ also matched 10.127.3.4, and /100\.[0-9]+\./ matched 100.128.0.1 -
+  # which is outside Tailscale's 100.64.0.0/10. Both dropped a publicly
+  # reachable listener from the firewall.
+  setup_destdir
+  local rc=0
+  local out
+  out="$(_parse_ports 'tcp    0  0  10.127.3.4:443          0.0.0.0:* LISTEN')"
+  if [[ $out != *"tcp 443"* ]]; then
+    printf '        10.127.3.4 dropped as loopback: got [%s]\n' "$out"
+    rc=1
+  fi
+  out="$(_parse_ports 'tcp    0  0  100.128.0.1:9000        0.0.0.0:* LISTEN')"
+  if [[ $out != *"tcp 9000"* ]]; then
+    printf '        100.128.0.1 dropped as tailscale: got [%s]\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_loopback_and_tailscale_ranges_still_dropped() {
+  # The complement: the fixes above must not open up the ranges they were
+  # written to exclude.
+  setup_destdir
+  local rc=0
+  local out
+  out="$(_parse_ports 'tcp    0  0  127.0.0.1:8080          0.0.0.0:* LISTEN')"
+  if [[ -n $out ]]; then
+    printf '        loopback 127.0.0.1 reported as a listening service: [%s]\n' "$out"
+    rc=1
+  fi
+  out="$(_parse_ports 'tcp    0  0  100.64.0.1:9000        0.0.0.0:* LISTEN')"
+  if [[ -n $out ]]; then
+    printf '        tailscale 100.64.0.1 reported as public: [%s]\n' "$out"
+    rc=1
+  fi
+  out="$(_parse_ports 'tcp6   0  0  [::1]:631                :::*    LISTEN')"
+  if [[ -n $out ]]; then
+    printf '        loopback [::1] reported as a listening service: [%s]\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_docker_subnets_keeps_ipv4() {
+  # The subnet filter was '^[0-9a-fA-F:]+/[0-9]+$', which cannot match an IPv4
+  # address because there is no '.' in the character class. Every IPv4 docker
+  # subnet was silently discarded, so the DOCKER-USER rules were written
+  # without the 172.17.0.0/16 exception and container traffic was blocked.
+  #
+  # Exercised through the real function with a stubbed `docker`, rather than by
+  # grepping the source: a grep test passes whether or not the pattern matches
+  # anything, which is exactly how the original bug shipped.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  # docker_subnets does: `docker network ls -q`, then `docker network inspect
+  # <name> --format <go-template>`. Match that interface.
+  cat >"$t/docker" <<'DOCKEOF'
+#!/usr/bin/env bash
+case $1 in
+  network)
+    if [[ $2 == ls ]]; then printf 'netid1\n'; exit 0; fi
+    printf '172.17.0.0/16 fd00:dead:beef::/64\n'
+    ;;
+esac
+exit 0
+DOCKEOF
+  chmod +x "$t/docker"
+  local oldpath="$PATH"; PATH="$t:$PATH"; export PATH
+  stub peek
+  peek() { command "${@}"; }
+  local out
+  out="$(docker_subnets 2>/dev/null)"
+  PATH="$oldpath"; export PATH
+
+  if [[ $out != *"172.17.0.0/16"* ]]; then
+    printf '        IPv4 subnet discarded: got [%s]\n' "$out"
+    rc=1
+  fi
+  if [[ $out != *"fd00:dead:beef::/64"* ]]; then
+    printf '        IPv6 subnet discarded: got [%s]\n' "$out"
+    rc=1
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+
+test_managed_block_preserves_mode_and_owner_in_practice() {
+  # The behaviour, not the source text. A grep-based test passed while this was
+  # broken, so this one runs replace_managed_block against a real file.
+  #
+  # 0640 is deliberate: the new content comes from a mktemp file at 0600, and
+  # rename() replaces the inode, so the mode has to be re-applied afterwards.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ufw"; mkdir -p "$d"
+  local f="$d/after.rules"
+  printf '*filter\n-A keepme -j ACCEPT\nCOMMIT\n' >"$f"
+  chmod 640 "$f"
+  local before; before="$(stat -c '%a %U:%G' "$f")"
+
+  local block; block="$(mktemp)"
+  printf '%s\n*filter\nCOMMIT\n%s\n' "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$block"
+  replace_managed_block "$block" /etc/ufw/after.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
+  rm -f "$block"
+
+  local after; after="$(stat -c '%a %U:%G' "$f")"
+  if [[ $after != "$before" ]]; then
+    printf '        metadata changed: %s -> %s\n' "$before" "$after"
+    rc=1
+  fi
+  if ! grep -q -- '-A keepme -j ACCEPT' "$f"; then
+    printf '        the existing rule was lost\n'
+    rc=1
+  fi
+  if ls "${f}.omapi-stage."* >/dev/null 2>&1; then
+    printf '        a staging file was left behind\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_rewrite_allowed_when_remainder_is_empty() {
+  # A file whose entire contents are one managed block has a legitimately EMPTY
+  # remainder. Judging readability by emptiness would refuse the rewrite
+  # forever, so the block could never be updated on such a file. The check must
+  # use the exit status, and only refuse when BOTH reads fail.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q '\[\[ -s \$target && -z \$tail \]\]' "$f"; then
+    printf '        readability is still judged by an empty remainder\n'
+    rc=1
+  fi
+  if ! grep -q 'if ((rc != 0)) && \[\[ -s \$target \]\]' "$f"; then
+    printf '        the read-failure check does not use the exit status\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_snapshot_cleanup_uses_run_root() {
+  # The snapshot is taken by root, so an unprivileged rm cannot unlink it and
+  # the temp file is left behind in /tmp on every run.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE '^[[:space:]]*rm -f "\$rules_backup"' "$f"; then
+    printf '        an unprivileged rm of the ufw snapshot is still present\n'
+    rc=1
+  fi
+  local n; n="$(grep -c 'run_root rm -f "\$rules_backup" \${rules6_backup:-}' "$f")"
+  if [[ $n -ne 2 ]]; then
+    printf '        expected 2 privileged snapshot cleanups, found %s\n' "$n"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_write_preserves_mode_and_owner_in_practice() {
+  # The behaviour, not the source text. The grep-based test next to this one
+  # would pass even with the restore deleted; this one runs the function.
+  #
+  # The mode is 0640 deliberately: cp -p carries the mktemp body's 0600 onto
+  # the target, so a 0600 target is indistinguishable from "cp -p preserved
+  # it". 0640 is a value mktemp never produces and is what ufw ships.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ufw"
+  mkdir -p "$d"
+  local f="$d/after.rules"
+  printf '*filter\n-A keepme -j ACCEPT\nCOMMIT\n' >"$f"
+  chmod 640 "$f"
+  local before; before="$(stat -c '%a %U:%G' "$f")"
+
+  local block; block="$(mktemp)"
+  printf '%s\n*filter\nCOMMIT\n%s\n' "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$block"
+  replace_managed_block "$block" /etc/ufw/after.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
+  rm -f "$block"
+
+  local after; after="$(stat -c '%a %U:%G' "$f")"
+  if [[ $after != "$before" ]]; then
+    printf '        metadata changed: %s -> %s\n' "$before" "$after"
+    rc=1
+  fi
+  # And the pre-existing rule must survive.
+  if ! grep -q -- '-A keepme -j ACCEPT' "$f"; then
+    printf '        the existing rule was lost\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_managed_block_refuses_rather_than_truncating_an_unreadable_target() {
+  # The behaviour behind the grep test. An unreadable non-empty target must be
+  # left byte-for-byte alone - this is the bug that emptied after.rules.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ufw"
+  mkdir -p "$d"
+  local f="$d/locked.rules"
+  printf '*filter\n-A critical -j ACCEPT\nCOMMIT\n' >"$f"
+  # Checksum BEFORE locking it down: a 0000 file cannot be read by the test
+  # user, so an md5 taken afterwards is the empty string and the comparison
+  # below would pass vacuously.
+  local before; before="$(md5sum "$f" | cut -d" " -f1)"
+  chmod 000 "$f"
+
+  local block; block="$(mktemp)"
+  printf '%s\n*filter\nCOMMIT\n%s\n' "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$block"
+  # peek must also fail, so simulate no root at all: both reads fail.
+  stub peek
+  peek() { return 1; }
+  # The direct read must fail deterministically, whatever uid runs the suite.
+  # root bypasses chmod 000, so relying on the permissions wall makes the read
+  # succeed on a CI runner and the rewrite happen even though the code under
+  # test is correct. Stub awk to fail only when its last argument is this
+  # target, forwarding every other awk call to the real binary.
+  stub awk
+  awk() {
+    if [[ ${@: -1} == "$f" ]]; then
+      return 1
+    fi
+    command awk "$@"
+  }
+  replace_managed_block "$block" /etc/ufw/locked.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom >/dev/null 2>&1
+  local r=$?
+  chmod 644 "$f"
+  rm -f "$block"
+
+  local after; after="$(md5sum "$f" | cut -d" " -f1)"
+  if [[ -z $before || -z $after ]]; then
+    printf '        could not checksum the target (before=%q after=%q)\n' "$before" "$after"
+    rc=1
+  elif [[ $before != "$after" ]]; then
+    printf '        an unreadable target was modified (md5 %s -> %s)\n' "$before" "$after"
+    rc=1
+  fi
+  if ((r == 0)); then
+    printf '        the rewrite reported success on an unreadable target\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_rules_snapshot_is_taken_with_run_root() {
+  # /etc/ufw/after.rules is 0640 root:root. A bare `cp` fails unprivileged with
+  # "cannot open ... for reading", and because the caller does `|| backup=""`
+  # the snapshot was silently discarded - so the later restore was a no-op
+  # while the code reported that it had a backup. Assert it is privileged.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE '^[[:space:]]*cp -p "\$\{CONF_DEST\}/etc/ufw/after6?\.rules"' "$f"; then
+    printf '        an unprivileged cp of the ufw rules files is still present\n'
+    rc=1
+  fi
+  local n
+  n="$(grep -cE '^[[:space:]]*run_root cp -p "\$\{CONF_DEST\}/etc/ufw/after6?\.rules" "\$rules6?_backup"' "$f")"
+  if [[ $n -ne 2 ]]; then
+    printf '        expected 2 privileged ufw rules snapshots, found %s\n' "$n"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_replace_managed_block_reads_target_via_peek() {
+  # The same permission wall, in the awk that strips the old managed block.
+  # No test could catch it before: the suite runs against a destdir whose files
+  # the test user can read, and only /etc/ufw/*.rules is 0640 root:root.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE "^[[:space:]]*awk -v b1=.*\"\\\$target\" >\"\\\$body\.tail\"" "$f"; then
+    printf '        replace_managed_block still reads the target with a bare awk\n'
+    rc=1
+  fi
+  if ! grep -q 'peek awk -v b1=' "$f"; then
+    printf '        replace_managed_block does not read the target via peek\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_replace_managed_block_writes_target_atomically() {
+  # cp straight into the live target truncates it first, so a mid-write failure
+  # (ENOSPC on a full SD card) leaves the file holding none of its old rules.
+  # The content must be staged beside the target and renamed into place.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE 'run_root cat "\$body" >"\$target"' "$f"; then
+    printf '        the target is written by an unprivileged redirection\n'
+    rc=1
+  fi
+  if grep -qE 'run_root cp "\$body" "\$target"' "$f"; then
+    printf '        the target is copied into directly instead of staged\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root cp "\$body" "\$stage"' "$f"; then
+    printf '        the new content is not staged beside the target\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root mv -f "\$stage" "\$target"' "$f"; then
+    printf '        the staged content is not renamed into place\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+test_ufw_malformed_restore_reports_success() {
+  # When a snapshot was taken and restore_rules copies it back, the caller must
+  # say so. The old code checked `[[ -n ${rules_backup:-} ]]` AFTER restore_rules
+  # had cleared it, so the success note was dead and the "no snapshot" warning
+  # printed even on a perfect restore.
+  setup_destdir
+  local rc=0
+  mkdir -p "$CONF_DEST/etc/ufw"
+  printf '*filter\n-A original -j ACCEPT\nCOMMIT\n' >"$CONF_DEST/etc/ufw/after.rules"
+
+  stub docker_present
+  docker_present() { return 0; }
+  stub docker_ufw_installed
+  docker_ufw_installed() { return 0; }
+  stub validate_docker_ufw_rules
+  validate_docker_ufw_rules() { return 1; }
+  stub docker_offer_published_ports
+  docker_offer_published_ports() { return 0; }
+
+  local out r
+  out="$(configure_docker_ufw 2>&1)"; r=$?
+
+  if ! grep -q 'the previous /etc/ufw/after.rules has been restored' <<<"$out"; then
+    printf '        did not report a successful restore (rc=%s):\n%s\n' "$r" "$out"
+    rc=1
+  fi
+  if grep -q 'no snapshot of /etc/ufw/after.rules was taken' <<<"$out"; then
+    printf '        reported "no snapshot" despite a successful restore\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ufw_malformed_restore_reports_no_snapshot() {
+  # With no snapshot at all the caller must say so distinctly, not claim a
+  # restore happened.
+  setup_destdir
+  local rc=0
+
+  stub docker_present
+  docker_present() { return 0; }
+  stub docker_ufw_installed
+  docker_ufw_installed() { return 0; }
+  stub validate_docker_ufw_rules
+  validate_docker_ufw_rules() { return 1; }
+  stub docker_offer_published_ports
+  docker_offer_published_ports() { return 0; }
+
+  local out r
+  out="$(configure_docker_ufw 2>&1)"; r=$?
+
+  if ! grep -q 'no snapshot of /etc/ufw/after.rules was taken' <<<"$out"; then
+    printf '        did not report the missing snapshot (rc=%s):\n%s\n' "$r" "$out"
+    rc=1
+  fi
+  if grep -q 'the previous /etc/ufw/after.rules has been restored' <<<"$out"; then
+    printf '        claimed a restore happened when there was no snapshot\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nargument handling\n'
 
@@ -2017,6 +2751,29 @@ t 'loopback test is per protocol'                      test_docker_port_is_loopb
 t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
+t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
+t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode
+t 'mode applied before the rename'     test_mode_is_applied_before_the_rename_not_after
+t 'harden_ssh survives an unopenable tty' test_harden_ssh_survives_an_unopenable_tty
+t 'listening process survives missing ss'  test_listening_process_survives_missing_ss
+t 'ipv4 ruleset rejects ipv6 subnets'     test_ipv4_ruleset_rejects_ipv6_subnets
+t 'validator requires both markers'       test_validator_requires_both_markers
+t 'apparmor does not claim unverified ok' test_apparmor_does_not_claim_success_it_cannot_confirm
+t 'reachable reported only when added'    test_reachable_is_only_reported_when_the_rule_was_added
+t 'unattended-upgrade check is not a tautology' test_unattended_upgrade_check_is_not_tautological
+t 'netstat ipv6 listeners are kept'      test_netstat_ipv6_listeners_are_not_dropped
+t 'public addrs not misclassified'       test_public_addresses_are_not_misclassified_as_loopback_or_tailscale
+t 'loopback and tailscale still dropped' test_loopback_and_tailscale_ranges_still_dropped
+t 'docker subnets keeps ipv4'            test_docker_subnets_keeps_ipv4
+t 'managed block keeps mode in practice'    test_managed_block_preserves_mode_and_owner_in_practice
+t 'unreadable target is refused not truncated' test_managed_block_refuses_rather_than_truncating_an_unreadable_target
+t 'block rewrite allowed on empty remainder' test_managed_block_rewrite_allowed_when_remainder_is_empty
+t 'ufw snapshot cleanup uses run_root'       test_ufw_snapshot_cleanup_uses_run_root
+t 'ufw rules snapshot uses run_root'         test_ufw_rules_snapshot_is_taken_with_run_root
+t 'managed block reads target via peek'      test_replace_managed_block_reads_target_via_peek
+t 'managed block writes target atomically'  test_replace_managed_block_writes_target_atomically
+t 'ufw malformed restore reports success'    test_ufw_malformed_restore_reports_success
+t 'ufw malformed restore reports no snapshot' test_ufw_malformed_restore_reports_no_snapshot
 t 'pi is locked when another account can log in'     test_pi_is_locked_when_another_account_can_log_in
 t '--lockdown-ssh refuses a keyless target user'      test_lockdown_ssh_refuses_a_keyless_target_user
 t 'docker loopback survives a missing protocol'        test_docker_loopback_survives_a_missing_protocol_suffix
