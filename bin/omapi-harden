@@ -257,7 +257,36 @@ write_conf() {
     return 0
   fi
   install -d -m 0755 "$(dirname "$target")"
-  cat >"$target"
+  # Write to a sibling temp and rename, never `cat >"$target"` directly.
+  # That redirection truncates the live config before reading anything: on a
+  # full SD card (ENOSPC), an I/O error, or a producer that dies mid-stream, the
+  # target is left empty or partial and set -e then aborts the run. rename(2)
+  # within one filesystem is atomic, so the target is either the old file or
+  # the complete new one - never a half-written one.
+  local tmp="${target}.omapi-tmp.$$"
+  if ! cat >"$tmp"; then
+    rm -f "$tmp"
+    warn "could not write $path; it has NOT been changed"
+    return 1
+  fi
+  # Refuse to install a config that came out empty. An empty sshd_config or
+  # after.rules is never what was intended, and replacing a working one with it
+  # is the worst outcome available.
+  if [[ ! -s $tmp ]]; then
+    rm -f "$tmp"
+    warn "$path came out empty; refusing to install it over the existing file"
+    return 1
+  fi
+  # Preserve the target's own mode/owner: mv replaces the inode, so the new
+  # file would otherwise carry this script's umask instead.
+  local tmode=644
+  [[ -e $target ]] && tmode="$(stat -c %a "$target" 2>/dev/null || printf 644)"
+  if ! mv -f "$tmp" "$target"; then
+    rm -f "$tmp"
+    warn "could not install $path; it has NOT been changed"
+    return 1
+  fi
+  chmod "$tmode" "$target" 2>/dev/null || true
   note "wrote $path"
 }
 
@@ -443,8 +472,38 @@ replace_managed_block() {
   # needed a fragile stat-then-chown round-trip whose failure path silently
   # handed a root config to the caller. Only a brand-new target needs an
   # explicit mode; it has no metadata of its own to preserve.
+  # Stage then rename. `cp` into an existing target truncates it first, so a
+  # failure part-way through - ENOSPC on a full SD card, an I/O error - leaves
+  # /etc/ufw/after.rules holding a partial file: every rule ufw had is gone and
+  # the managed block is incomplete. rename(2) within one filesystem is atomic,
+  # so the target is either the old file or the complete new one.
+  #
+  # Not `cp -p`: that carries the mktemp body's 0600 and the invoking user's
+  # ownership onto a 0640 root:root file. A plain cp onto a NEW file also has no
+  # metadata of its own, so the create branch sets it explicitly.
+  local stage="${target}.omapi-stage.$$"
+  if ! run_root cp "$body" "$stage"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not stage $target; it has NOT been changed"
+    return 1
+  fi
   if [[ -e $target ]]; then
-    run_root cp "$body" "$target"
+    local tmode
+    tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
+    if [[ -z $tmode ]]; then
+      run_root rm -f "$stage" 2>/dev/null || true
+      rm -f "$body"
+      warn "could not read the mode of $target; leaving it untouched"
+      return 1
+    fi
+    if ! run_root mv -f "$stage" "$target"; then
+      run_root rm -f "$stage" 2>/dev/null || true
+      rm -f "$body"
+      warn "could not install $target; it has NOT been changed"
+      return 1
+    fi
+    run_root chmod "$tmode" "$target"
   else
     # 0640 root:root is what ufw ships for after.rules/after6.rules; 0644 is
     # right for sshd_config. Defaulting to 0644 would make a hardening script
@@ -454,7 +513,12 @@ replace_managed_block() {
       */ufw/after.rules|*/ufw/after6.rules) tmode=640 ;;
       *) tmode=644 ;;
     esac
-    run_root cp "$body" "$target"
+    if ! run_root mv -f "$stage" "$target"; then
+      run_root rm -f "$stage" 2>/dev/null || true
+      rm -f "$body"
+      warn "could not install $target; it has NOT been changed"
+      return 1
+    fi
     run_root chown 0:0 "$target"
     run_root chmod "$tmode" "$target"
   fi
@@ -1124,8 +1188,15 @@ EOF
         }
         { print }
       ' "$dropin" >"$dropin.omapi-tmp"; then
-        cat "$dropin.omapi-tmp" >"$dropin"
-        rm -f "$dropin.omapi-tmp"
+        # Same reasoning as the main file: rename rather than truncate-and-copy,
+        # so a failed write cannot leave a half-written drop-in for sshd to read
+        # on the next start.
+        if [[ -s $dropin.omapi-tmp ]]; then
+          mv -f "$dropin.omapi-tmp" "$dropin"
+        else
+          rm -f "$dropin.omapi-tmp"
+          warn "refusing to install an empty drop-in; leaving it untouched"
+        fi
       else
         # Never rewrite a file we cannot read back correctly: a half-written
         # drop-in is a box that may not come back.
@@ -1270,7 +1341,13 @@ listening_ports() {
   fi
   printf '%s\n' "$raw" | awk '
     {
+      # netstat labels IPv6 sockets tcp6/udp6 and renders addresses as
+      # [::]:PORT or :::PORT; ss labels them tcp/udp with brackets. Normalise
+      # the trailing 6 so an IPv6 listener is not silently dropped - when sshd
+      # listens on :::22 and only netstat is installed, dropping it means the
+      # firewall never opens 22.
       proto = tolower($1)
+      sub(/6$/, "", proto)
       if (proto != "tcp" && proto != "udp") next
       addr = ""
       for (i = 2; i <= NF; i++) {
@@ -1287,11 +1364,17 @@ listening_ports() {
       if (addr == "") next
       # Loopback-only. 127.x anywhere in the field, and either bracket form
       # of ::1, so [::1]:631 and ::1:631 both go.
-      if (addr ~ /127\./ || addr ~ /::1\]?:/) next
+      # Anchored on purpose. Unanchored, /127\./ also matches 10.127.3.4 and
+      # /::1\]\?:/ matches any address merely CONTAINING "::1:" - either way a
+      # publicly reachable listener is dropped from the firewall.
+      if (addr ~ /^127\./ || addr ~ /^\[?::1\]?:/) next
       # Tailscale. The interface is usually 100.64.0.0/10, but a v6 tailnet
       # address is fd7a:115c:a1e0::/48, and filtering only the v4 range let
       # fd7a:115c:a1e0::...:35546 through as if it were public traffic.
-      if (addr ~ /100\.[0-9]+\.[0-9]+\.[0-9]+:/ || addr ~ /\[?fd7a:115c:a1e0:/) next
+      # 100.64.0.0/10 exactly - 100.64 through 100.127. Unanchored, 100.128+
+      # (ordinary public space) was being treated as Tailscale and dropped.
+      if (addr ~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ ||
+          addr ~ /^\[?fd7a:115c:a1e0:/) next
       if (addr ~ /tailscale/) next
       # mDNS / LLMNR / SSDP name-service noise, not services you run.
       if (proto == "udp" && addr ~ /:(5353|5355|1900|123|1234)$/) next
@@ -1350,7 +1433,7 @@ docker_subnets() {
     for n in $(docker network ls -q 2>/dev/null || true); do
       docker network inspect "$n" --format \
         '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true
-    done | tr ' ' '\n' | grep -E '^[0-9a-fA-F:]+/[0-9]+$' || true
+    done | tr ' ' '\n' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]+$|^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*\/[0-9]+$' || true
   fi
 }
 
@@ -1743,11 +1826,13 @@ configure_firewall() {
 
   # Tailscale's interface is not a public interface, but ufw still counts
   # packets arriving on it, and losing the tailnet would lose the way back in.
+  local tailscale_allowed=0
   if [[ -d /sys/class/net/tailscale0 ]] || (peek tailscale status &>/dev/null); then
     if ((DRY_RUN)); then
       printf '  %s•%s would allow: ufw allow in on tailscale0\n' "$C_DIM" "$C_OFF"
     elif ask "allow traffic arriving on the tailscale0 interface?" y; then
       run_root ufw allow in on tailscale0 comment "omapi: tailscale"
+      tailscale_allowed=1
       ok "tailscale0 allowed"
     else
       warn "tailnet traffic will be dropped by ufw"
@@ -1772,7 +1857,12 @@ configure_firewall() {
   while read -r proto port <&3; do
     [[ -n $proto && -n $port ]] || continue
     [[ $port == "$ssh_port" ]] && continue
-    owner="$(listening_process "$proto" "$port")"
+    # `|| true`: listening_process legitimately returns non-zero (ss absent, no
+    # match), and a bare assignment propagates that status - so set -e aborted
+    # the whole run here, with `ufw default deny incoming` already applied and
+    # every remaining port left undecided. The owner is only used to label the
+    # prompt, so an empty one is harmless.
+    owner="$(listening_process "$proto" "$port" || true)"
     if [[ $owner == unknown || $owner == "need root" ]]; then
       owner="$(docker_published_by "$port" "$proto" || true)"
       [[ -n $owner ]] || owner="unidentified (needs root to see the owner)"
@@ -1805,7 +1895,13 @@ configure_firewall() {
   # If the tailnet is the only way in, port 22 can go away entirely. This is
   # the network-level half of the VPN advice in the guides, and it is the one
   # step that can end a session, so it is opt-in and loud.
-  if [[ -d /sys/class/net/tailscale0 ]] && ask "close port ${ssh_port} completely (Tailscale SSH only)?" n; then
+  # Gated on the tailnet actually being allowed. Declining the interface prompt
+  # above leaves tailnet traffic under `default deny incoming`, so allowing a
+  # "Tailscale SSH only" close here would delete the SSH rule and add a deny
+  # while leaving no route back in at all - the next login is refused on the
+  # WAN and on the tailnet. Refuse rather than offer it.
+  if ((tailscale_allowed)) && [[ -d /sys/class/net/tailscale0 ]] &&
+     ask "close port ${ssh_port} completely (Tailscale SSH only)?" n; then
     if ((DRY_RUN)); then
       printf '  %s•%s would deny: ufw deny %s/tcp\n' "$C_DIM" "$C_OFF" "$ssh_port"
     else

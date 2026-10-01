@@ -72,6 +72,10 @@ setup_destdir() {
       chmod) command chmod "${@:2}" ;;
       chown) command chown "${@:2}" ;;
       rm) command rm "${@:2}" ;;
+      # Writes are staged then renamed so a failure cannot truncate the live
+      # config. Without a real mv here the staged file never lands and every
+      # test that inspects the result sees a missing one.
+      mv) command mv "${@:2}" ;;
     esac
     return 0
   }
@@ -1380,21 +1384,147 @@ test_ask_never_passes_a_flag_gum_will_reject() {
   return $rc
 }
 
-test_managed_block_preserves_target_mode_and_owner() {
-  # `cp -p "$body" "$target"` imported mktemp's 0600 and the invoking user's
-  # ownership, replacing the 0640 root:root that ufw ships. The write must use
-  # a plain `cp` (no -p): overwriting the existing inode preserves the
-  # target's own mode and owner, so no stat/chown round-trip - and no failure
-  # path that silently hands the file to the caller - is needed.
+test_netstat_ipv6_listeners_are_not_dropped() {
+  # netstat labels IPv6 sockets tcp6/udp6 and renders them :::PORT or [::]:PORT.
+  # The parser lowercased $1 and required exactly tcp/udp, so every IPv6
+  # listener vanished - and on a netstat-only host sshd listening on :::22 was
+  # never listed, so the firewall never opened 22. That is a lockout.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
-  if grep -q 'run_root cp -p "\$body" "\$target"' "$f"; then
-    printf '        the target is written with cp -p, importing the temp file metadata\n'
+  local out
+  out="$(_parse_ports 'tcp6   0  0  :::22                    :::*    LISTEN')"
+  if [[ $out != *"tcp 22"* ]]; then
+    printf '        netstat tcp6 :::22 not reported: got [%s]\n' "$out"
     rc=1
   fi
-  if ! grep -q 'run_root cp "\$body" "\$target"' "$f"; then
-    printf '        the target is not written with a plain run_root cp\n'
+  teardown_destdir
+  return $rc
+}
+
+test_public_addresses_are_not_misclassified_as_loopback_or_tailscale() {
+  # The loopback and Tailscale tests were unanchored substring matches.
+  # /127\./ also matched 10.127.3.4, and /100\.[0-9]+\./ matched 100.128.0.1 -
+  # which is outside Tailscale's 100.64.0.0/10. Both dropped a publicly
+  # reachable listener from the firewall.
+  setup_destdir
+  local rc=0
+  local out
+  out="$(_parse_ports 'tcp    0  0  10.127.3.4:443          0.0.0.0:* LISTEN')"
+  if [[ $out != *"tcp 443"* ]]; then
+    printf '        10.127.3.4 dropped as loopback: got [%s]\n' "$out"
+    rc=1
+  fi
+  out="$(_parse_ports 'tcp    0  0  100.128.0.1:9000        0.0.0.0:* LISTEN')"
+  if [[ $out != *"tcp 9000"* ]]; then
+    printf '        100.128.0.1 dropped as tailscale: got [%s]\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_loopback_and_tailscale_ranges_still_dropped() {
+  # The complement: the fixes above must not open up the ranges they were
+  # written to exclude.
+  setup_destdir
+  local rc=0
+  local out
+  out="$(_parse_ports 'tcp    0  0  127.0.0.1:8080          0.0.0.0:* LISTEN')"
+  if [[ -n $out ]]; then
+    printf '        loopback 127.0.0.1 reported as a listening service: [%s]\n' "$out"
+    rc=1
+  fi
+  out="$(_parse_ports 'tcp    0  0  100.64.0.1:9000        0.0.0.0:* LISTEN')"
+  if [[ -n $out ]]; then
+    printf '        tailscale 100.64.0.1 reported as public: [%s]\n' "$out"
+    rc=1
+  fi
+  out="$(_parse_ports 'tcp6   0  0  [::1]:631                :::*    LISTEN')"
+  if [[ -n $out ]]; then
+    printf '        loopback [::1] reported as a listening service: [%s]\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_docker_subnets_keeps_ipv4() {
+  # The subnet filter was '^[0-9a-fA-F:]+/[0-9]+$', which cannot match an IPv4
+  # address because there is no '.' in the character class. Every IPv4 docker
+  # subnet was silently discarded, so the DOCKER-USER rules were written
+  # without the 172.17.0.0/16 exception and container traffic was blocked.
+  #
+  # Exercised through the real function with a stubbed `docker`, rather than by
+  # grepping the source: a grep test passes whether or not the pattern matches
+  # anything, which is exactly how the original bug shipped.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  # docker_subnets does: `docker network ls -q`, then `docker network inspect
+  # <name> --format <go-template>`. Match that interface.
+  cat >"$t/docker" <<'DOCKEOF'
+#!/usr/bin/env bash
+case $1 in
+  network)
+    if [[ $2 == ls ]]; then printf 'netid1\n'; exit 0; fi
+    printf '172.17.0.0/16 fd00:dead:beef::/64\n'
+    ;;
+esac
+exit 0
+DOCKEOF
+  chmod +x "$t/docker"
+  local oldpath="$PATH"; PATH="$t:$PATH"; export PATH
+  stub peek
+  peek() { command "${@}"; }
+  local out
+  out="$(docker_subnets 2>/dev/null)"
+  PATH="$oldpath"; export PATH
+
+  if [[ $out != *"172.17.0.0/16"* ]]; then
+    printf '        IPv4 subnet discarded: got [%s]\n' "$out"
+    rc=1
+  fi
+  if [[ $out != *"fd00:dead:beef::/64"* ]]; then
+    printf '        IPv6 subnet discarded: got [%s]\n' "$out"
+    rc=1
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+
+test_managed_block_preserves_mode_and_owner_in_practice() {
+  # The behaviour, not the source text. A grep-based test passed while this was
+  # broken, so this one runs replace_managed_block against a real file.
+  #
+  # 0640 is deliberate: the new content comes from a mktemp file at 0600, and
+  # rename() replaces the inode, so the mode has to be re-applied afterwards.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ufw"; mkdir -p "$d"
+  local f="$d/after.rules"
+  printf '*filter\n-A keepme -j ACCEPT\nCOMMIT\n' >"$f"
+  chmod 640 "$f"
+  local before; before="$(stat -c '%a %U:%G' "$f")"
+
+  local block; block="$(mktemp)"
+  printf '%s\n*filter\nCOMMIT\n%s\n' "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$block"
+  replace_managed_block "$block" /etc/ufw/after.rules \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" bottom
+  rm -f "$block"
+
+  local after; after="$(stat -c '%a %U:%G' "$f")"
+  if [[ $after != "$before" ]]; then
+    printf '        metadata changed: %s -> %s\n' "$before" "$after"
+    rc=1
+  fi
+  if ! grep -q -- '-A keepme -j ACCEPT' "$f"; then
+    printf '        the existing rule was lost\n'
+    rc=1
+  fi
+  if ls "${f}.omapi-stage."* >/dev/null 2>&1; then
+    printf '        a staging file was left behind\n'
     rc=1
   fi
   teardown_destdir
@@ -1571,9 +1701,10 @@ test_replace_managed_block_reads_target_via_peek() {
   return $rc
 }
 
-test_replace_managed_block_writes_target_with_run_root() {
-  # The write side. `run_root cat "$body" >"$target"` would still fail: the
-  # redirection is done by the unprivileged shell, not the privileged child.
+test_replace_managed_block_writes_target_atomically() {
+  # cp straight into the live target truncates it first, so a mid-write failure
+  # (ENOSPC on a full SD card) leaves the file holding none of its old rules.
+  # The content must be staged beside the target and renamed into place.
   setup_destdir
   local rc=0
   local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
@@ -1581,14 +1712,21 @@ test_replace_managed_block_writes_target_with_run_root() {
     printf '        the target is written by an unprivileged redirection\n'
     rc=1
   fi
-  if ! grep -q 'run_root cp "\$body" "\$target"' "$f"; then
-    printf '        the target is not written with run_root cp\n'
+  if grep -qE 'run_root cp "\$body" "\$target"' "$f"; then
+    printf '        the target is copied into directly instead of staged\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root cp "\$body" "\$stage"' "$f"; then
+    printf '        the new content is not staged beside the target\n'
+    rc=1
+  fi
+  if ! grep -q 'run_root mv -f "\$stage" "\$target"' "$f"; then
+    printf '        the staged content is not renamed into place\n'
     rc=1
   fi
   teardown_destdir
   return $rc
 }
-
 test_ufw_malformed_restore_reports_success() {
   # When a snapshot was taken and restore_rules copies it back, the caller must
   # say so. The old code checked `[[ -n ${rules_backup:-} ]]` AFTER restore_rules
@@ -2352,14 +2490,17 @@ t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_pr
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
-t 'managed block preserves mode and owner'   test_managed_block_preserves_target_mode_and_owner
-t 'managed block keeps mode in practice'   test_managed_block_write_preserves_mode_and_owner_in_practice
+t 'netstat ipv6 listeners are kept'      test_netstat_ipv6_listeners_are_not_dropped
+t 'public addrs not misclassified'       test_public_addresses_are_not_misclassified_as_loopback_or_tailscale
+t 'loopback and tailscale still dropped' test_loopback_and_tailscale_ranges_still_dropped
+t 'docker subnets keeps ipv4'            test_docker_subnets_keeps_ipv4
+t 'managed block keeps mode in practice'    test_managed_block_preserves_mode_and_owner_in_practice
 t 'unreadable target is refused not truncated' test_managed_block_refuses_rather_than_truncating_an_unreadable_target
 t 'block rewrite allowed on empty remainder' test_managed_block_rewrite_allowed_when_remainder_is_empty
 t 'ufw snapshot cleanup uses run_root'       test_ufw_snapshot_cleanup_uses_run_root
 t 'ufw rules snapshot uses run_root'         test_ufw_rules_snapshot_is_taken_with_run_root
 t 'managed block reads target via peek'      test_replace_managed_block_reads_target_via_peek
-t 'managed block writes target with run_root' test_replace_managed_block_writes_target_with_run_root
+t 'managed block writes target atomically'  test_replace_managed_block_writes_target_atomically
 t 'ufw malformed restore reports success'    test_ufw_malformed_restore_reports_success
 t 'ufw malformed restore reports no snapshot' test_ufw_malformed_restore_reports_no_snapshot
 t 'pi is locked when another account can log in'     test_pi_is_locked_when_another_account_can_log_in
