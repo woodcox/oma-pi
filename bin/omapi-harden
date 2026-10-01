@@ -984,7 +984,7 @@ harden_ssh() {
   fi
   note "sshd is on port ${port}"
 
-  if ! [[ -f $conf ]] && ! ((DRY_RUN)); then
+  if ! [[ -f ${CONF_DEST}${conf} ]] && ! ((DRY_RUN)); then
     warn "no ${conf}, skipping SSH hardening"
     return 0
   fi
@@ -1139,10 +1139,17 @@ EOF
   local dropin_backups=""
   if ((!DRY_RUN)) && [[ -f $target ]]; then
     backup="${target}.omapi-backup"
-    cp -p "$target" "$backup"
+    if ! run_root cp -p "$target" "$backup"; then
+      warn "could not back up ${conf}; leaving it untouched"
+      rm -f "$block"
+      return 1
+    fi
   fi
 
-  replace_managed_block "$block" "$conf"
+  if ! replace_managed_block "$block" "$conf"; then
+    rm -f "$block"
+    return 1
+  fi
 
   # Port is ADDITIVE in sshd: unlike every other directive here, first value
   # does not win, and two active `Port` lines for the same port make sshd die
@@ -1161,7 +1168,15 @@ EOF
   # position: a blanket regex cannot tell the block's `Port` from the
   # stock file's, and commenting out both would leave sshd with no port at all.
   if ((!DRY_RUN)); then
-    if ! awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" '
+    # Redirections run in the invoking shell. Keep generated content in a
+    # caller-owned file, then copy it to the privileged staging path.
+    local rewrite
+    if ! rewrite="$(mktemp)"; then
+      [[ -n $backup ]] && { run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"; }
+      rm -f "$block"
+      return 1
+    fi
+    if ! run_root awk -v b1="$MANAGED_BEGIN" -v b2="$MANAGED_END" '
       $0 == b1 { inside = 1; print; next }
       $0 == b2 { inside = 0; print; next }
       inside != 1 && $0 ~ /^[[:space:]]*[#[:space:]]*Port[[:space:]]+[0-9]+/ {
@@ -1172,17 +1187,18 @@ EOF
         next
       }
       { print }
-    ' "$target" >"$target.omapi-tmp"; then
+    ' "$target" >"$rewrite" || ! run_root cp "$rewrite" "$target.omapi-tmp"; then
       # A failure inside `awk && cat && rm` is exempt from set -e, so this
       # used to fail silently: harden_ssh returned 0, printed "sshd accepts
       # the new config", and left two active Port lines plus a stray temp file
       # with no warning anywhere. Verified with an injected failing awk. Treat
       # it as the config-write failure it is.
       warn "could not rewrite the Port lines in ${conf}"
-      rm -f "$target.omapi-tmp"
+      run_root rm -f "$target.omapi-tmp"
       if [[ -n $backup && -f $backup ]]; then
-        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
+      rm -f "$rewrite" "$block"
       return 1
     fi
     # Stage then rename, re-applying the file's own mode and owner. The
@@ -1195,48 +1211,52 @@ EOF
     # back afterwards.
     local tmode="" towner="" tgroup=""
     if [[ -e $target ]]; then
-      tmode="$(stat -c %a "$target" 2>/dev/null || true)"
-      towner="$(stat -c %u "$target" 2>/dev/null || true)"
-      tgroup="$(stat -c %g "$target" 2>/dev/null || true)"
+      tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
+      towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
+      tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
     fi
     if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
       warn "could not read the mode/owner of ${conf}; leaving it untouched"
-      rm -f "$target.omapi-tmp"
+      run_root rm -f "$target.omapi-tmp"
       if [[ -n $backup && -f $backup ]]; then
-        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
+      rm -f "$rewrite" "$block"
       return 1
     fi
-    if [[ -s $target.omapi-tmp ]]; then
+    if [[ -s $rewrite ]]; then
       # Same reasoning as the drop-in: set the metadata on the STAGING file
       # before the rename, so sshd never sees the live config with the wrong
       # mode or owner. `chown` needs privilege, so on failure leave the target
       # alone rather than install a config owned by the invoking user.
-      if ! chmod "$tmode" "$target.omapi-tmp" 2>/dev/null ||
-         ! chown "$towner:$tgroup" "$target.omapi-tmp" 2>/dev/null; then
-        rm -f "$target.omapi-tmp"
+      if ! run_root chmod "$tmode" "$target.omapi-tmp" 2>/dev/null ||
+         ! run_root chown "$towner:$tgroup" "$target.omapi-tmp" 2>/dev/null; then
+        run_root rm -f "$target.omapi-tmp"
         warn "could not set the mode/owner on the staged ${conf}; leaving it untouched"
         if [[ -n $backup && -f $backup ]]; then
-          cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+          run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
         fi
+        rm -f "$rewrite" "$block"
         return 1
       fi
-      if mv -f "$target.omapi-tmp" "$target"; then
+      if run_root mv -f "$target.omapi-tmp" "$target"; then
         :
       else
-        rm -f "$target.omapi-tmp"
+        run_root rm -f "$target.omapi-tmp"
         warn "could not install ${conf}; it has NOT been changed"
         if [[ -n $backup && -f $backup ]]; then
-          cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+          run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
         fi
+        rm -f "$rewrite" "$block"
         return 1
       fi
     else
-      rm -f "$target.omapi-tmp"
+      run_root rm -f "$target.omapi-tmp"
       warn "refusing to install an empty ${conf}; leaving it untouched"
       if [[ -n $backup && -f $backup ]]; then
-        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
+      rm -f "$rewrite" "$block"
       return 1
     fi
 
@@ -1257,12 +1277,12 @@ EOF
       # Do not rewrite a file we could not back up. The sshd -t rollback
       # restores from these backups, so rewriting without one leaves an
       # unrestorable change on a file sshd reads.
-      if ! cp -p "$dropin" "$dbak" 2>/dev/null; then
+      if ! run_root cp -p "$dropin" "$dbak" 2>/dev/null; then
         warn "could not back up ${dropin}; leaving it untouched"
         continue
       fi
       dropin_backups+="$dbak"$'\n'
-      if awk '
+      if run_root awk '
         $0 ~ /^[[:space:]]*Port[[:space:]]+[0-9]+/ {
           line = $0
           sub(/^[[:space:]]*/, "", line)
@@ -1271,11 +1291,11 @@ EOF
           next
         }
         { print }
-      ' "$dropin" >"$dropin.omapi-tmp"; then
+      ' "$dropin" >"$rewrite" && run_root cp "$rewrite" "$dropin.omapi-tmp"; then
         # Same reasoning as the main file: rename rather than truncate-and-copy,
         # so a failed write cannot leave a half-written drop-in for sshd to read
         # on the next start.
-        if [[ -s $dropin.omapi-tmp ]]; then
+        if [[ -s $rewrite ]]; then
           # rename replaces the inode, so the drop-in's own mode would be lost -
           # the staging file gets whatever umask gives it, which under the
           # root workflow's umask 022 is 0644 even when the drop-in was 0600 or
@@ -1288,32 +1308,34 @@ EOF
           # leaves a window where the live config has the wrong permissions,
           # and it depended on a backup that the successful path deletes.
           local dmode
-          dmode="$(stat -c %a "$dropin" 2>/dev/null || true)"
+          dmode="$(run_root stat -c %a "$dropin" 2>/dev/null || true)"
           if [[ -z $dmode ]]; then
             # Do not guess a mode. Renaming without knowing it could widen a
             # root-owned drop-in, which is worse than leaving it alone.
-            rm -f "$dropin.omapi-tmp"
+            run_root rm -f "$dropin.omapi-tmp"
             warn "could not read the mode of ${dropin}; leaving it untouched"
-          elif ! chmod "$dmode" "$dropin.omapi-tmp" 2>/dev/null; then
-            rm -f "$dropin.omapi-tmp"
-            warn "could not set the mode on the staged drop-in; leaving it untouched"
-          elif mv -f "$dropin.omapi-tmp" "$dropin"; then
+          elif ! run_root chmod "$dmode" "$dropin.omapi-tmp" 2>/dev/null ||
+               ! run_root chown --reference="$dropin" "$dropin.omapi-tmp" 2>/dev/null; then
+            run_root rm -f "$dropin.omapi-tmp"
+            warn "could not set the mode/owner on the staged drop-in; leaving it untouched"
+          elif run_root mv -f "$dropin.omapi-tmp" "$dropin"; then
             :
           else
-            rm -f "$dropin.omapi-tmp"
+            run_root rm -f "$dropin.omapi-tmp"
             warn "could not install ${dropin}; it has NOT been changed"
           fi
         else
-          rm -f "$dropin.omapi-tmp"
+          run_root rm -f "$dropin.omapi-tmp"
           warn "refusing to install an empty drop-in; leaving it untouched"
         fi
       else
         # Never rewrite a file we cannot read back correctly: a half-written
         # drop-in is a box that may not come back.
         warn "could not rewrite Port lines in ${dropin}; leaving it untouched"
-        rm -f "$dropin.omapi-tmp"
+        run_root rm -f "$dropin.omapi-tmp"
       fi
     done
+    rm -f "$rewrite"
   fi
 
   rm -f "$block"
@@ -1341,11 +1363,11 @@ EOF
     local dbak
     while read -r dbak; do
       [[ -n $dbak && -f $dbak ]] || continue
-      cp -p "$dbak" "${dbak%.omapi-backup}" || warn "could not restore ${dbak%.omapi-backup}"
+      run_root cp -p "$dbak" "${dbak%.omapi-backup}" || warn "could not restore ${dbak%.omapi-backup}"
     done <<<"${dropin_backups:-}"
     if [[ -n $backup ]]; then
       warn "sshd rejected the new config, rolling ${conf} back"
-      peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"
+      run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"
     else
       warn "sshd rejected the new config and there is no backup to roll back to"
     fi
@@ -1357,7 +1379,7 @@ EOF
   # Leaving them behind would accumulate one file per drop-in on every run.
   local dbak
   while read -r dbak; do
-    [[ -n $dbak ]] && rm -f "$dbak"
+    [[ -n $dbak ]] && run_root rm -f "$dbak"
   done <<<"${dropin_backups:-}"
 
   if ((NO_RESTART)); then
@@ -1395,7 +1417,7 @@ EOF
   if ((socket_activated)); then
     if ! peek systemctl restart ssh.socket; then
       warn "ssh.socket failed to restart, rolling back"
-      [[ -n $backup ]] && { peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
+      [[ -n $backup ]] && { run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
       peek systemctl daemon-reload || true
       peek systemctl restart ssh.socket || true
       return 1
@@ -1416,7 +1438,7 @@ EOF
     printf '\n  %sKeep this session open and open a second one before you rely on it.%s\n' "$C_BOLD" "$C_OFF"
   else
     warn "ssh failed to restart, rolling back"
-    [[ -n $backup ]] && { peek cp -p "$backup" "$conf" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
+    [[ -n $backup ]] && { run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup - sshd_config is left in the rejected state"; } || true
     peek systemctl restart ssh || true
     return 1
   fi
