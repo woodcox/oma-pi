@@ -108,9 +108,10 @@ root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the
 `DOCKER-USER` rules are reported as unverified rather than checked.
 
 ```bash
-sudo /home/[user]/.local/bin/omapi-harden --list       # available tasks
-sudo /home/[user]/.local/bin/omapi-harden ssh firewall  # just these two
-sudo /home/[user]/.local/bin/omapi-harden --yes         # take the recommended defaults
+
+sudo $HOME/.local/bin/omapi-harden --list       # available tasks
+sudo $HOME/.local/bin/omapi-harden ssh firewall  # just these two
+sudo $HOME/.local/bin/omapi-harden --yes         # take the recommended defaults
 ./test/omapi-harden-test.sh              # test suite does not need root access
 ```
 
@@ -175,6 +176,6 @@ Some deliberate choices worth knowing before you run it:
   matters. There is a test that fails if this ever regresses.
 - **`AllowTcpForwarding` stays on**, because `config/shell/fns/ssh-port-forwarding`
   depends on it.
-- **Wi-Fi and Bluetooth are not disabled.** That needs a `/boot/config.txt`
+- **Wi-Fi and Bluetooth are not disabled.** That needs a `sudo nano /boot/config.txt`
   dtoverlay and a reboot, and getting it wrong drops the box off the network you
   are managing it over. The exact lines are printed at the end of a run.
