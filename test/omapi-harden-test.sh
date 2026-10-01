@@ -1384,6 +1384,159 @@ test_ask_never_passes_a_flag_gum_will_reject() {
   return $rc
 }
 
+test_listening_process_survives_missing_ss() {
+  # `local ... pid` declared without assigning, and pid was only set inside the
+  # `if have ss` branch - so on a host without ss the reference below hit
+  # `set -u` and aborted the ENTIRE hardening run with "pid: unbound variable".
+  # That is the SSH-owner lookup, on the firewall path.
+  setup_destdir
+  local rc=0
+  stub have
+  have() { [[ $1 == ss ]] && return 1; return 0; }
+  local out
+  out="$(listening_process tcp 22 2>&1)" || rc=1
+  if grep -q 'unbound variable' <<<"$out"; then
+    printf '        aborted with: %s\n' "$out"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_ipv4_ruleset_rejects_ipv6_subnets() {
+  # after.rules is the IPv4 ruleset, but docker_subnets returns both families
+  # (now that the IPv4 filter bug is fixed). An IPv6 subnet written there
+  # becomes `-s fd00::/64`, which iptables rejects - failing the whole managed
+  # block, so the Docker bridge exception never installs.
+  setup_destdir
+  local rc=0
+  local t; t="$(mktemp -d)"
+  cat >"$t/docker" <<'DOCKEOF'
+#!/usr/bin/env bash
+case $1 in
+  network) if [[ $2 == ls ]]; then printf 'netid1\n'; exit 0; fi
+           printf '172.17.0.0/16 fd00:dead:beef::/64\n' ;;
+esac
+exit 0
+DOCKEOF
+  chmod +x "$t/docker"
+  local oldpath="$PATH"; PATH="$t:$PATH"; export PATH
+  stub peek
+  peek() { command "${@}"; }
+  install_docker_ufw_rules >/dev/null 2>&1
+  local f="$CONF_DEST/etc/ufw/after.rules"
+  PATH="$oldpath"; export PATH
+
+  if [[ -f $f ]]; then
+    if grep -q -- '-s fd00:dead:beef::/64' "$f"; then
+      printf '        an IPv6 subnet was written into the IPv4 ruleset\n'
+      rc=1
+    fi
+    if ! grep -q -- '-s 172.17.0.0/16' "$f"; then
+      printf '        the IPv4 docker subnet is missing from the rules\n'
+      rc=1
+    fi
+  fi
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_validator_requires_both_markers() {
+  # A block that never matched produced exactly "*filter\nCOMMIT", which
+  # iptables-restore --test ACCEPTS when run as root - so the validator
+  # reported a pass for a ruleset it never read. Unprivileged it returns 2
+  # (unverified) instead, which is why this could not be caught by simply
+  # calling it here: the vacuous pass needs root.
+  #
+  # So assert the guard's presence directly, and separately assert that the
+  # unprivileged path still refuses rather than claiming success.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if ! grep -qF 'grep -qFx "$DOCKER_UFW_BEGIN"' "$f"; then
+    printf '        the validator does not require both markers before trusting the parse\n'
+    rc=1
+  fi
+
+  # Behavioural half: with no markers the file must never be reported valid.
+  local d="$CONF_DEST/etc/ufw"; mkdir -p "$d"
+  local af="$d/after.rules"
+  printf '*filter\n-A INPUT -j ACCEPT\nCOMMIT\n' >"$af"
+  if validate_docker_ufw_rules "$af" >/dev/null 2>&1; then
+    printf '        a file with no DOCKER-USER markers was accepted as valid\n'
+    rc=1
+  fi
+
+  # And the positive control: with both markers present the marker guard must
+  # not be what rejects it.
+  printf '*filter\n%s\n-A DOCKER-USER -j RETURN\n%s\nCOMMIT\n' \
+    "$DOCKER_UFW_BEGIN" "$DOCKER_UFW_END" >"$af"
+  local out
+  out="$(validate_docker_ufw_rules "$af" 2>&1 || true)"
+  if grep -q 'does not contain both DOCKER-USER markers' <<<"$out"; then
+    printf '        a file WITH both markers was rejected by the marker guard\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_apparmor_does_not_claim_success_it_cannot_confirm() {
+  # `ok "apparmor enabled"` printed unconditionally, so a box with the module
+  # unloaded - or one where aa-status needs root - reported success with
+  # literal "?" placeholders and exited 0.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q 'ok "apparmor enabled (\${enforced:-?}' "$f"; then
+    printf '        apparmor still reports success unconditionally\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_reachable_is_only_reported_when_the_rule_was_added() {
+  # `run_root ufw route allow ... || warn` kept set -e off the failure but not
+  # the report, so a rejected rule printed a warning AND a success line.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q 'comment "omapi: \${name}" || warn "could not add a route rule' "$f"; then
+    printf '        the reachable line is still unconditional after a failed rule\n'
+    rc=1
+  fi
+  if ! grep -q 'it is NOT reachable' "$f"; then
+    printf '        a failed route rule does not say the port is not reachable\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_unattended_upgrade_check_is_not_tautological() {
+  # `grep -q Unattended-Upgrade` matches the 50unattended-upgrades file the
+  # package ships, so it was true on any host that reached here - and the ok
+  # line claimed the RPi origin was covered while Allowed-Origins did not
+  # mention it. That is why the RPi archive sat unpatched for 17 months on the
+  # box this was written on.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -q "apt-config dump | grep -q Unattended-Upgrade" "$f"; then
+    printf '        still checking for the package config, not for origins\n'
+    rc=1
+  fi
+  if ! grep -q "grep -q 'Allowed-Origins'" "$f"; then
+    printf '        Allowed-Origins is not checked\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+
 test_netstat_ipv6_listeners_are_not_dropped() {
   # netstat labels IPv6 sockets tcp6/udp6 and renders them :::PORT or [::]:PORT.
   # The parser lowercased $1 and required exactly tcp/udp, so every IPv6
@@ -2490,6 +2643,12 @@ t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_pr
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
+t 'listening process survives missing ss'  test_listening_process_survives_missing_ss
+t 'ipv4 ruleset rejects ipv6 subnets'     test_ipv4_ruleset_rejects_ipv6_subnets
+t 'validator requires both markers'       test_validator_requires_both_markers
+t 'apparmor does not claim unverified ok' test_apparmor_does_not_claim_success_it_cannot_confirm
+t 'reachable reported only when added'    test_reachable_is_only_reported_when_the_rule_was_added
+t 'unattended-upgrade check is not a tautology' test_unattended_upgrade_check_is_not_tautological
 t 'netstat ipv6 listeners are kept'      test_netstat_ipv6_listeners_are_not_dropped
 t 'public addrs not misclassified'       test_public_addresses_are_not_misclassified_as_loopback_or_tailscale
 t 'loopback and tailscale still dropped' test_loopback_and_tailscale_ranges_still_dropped

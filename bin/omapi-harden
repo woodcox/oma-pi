@@ -732,7 +732,12 @@ install_hardening_packages() {
   fi
 
   step "installing: ${missing[*]}"
-  run_root apt-get update -qq
+  # Not guarded, before: a transient failure here - no network yet at boot, a
+  # mirror 404, an expired Release - aborted the entire hardening pass before
+  # any ufw or sshd work, which is the opposite of the "do not fail halfway
+  # through" intent stated immediately below. Warn and carry on: the install
+  # that follows will report what is genuinely unavailable.
+  run_root apt-get update -qq || warn "apt-get update failed; continuing with the current package lists"
   # apt pulling new things in mid-run is normal; the point of this script is
   # to not fail halfway through a hardening pass because of it. But the
   # success line used to be unconditional, so a failed install still printed
@@ -1511,6 +1516,18 @@ validate_docker_ufw_rules() {
     printf 'COMMIT\n'
   } >"$tmp"
 
+  # A block that was never matched yields exactly "*filter\nCOMMIT", which
+  # iptables-restore --test accepts - so the validator reported a pass for a
+  # ruleset it never read. The BEGIN marker is also compared as an exact whole
+  # line while the END marker has leading space stripped, so an indented or
+  # CRLF-terminated BEGIN marker silently stopped matching. Require both
+  # markers to be present verbatim before trusting anything downstream.
+  if ! grep -qFx "$DOCKER_UFW_BEGIN" "$path" || ! grep -qFx "$DOCKER_UFW_END" "$path"; then
+    warn "$path does not contain both DOCKER-USER markers; cannot validate what is not there"
+    rm -f "$tmp"
+    return 1
+  fi
+
   if ! have iptables-restore; then
     warn "iptables-restore is not installed; cannot validate the DOCKER-USER rules"
     rm -f "$tmp"
@@ -1656,10 +1673,16 @@ EOF
     local s
     while read -r s; do
       [[ -n $s ]] || continue
+      # after.rules is the IPv4 ruleset. docker_subnets returns both families,
+      # so an IPv6 subnet here would be written as `-s fd00::/64` and rejected
+      # by iptables - which fails the whole managed block.
+      [[ $s == *:* ]] && continue
       printf -- '-A DOCKER-USER -j RETURN -s %s\n' "$s"
     done <<<"$subnets"
     while read -r s; do
       [[ -n $s ]] || continue
+      # Same reason as the RETURN rule above: this is the IPv4 ruleset.
+      [[ $s == *:* ]] && continue
       printf -- '-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d %s\n' "$s"
     done <<<"$subnets"
     cat <<'EOF'
@@ -2003,9 +2026,15 @@ docker_offer_published_ports() {
         printf '  %s•%s would run: ufw route allow proto %s from any to any port %s\n' \
           "$C_DIM" "$C_OFF" "$proto" "$cport"
       else
-        run_root ufw route allow proto "$proto" from any to any port "$cport" \
-          comment "omapi: ${name}" || warn "could not add a route rule for ${name}:${cport}/${proto}"
-        ok "${name}: container port ${cport}/${proto} reachable from the network"
+        # Only claim reachable when the rule was actually added. `|| warn`
+        # kept set -e off the failure but not the report, so a rejected rule
+        # printed a warning AND a success line, and the user trusted the second.
+        if run_root ufw route allow proto "$proto" from any to any port "$cport" \
+             comment "omapi: ${name}"; then
+          ok "${name}: container port ${cport}/${proto} reachable from the network"
+        else
+          warn "could not add a route rule for ${name}:${cport}/${proto} - it is NOT reachable"
+        fi
       fi
     else
       if ((DRY_RUN)); then
@@ -2163,7 +2192,11 @@ configure_docker_ufw() {
 }
 
 listening_process() {
-  local proto="$1" port="$2" pid name
+  # pid is declared here and assigned only inside the `have ss` branch, so on a
+  # host without ss the reference below aborted the whole run under `set -u`
+  # with "pid: unbound variable". Assigned empty up front; the fallback path
+  # reports no process rather than dying.
+  local proto="$1" port="$2" pid="" name
   # `ss -p` only shows processes you are allowed to see, so on a system with
   # services owned by other users (docker, tailscaled, avahi) this comes back
   # empty for a socket that is genuinely listening. That is a different answer
@@ -2296,8 +2329,14 @@ EOF
   # Loud on failure, like the equivalent enable in configure_updates. A bare
   # `systemctl enable` here aborted the whole script under set -e with no
   # message of our own, and took every later task with it.
-  if run_root systemctl enable --now fail2ban; then
-    ok "fail2ban running"
+  # reload-or-restart, not `enable --now`: on a unit that is already enabled
+  # and active, `enable --now` is a no-op and does NOT re-read the jail files.
+  # So every re-run - and the jail header literally says to re-run the script
+  # to change these - reported "fail2ban running" while the new banaction, the
+  # port and the [recidive] jail were never applied.
+  if run_root systemctl enable fail2ban &&
+     run_root systemctl reload-or-restart fail2ban; then
+    ok "fail2ban running, config reloaded"
   else
     warn "could not enable fail2ban; brute-force protection is NOT active"
   fi
@@ -2387,10 +2426,23 @@ held_back_packages() {
   # script - after the unattended-upgrades config had already been written and
   # the service enabled, so apparmor, sysctl, aide and audit silently never
   # ran. Same class as the fix at the rpi origin line, which this one missed.
-  peek apt-get -s upgrade 2>/dev/null | awk '
+  # LC_ALL=C: apt-get localises that header, so under a non-English locale the
+  # pattern never matches, the list comes out empty with rc 0, and the caller
+  # reads it as "nothing held back" - the exact false all-clear this function
+  # exists to prevent.
+  #
+  # Also: a failure to obtain the list is NOT the same as an empty list. Every
+  # failure mode - peek unable to escalate, apt-get missing, corrupt package
+  # lists - collapses to empty stdout with rc 0, so the call site silently
+  # reported a clean upgrade path. Say so on stderr, which the caller does not
+  # capture, so the distinction is visible without changing stdout's contract.
+  if ! peek env LC_ALL=C apt-get -s upgrade 2>/dev/null | awk '
     /^The following packages have been kept back:/ {f=1; next}
     f && /^[[:space:]]+[^[:space:]]/ {print $1}
-    f && !/^[[:space:]]/ {exit}' || true
+    f && !/^[[:space:]]/ {exit}'; then
+    warn "could not read the apt upgrade simulation; held-back packages are UNKNOWN"
+  fi
+  return 0
 }
 
 configure_updates() {
@@ -2529,7 +2581,14 @@ EOF
     # the silent-failure class the rest of this script exists to prevent.
     warn "could not enable unattended-upgrades; automatic security updates are NOT active"
   fi
-  if peek apt-config dump | grep -q Unattended-Upgrade; then
+  # Check the origins, not just that the package left its own config behind.
+  # `grep -q Unattended-Upgrade` matches the 50unattended-upgrades file that
+  # ships with the package, so it was true on any host that got this far - and
+  # `ok "configured for ${origins[*]}"` then claimed the RPi origin was covered
+  # while Allowed-Origins did not mention it. That is the exact false success
+  # this script exists to avoid, and it is why the RPi archive sat unpatched for
+  # 17 months on the box this was written on.
+  if peek apt-config dump | grep -q 'Allowed-Origins'; then
     ok "unattended-upgrades configured for ${origins[*]}"
   else
     warn "apt did not pick up the unattended-upgrades configuration"
@@ -2573,7 +2632,15 @@ configure_apparmor() {
   local enforced complain
   enforced="$(peek aa-status 2>/dev/null | awk '/profiles are in enforce mode/{print $1}' || true)"
   complain="$(peek aa-status 2>/dev/null | awk '/profiles are in complain mode/{print $1}' || true)"
-  ok "apparmor enabled (${enforced:-?} enforced, ${complain:-?} complaining)"
+  # `ok` was printed unconditionally, so a box with the apparmor module not
+  # loaded - or one where aa-status cannot read /sys/kernel/security/apparmor
+  # without root - reported "apparmor enabled (? enforced, ? complaining)" and
+  # exited 0. Say what is actually true instead.
+  if [[ -z $enforced && -z $complain ]]; then
+    warn "aa-status returned no profile counts; AppArmor may not be loaded or may need root to inspect"
+    return 1
+  fi
+  ok "apparmor enabled (${enforced:-0} enforced, ${complain:-0} complaining)"
   if [[ ${complain:-0} != 0 && ${complain:-} != "0" ]]; then
     note "complaining profiles are noise in the logs until you decide they are fine:"
     note "  sudo aa-complain /etc/apparmor.d/<profile>   # or aa-enforce to lock it down"
