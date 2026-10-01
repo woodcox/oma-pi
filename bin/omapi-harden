@@ -1599,7 +1599,25 @@ docker_port_is_loopback_only() {
 # and a function that returns 0 unconditionally gates nothing at all.
 validate_docker_ufw_rules() {
   local path="$1" tmp out rc=0
-  [[ -r $path ]] || return 1
+  # "Cannot read" is not "malformed". /etc/ufw/after.rules ships as 0640
+  # root:root, so `[[ -r $path ]]` is false for a normal user - and returning 1
+  # here told the caller the rules were malformed, which sent it down the
+  # restore branch without a single check having been run.
+  #
+  # Decide the read strategy ONCE and reuse it. Do not reach for peek per read:
+  # peek returns 1 *without running the command* when it has no privilege, so
+  # `peek awk` silently wrote nothing to $tmp (vacuous "*filter\nCOMMIT",
+  # which the parser then accepts) and `peek grep` failed the marker guard on a
+  # perfectly good file. An empty prefix means "read it directly".
+  local -a rd=()
+  if [[ ! -r $path ]]; then
+    if sudo -n true &>/dev/null; then
+      rd=(sudo -n)
+    else
+      warn "$path is not readable and there is no privilege to read it; the DOCKER-USER rules are unverified"
+      return 2
+    fi
+  fi
 
   tmp="$(mktemp)"
   {
@@ -1608,7 +1626,7 @@ validate_docker_ufw_rules() {
     # markers contain `#`, which is only safe inside a bracket expression, and
     # building that expression by string surgery is how this quietly stopped
     # matching. awk takes them as plain strings.
-    awk -v b1="$DOCKER_UFW_BEGIN" -v b2="$DOCKER_UFW_END" '
+    "${rd[@]}" awk -v b1="$DOCKER_UFW_BEGIN" -v b2="$DOCKER_UFW_END" '
       $0 == b1 { inside = 1 }
       inside == 1 {
         line = $0
@@ -1627,7 +1645,12 @@ validate_docker_ufw_rules() {
   # line while the END marker has leading space stripped, so an indented or
   # CRLF-terminated BEGIN marker silently stopped matching. Require both
   # markers to be present verbatim before trusting anything downstream.
-  if ! grep -qFx "$DOCKER_UFW_BEGIN" "$path" || ! grep -qFx "$DOCKER_UFW_END" "$path"; then
+  #
+  # Against $path, not $tmp: the markers are `#` comments and the awk above
+  # strips every comment, so $tmp by construction never contains them. Read
+  # through $rd for the same reason the awk is.
+  if ! "${rd[@]}" grep -qFx "$DOCKER_UFW_BEGIN" "$path" ||
+     ! "${rd[@]}" grep -qFx "$DOCKER_UFW_END" "$path"; then
     warn "$path does not contain both DOCKER-USER markers; cannot validate what is not there"
     rm -f "$tmp"
     return 1
