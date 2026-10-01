@@ -277,16 +277,21 @@ write_conf() {
     warn "$path came out empty; refusing to install it over the existing file"
     return 1
   fi
-  # Preserve the target's own mode/owner: mv replaces the inode, so the new
-  # file would otherwise carry this script's umask instead.
+  # Preserve the target's own mode: mv replaces the inode, so the new file
+  # would otherwise carry this script's umask. Applied to the STAGING file so
+  # the target is never observable with the wrong mode.
   local tmode=644
   [[ -e $target ]] && tmode="$(stat -c %a "$target" 2>/dev/null || printf 644)"
+  if ! chmod "$tmode" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    warn "could not set the mode on the staged $path; it has NOT been changed"
+    return 1
+  fi
   if ! mv -f "$tmp" "$target"; then
     rm -f "$tmp"
     warn "could not install $path; it has NOT been changed"
     return 1
   fi
-  chmod "$tmode" "$target" 2>/dev/null || true
   note "wrote $path"
 }
 
@@ -497,13 +502,22 @@ replace_managed_block() {
       warn "could not read the mode of $target; leaving it untouched"
       return 1
     fi
+    # Set the mode on the STAGING file, not on the target after the rename:
+    # rename is atomic, so this way the target goes straight from the correct
+    # old inode to the correct new one and is never observable with the wrong
+    # permissions. A chmod afterwards leaves exactly that window open.
+    if ! run_root chmod "$tmode" "$stage"; then
+      run_root rm -f "$stage" 2>/dev/null || true
+      rm -f "$body"
+      warn "could not set the mode on the staged $target; it has NOT been changed"
+      return 1
+    fi
     if ! run_root mv -f "$stage" "$target"; then
       run_root rm -f "$stage" 2>/dev/null || true
       rm -f "$body"
       warn "could not install $target; it has NOT been changed"
       return 1
     fi
-    run_root chmod "$tmode" "$target"
   else
     # 0640 root:root is what ufw ships for after.rules/after6.rules; 0644 is
     # right for sshd_config. Defaulting to 0644 would make a hardening script
@@ -513,14 +527,21 @@ replace_managed_block() {
       */ufw/after.rules|*/ufw/after6.rules) tmode=640 ;;
       *) tmode=644 ;;
     esac
+    # Same as above: a brand-new file has no metadata of its own to preserve,
+    # but the mode and owner still belong on the staging file so the target is
+    # never visible with the wrong ones.
+    if ! run_root chmod "$tmode" "$stage" || ! run_root chown 0:0 "$stage"; then
+      run_root rm -f "$stage" 2>/dev/null || true
+      rm -f "$body"
+      warn "could not set the mode/owner on the staged $target; it has NOT been created"
+      return 1
+    fi
     if ! run_root mv -f "$stage" "$target"; then
       run_root rm -f "$stage" 2>/dev/null || true
       rm -f "$body"
       warn "could not install $target; it has NOT been changed"
       return 1
     fi
-    run_root chown 0:0 "$target"
-    run_root chmod "$tmode" "$target"
   fi
   rm -f "$body"
 }
@@ -1187,9 +1208,21 @@ EOF
       return 1
     fi
     if [[ -s $target.omapi-tmp ]]; then
+      # Same reasoning as the drop-in: set the metadata on the STAGING file
+      # before the rename, so sshd never sees the live config with the wrong
+      # mode or owner. `chown` needs privilege, so on failure leave the target
+      # alone rather than install a config owned by the invoking user.
+      if ! chmod "$tmode" "$target.omapi-tmp" 2>/dev/null ||
+         ! chown "$towner:$tgroup" "$target.omapi-tmp" 2>/dev/null; then
+        rm -f "$target.omapi-tmp"
+        warn "could not set the mode/owner on the staged ${conf}; leaving it untouched"
+        if [[ -n $backup && -f $backup ]]; then
+          cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+        fi
+        return 1
+      fi
       if mv -f "$target.omapi-tmp" "$target"; then
-        chown "$towner:$tgroup" "$target" 2>/dev/null || true
-        chmod "$tmode" "$target" 2>/dev/null || true
+        :
       else
         rm -f "$target.omapi-tmp"
         warn "could not install ${conf}; it has NOT been changed"
@@ -1243,23 +1276,29 @@ EOF
         # so a failed write cannot leave a half-written drop-in for sshd to read
         # on the next start.
         if [[ -s $dropin.omapi-tmp ]]; then
-          # rename replaces the inode, so the drop-in's own mode has to be
-          # captured first and re-applied. sshd_config.d/*.conf is normally
-          # 0644, and silently narrowing or widening it is the same class of
-          # defect as losing it entirely.
+          # rename replaces the inode, so the drop-in's own mode would be lost -
+          # the staging file gets whatever umask gives it, which under the
+          # root workflow's umask 022 is 0644 even when the drop-in was 0600 or
+          # 0640.
+          #
+          # Apply it to the STAGING file before the rename, not to the live
+          # drop-in afterwards. That way the drop-in is never observable with
+          # the wrong mode: rename is atomic, so it goes straight from the
+          # correct old inode to the correct new one. A chmod after the rename
+          # leaves a window where the live config has the wrong permissions,
+          # and it depended on a backup that the successful path deletes.
           local dmode
           dmode="$(stat -c %a "$dropin" 2>/dev/null || true)"
           if [[ -z $dmode ]]; then
+            # Do not guess a mode. Renaming without knowing it could widen a
+            # root-owned drop-in, which is worse than leaving it alone.
             rm -f "$dropin.omapi-tmp"
             warn "could not read the mode of ${dropin}; leaving it untouched"
+          elif ! chmod "$dmode" "$dropin.omapi-tmp" 2>/dev/null; then
+            rm -f "$dropin.omapi-tmp"
+            warn "could not set the mode on the staged drop-in; leaving it untouched"
           elif mv -f "$dropin.omapi-tmp" "$dropin"; then
-            if ! chmod "$dmode" "$dropin" 2>/dev/null; then
-              # The content is in place but the mode is not what sshd expects.
-              # Roll back to the backup taken earlier in this loop rather than
-              # leave a drop-in with the wrong permissions.
-              warn "could not set the mode on ${dropin}; restoring it from the backup"
-              cp -p "$dbak" "$dropin" 2>/dev/null || true
-            fi
+            :
           else
             rm -f "$dropin.omapi-tmp"
             warn "could not install ${dropin}; it has NOT been changed"

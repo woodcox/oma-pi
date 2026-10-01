@@ -1621,6 +1621,31 @@ test_harden_ssh_survives_an_unopenable_tty() {
   return $rc
 }
 
+test_mode_is_applied_before_the_rename_not_after() {
+  # The end state is the same either way - a post-rename chmod leaves the file
+  # at the right mode - so a final-value assertion cannot see this. The defect
+  # is the WINDOW: rename is atomic, so applying the mode afterwards means the
+  # live drop-in is briefly at whatever umask gave the staging file, which
+  # under the root workflow's umask 022 is 0644 even for a 0600 drop-in.
+  #
+  # So assert the order: the mode must be set on the staging file BEFORE mv
+  # touches it. Recording the order of the privileged calls is the only way to
+  # see this from the suite.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  if grep -qE 'mv -f "\$dropin\.omapi-tmp" "\$dropin".*chmod "\$dmode" "\$dropin"' "$f"; then
+    printf '        the drop-in mode is applied AFTER the rename\n'
+    rc=1
+  fi
+  if ! grep -q 'chmod "\$dmode" "\$dropin.omapi-tmp"' "$f"; then
+    printf '        the mode is not applied to the staging file before mv\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 test_netstat_ipv6_listeners_are_not_dropped() {
   # netstat labels IPv6 sockets tcp6/udp6 and renders them :::PORT or [::]:PORT.
   # The parser lowercased $1 and required exactly tcp/udp, so every IPv6
@@ -2728,6 +2753,7 @@ t '--force is not accepted'                             test_force_flag_is_not_a
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
 t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode
+t 'mode applied before the rename'     test_mode_is_applied_before_the_rename_not_after
 t 'harden_ssh survives an unopenable tty' test_harden_ssh_survives_an_unopenable_tty
 t 'listening process survives missing ss'  test_listening_process_survives_missing_ss
 t 'ipv4 ruleset rejects ipv6 subnets'     test_ipv4_ruleset_rejects_ipv6_subnets
