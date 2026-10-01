@@ -849,6 +849,12 @@ test_lockdown_ssh_refuses_a_keyless_target_user() {
   # test passes or fails for the wrong reason.
   setup_destdir
   local rc=0
+  # harden_ssh checks [[ -f ${CONF_DEST}${conf} ]] and returns early when it
+  # is absent. Without this the guard matched the REAL /etc/ssh/sshd_config on
+  # whichever host ran the suite, so this test passed or failed depending on
+  # that host's sshd rather than on the --lockdown-ssh behaviour it is about.
+  mkdir -p "$CONF_DEST/etc/ssh"
+  printf 'Port 22\nPermitRootLogin yes\n' >"$CONF_DEST/etc/ssh/sshd_config"
   LOCKDOWN_SSH=1
   SUDO_USER="keyless-user"
   stub have_usable_key
@@ -1536,6 +1542,119 @@ test_unattended_upgrade_check_is_not_tautological() {
   return $rc
 }
 
+
+test_harden_ssh_privileged_transaction() {
+  # Keep the config directories unwritable between run_root calls: a shell
+  # redirection to a staging path then fails even if its command is privileged.
+  # Command guards also catch bare mutations when this suite runs as root.
+  setup_destdir
+  local rc=0 scenario privileged=0 denied=0 injected=0 hrc
+  local d="$CONF_DEST/etc/ssh" main drop
+  main="$d/sshd_config"
+  drop="$d/sshd_config.d/10-port.conf"
+  mkdir -p "$d/sshd_config.d"
+  local main_content=$'Port 2222\nPermitRootLogin yes' drop_content=$'Port 2222\n# keep me'
+  local NO_RESTART=1 LOCKDOWN_SSH=0
+  stub current_ssh_port
+  current_ssh_port() { printf '2222\n'; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'keyful\n'; }
+  stub ask
+  ask() { return 1; }
+  stub peek
+  peek() {
+    case "$*" in
+      'sshd -t '*) [[ $scenario != reject ]] ;;
+      'systemctl is-active --quiet ssh.socket') [[ $scenario == socket ]] ;;
+      'systemctl restart '*) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  local fn
+  for fn in cp chmod chown mv rm; do
+    stub "$fn"
+    eval "$fn() {
+      if (( !privileged )) && [[ \"\$*\" == *\"\$CONF_DEST/etc/ssh\"* ]]; then
+        denied=1
+        return 1
+      fi
+      command $fn \"\$@\"
+    }"
+  done
+  stub run_root
+  run_root() {
+    local privileged=1 status=0
+    command chmod 755 "$d" "$d/sshd_config.d"
+    # Inject failures only at the transaction's own staging/backup operations.
+    if [[ $scenario == backup && $1 == cp && ${!#} == "$main.omapi-backup" ]] ||
+       [[ $scenario == stage && $1 == cp && ${!#} == "$main.omapi-tmp" ]] ||
+       [[ $scenario == mode && $1 == chmod && ${!#} == "$main.omapi-tmp" ]] ||
+       [[ $scenario == owner && $1 == chown && ${!#} == "$main.omapi-tmp" ]] ||
+       [[ $scenario == rename && $1 == mv && ${!#} == "$main" && $3 == "$main.omapi-tmp" ]] ||
+       [[ $scenario == drop_stage && $1 == cp && ${!#} == "$drop.omapi-tmp" ]]; then
+      injected=1
+      [[ $scenario == *stage ]] && printf 'partial\n' >"${!#}"
+      status=1
+    else
+      "$@" || status=$?
+    fi
+    command chmod 555 "$d" "$d/sshd_config.d"
+    return "$status"
+  }
+
+  for scenario in success reject backup stage mode owner rename drop_stage service socket; do
+    command chmod 755 "$d" "$d/sshd_config.d"
+    command rm -f "$main"* "$drop"*
+    printf '%s\n' "$main_content" >"$main"
+    printf '%s\n' "$drop_content" >"$drop"
+    command chmod 640 "$main"
+    command chmod 600 "$drop"
+    command chmod 555 "$d" "$d/sshd_config.d"
+    denied=0 injected=0
+    NO_RESTART=1
+    [[ $scenario == service || $scenario == socket ]] && NO_RESTART=0
+    harden_ssh >/dev/null 2>&1
+    hrc=$?
+    if ((denied)); then
+      printf '        %s: mutation bypassed run_root\n' "$scenario"
+      rc=1
+    fi
+    case $scenario in
+      success|drop_stage)
+        assert_eq "$hrc" 0 || rc=1
+        assert_eq "$(grep -c '^Port ' "$main")" 1 || rc=1
+        assert_contains "$(cat "$main")" 'PasswordAuthentication no' || rc=1
+        if [[ $scenario == success ]]; then
+          assert_contains "$(cat "$drop")" '# Port 2222' || rc=1
+        else
+          assert_eq "$injected" 1 || rc=1
+          assert_eq "$(cat "$drop")" "$drop_content" || rc=1
+        fi
+        [[ ! -e $drop.omapi-backup ]] || rc=1
+        ;;
+      *)
+        assert_eq "$hrc" 1 || rc=1
+        assert_eq "$(cat "$main")" "$main_content" || rc=1
+        case $scenario in
+          reject|backup|stage|mode|owner|rename)
+            assert_eq "$(cat "$drop")" "$drop_content" || rc=1 ;;
+        esac
+        case $scenario in
+          backup|stage|mode|owner|rename) assert_eq "$injected" 1 || rc=1 ;;
+        esac
+        ;;
+    esac
+    assert_eq "$(stat -c %a "$main")" 640 || rc=1
+    assert_eq "$(stat -c %a "$drop")" 600 || rc=1
+    if [[ -e $main.omapi-tmp || -e $drop.omapi-tmp ]]; then
+      printf '        %s: staging file left behind\n' "$scenario"
+      rc=1
+    fi
+  done
+  command chmod 755 "$d" "$d/sshd_config.d"
+  teardown_destdir
+  return "$rc"
+}
 
 test_harden_ssh_write_preserves_mode() {
   # Both sshd write sites stage the new content and rename it into place, and a
@@ -2752,6 +2871,7 @@ t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_pr
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
+t 'SSH writes and rollback use privilege' test_harden_ssh_privileged_transaction
 t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode
 t 'mode applied before the rename'     test_mode_is_applied_before_the_rename_not_after
 t 'harden_ssh survives an unopenable tty' test_harden_ssh_survives_an_unopenable_tty

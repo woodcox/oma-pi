@@ -103,12 +103,18 @@ security updates, AppArmor, and kernel and network sysctls.
 File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
 
+Run it under `sudo`, with the full path as the validator also needs
+root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the
+`DOCKER-USER` rules are reported as unverified rather than checked.
+
 ```bash
-omapi-harden --list               # available tasks
-omapi-harden ssh firewall        # just these two
-omapi-harden --yes               # take the recommended defaults
-./test/omapi-harden-test.sh              # 77 tests, no root needed
+
+sudo $HOME/.local/bin/omapi-harden --list       # available tasks
+sudo $HOME/.local/bin/omapi-harden ssh firewall  # just these two
+sudo $HOME/.local/bin/omapi-harden --yes         # take the recommended defaults
+./test/omapi-harden-test.sh              # test suite does not need root access
 ```
+
 If you would rather do it by hand, please see the three hardening guides below:
   - [chrisapproved.com](https://chrisapproved.com/blog/raspberry-pi-hardening.html) blog post or other similar advice. The repo is on [GitLab](https://gitlab.com/cgoff/raspberry-pi-hardening) but was last updated Aug 2019
   - [Raspberry Pi Security Hardening Complete Guide](https://ohyaan.github.io/tips/raspberry_pi_security_hardening_complete_guide/)
@@ -170,6 +176,6 @@ Some deliberate choices worth knowing before you run it:
   matters. There is a test that fails if this ever regresses.
 - **`AllowTcpForwarding` stays on**, because `config/shell/fns/ssh-port-forwarding`
   depends on it.
-- **Wi-Fi and Bluetooth are not disabled.** That needs a `/boot/config.txt`
+- **Wi-Fi and Bluetooth are not disabled.** That needs a `sudo nano /boot/config.txt`
   dtoverlay and a reboot, and getting it wrong drops the box off the network you
   are managing it over. The exact lines are printed at the end of a run.
