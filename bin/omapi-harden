@@ -1049,9 +1049,16 @@ harden_ssh() {
     # `< <(...)` runs in a subshell, so the value it captured was discarded and
     # the port silently stayed where it was. gum's output is captured by
     # command substitution, which does survive, but the read fallback did not.
-    if have gum && [[ -e /dev/tty && -r /dev/tty ]]; then
+    # A tty that exists but cannot be opened - setsid, cron, CI, a test runner -
+    # passes `[[ -e /dev/tty && -r /dev/tty ]]` and then fails the redirect with
+    # ENXIO. That killed the whole run at this point, before the drop-in pass and
+    # before anything was written. ask() already handles the no-tty case; only
+    # prompt when a tty genuinely works.
+    local tty_ok=0
+    if (: </dev/tty) 2>/dev/null; then tty_ok=1; fi
+    if ((tty_ok)) && have gum; then
       candidate="$(gum input --placeholder "e.g. 2222" --prompt "New SSH port: " </dev/tty || true)"
-    elif [[ -e /dev/tty && -r /dev/tty ]]; then
+    elif ((tty_ok)); then
       read -r -p "  New SSH port [2222]: " candidate </dev/tty || true
     fi
     candidate="${candidate:-2222}"
@@ -1157,9 +1164,48 @@ EOF
       fi
       return 1
     fi
-    # cat into the original rather than mv, so mode, owner and inode survive.
-    cat "$target.omapi-tmp" >"$target"
-    rm -f "$target.omapi-tmp"
+    # Stage then rename, re-applying the file's own mode and owner. The
+    # previous code deliberately `cat`ed into the original "so mode, owner and
+    # inode survive" - which did preserve them, but kept the truncation hazard:
+    # `cat > "$target"` empties sshd_config before writing anything, so an
+    # ENOSPC or EIO here - realistic on a full Pi SD card - leaves a truncated
+    # config that the restart below either rejects or comes up without. rename
+    # is atomic within a filesystem, so capture the metadata first and put it
+    # back afterwards.
+    local tmode="" towner="" tgroup=""
+    if [[ -e $target ]]; then
+      tmode="$(stat -c %a "$target" 2>/dev/null || true)"
+      towner="$(stat -c %u "$target" 2>/dev/null || true)"
+      tgroup="$(stat -c %g "$target" 2>/dev/null || true)"
+    fi
+    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
+      warn "could not read the mode/owner of ${conf}; leaving it untouched"
+      rm -f "$target.omapi-tmp"
+      if [[ -n $backup && -f $backup ]]; then
+        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+      fi
+      return 1
+    fi
+    if [[ -s $target.omapi-tmp ]]; then
+      if mv -f "$target.omapi-tmp" "$target"; then
+        chown "$towner:$tgroup" "$target" 2>/dev/null || true
+        chmod "$tmode" "$target" 2>/dev/null || true
+      else
+        rm -f "$target.omapi-tmp"
+        warn "could not install ${conf}; it has NOT been changed"
+        if [[ -n $backup && -f $backup ]]; then
+          cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+        fi
+        return 1
+      fi
+    else
+      rm -f "$target.omapi-tmp"
+      warn "refusing to install an empty ${conf}; leaving it untouched"
+      if [[ -n $backup && -f $backup ]]; then
+        cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+      fi
+      return 1
+    fi
 
     # The same pass over /etc/ssh/sshd_config.d drop-ins. sshd reads those, and
     # current_ssh_port reads them, but the main-file pass cannot see them - so
@@ -1197,7 +1243,27 @@ EOF
         # so a failed write cannot leave a half-written drop-in for sshd to read
         # on the next start.
         if [[ -s $dropin.omapi-tmp ]]; then
-          mv -f "$dropin.omapi-tmp" "$dropin"
+          # rename replaces the inode, so the drop-in's own mode has to be
+          # captured first and re-applied. sshd_config.d/*.conf is normally
+          # 0644, and silently narrowing or widening it is the same class of
+          # defect as losing it entirely.
+          local dmode
+          dmode="$(stat -c %a "$dropin" 2>/dev/null || true)"
+          if [[ -z $dmode ]]; then
+            rm -f "$dropin.omapi-tmp"
+            warn "could not read the mode of ${dropin}; leaving it untouched"
+          elif mv -f "$dropin.omapi-tmp" "$dropin"; then
+            if ! chmod "$dmode" "$dropin" 2>/dev/null; then
+              # The content is in place but the mode is not what sshd expects.
+              # Roll back to the backup taken earlier in this loop rather than
+              # leave a drop-in with the wrong permissions.
+              warn "could not set the mode on ${dropin}; restoring it from the backup"
+              cp -p "$dbak" "$dropin" 2>/dev/null || true
+            fi
+          else
+            rm -f "$dropin.omapi-tmp"
+            warn "could not install ${dropin}; it has NOT been changed"
+          fi
         else
           rm -f "$dropin.omapi-tmp"
           warn "refusing to install an empty drop-in; leaving it untouched"

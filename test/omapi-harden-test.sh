@@ -1537,6 +1537,90 @@ test_unattended_upgrade_check_is_not_tautological() {
 }
 
 
+test_harden_ssh_write_preserves_mode() {
+  # Both sshd write sites stage the new content and rename it into place, and a
+  # rename replaces the inode - so each file's own mode has to be captured and
+  # re-applied. Losing it is the same class of defect as losing the content:
+  # sshd_config.d/*.conf is normally 0644 and sshd_config 0600.
+  #
+  # 0600 for the main file is deliberate and is what makes this test bite: it is
+  # a value the staging file never has, so an unguarded rename would silently
+  # widen or narrow it.
+  setup_destdir
+  local rc=0
+  local d="$CONF_DEST/etc/ssh"
+  mkdir -p "$d/sshd_config.d"
+  local main="$d/sshd_config"
+  local drop="$d/sshd_config.d/99-omapi.conf"
+  printf 'Port 22\nPermitRootLogin yes\n' >"$main"; chmod 600 "$main"
+  # 0600 for the drop-in too, deliberately. At 0644 the staged file inherits the
+  # same mode, so an unguarded rename is invisible - which is how the missing
+  # mode restore survived. 0600 is a value the staging file never has, so this
+  # actually exercises the restore.
+  printf 'Port 2222\nPermitRootLogin no\n' >"$drop";  chmod 600 "$drop"
+
+  stub run_root
+  run_root() {
+    case $1 in
+      cp|install|chown|chmod|mv|rm|stat) command "$1" "${@:2}" ;;
+    esac
+    return 0
+  }
+  stub have
+  have() { [[ $1 == sshd || $1 == systemctl ]] && return 0; return 1; }
+  stub peek
+  peek() { return 1; }
+  stub ask
+  ask() { return 0; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  # current_ssh_port must be restored, not left stubbed: leaking it into a
+  # later test made that one fail. `stub` saves and restores for exactly this.
+  stub current_ssh_port
+  current_ssh_port() { echo 2222; }
+  DRY_RUN=0
+  harden_ssh >/dev/null 2>&1
+
+  local m d
+  m="$(stat -c %a "$main" 2>/dev/null || printf missing)"
+  d="$(stat -c %a "$drop" 2>/dev/null || printf missing)"
+  if [[ $m != 600 ]]; then
+    printf '        sshd_config mode is %s, expected 600\n' "$m"
+    rc=1
+  fi
+  if [[ $d != 600 ]]; then
+    printf '        drop-in mode is %s, expected 600\n' "$d"
+    rc=1
+  fi
+  # And no staging file may survive a successful write.
+  local leftovers
+  leftovers="$(ls "$d"/*.omapi-tmp "$d"/sshd_config.d/*.omapi-tmp 2>/dev/null | wc -l)"
+  if [[ $leftovers -ne 0 ]]; then
+    printf '        %s staging file(s) left behind\n' "$leftovers"
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_harden_ssh_survives_an_unopenable_tty() {
+  # The new-SSH-port prompt did `[[ -e /dev/tty && -r /dev/tty ]]` and then
+  # redirected from /dev/tty. A tty that exists but cannot be OPENED - setsid,
+  # cron, a CI runner, a test runner - passes that test and then fails the
+  # redirect with ENXIO, killing the run before the drop-in pass and before
+  # anything was written. Reproduced here.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  # The probe must actually open the tty, not just test for it.
+  if ! grep -q '(: </dev/tty) 2>/dev/null' "$f"; then
+    printf '        /dev/tty is still only tested for existence, not opened\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 test_netstat_ipv6_listeners_are_not_dropped() {
   # netstat labels IPv6 sockets tcp6/udp6 and renders them :::PORT or [::]:PORT.
   # The parser lowercased $1 and required exactly tcp/udp, so every IPv6
@@ -2643,6 +2727,8 @@ t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_pr
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
+t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode
+t 'harden_ssh survives an unopenable tty' test_harden_ssh_survives_an_unopenable_tty
 t 'listening process survives missing ss'  test_listening_process_survives_missing_ss
 t 'ipv4 ruleset rejects ipv6 subnets'     test_ipv4_ruleset_rejects_ipv6_subnets
 t 'validator requires both markers'       test_validator_requires_both_markers
