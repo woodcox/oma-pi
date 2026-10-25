@@ -34,6 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
 - **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
 - **Optional AI tools**: opencode, claude-code, hermes-agent
+- **Optional tool**: [tuiboard](https://github.com/NazzarenoGiannelli/tuiboard), a terminal kanban on plain markdown (installed with Bun)
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
@@ -52,6 +53,7 @@ And you'll be offered to setup:
 - Tailscale
 - Optional editor (Fresh)
 - Optional AI assistants (opencode, claude-code and hermes-agent)
+- Optional tuiboard (terminal kanban on markdown)
 
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
 
@@ -91,6 +93,8 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - [Yazi](https://github.com/sxyazi/yazi) file manager: `y` opens it and changes
    the shell to the last directory on exit (`Q` quits without changing)
  - [tldr](https://tldr.sh/)
+ - [tuiboard](https://github.com/NazzarenoGiannelli/tuiboard): terminal kanban on
+   plain markdown, run as `tuiboard` or `tb`
 
 ## Security hardening
 
