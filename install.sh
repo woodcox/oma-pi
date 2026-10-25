@@ -142,10 +142,27 @@ patch_shell_config() {
     # last set up with nvim picks this up on refresh.
     sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' "$SHELL_ENVS"
 
-    # Add tool PATH entries if not already present
-    grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
+    # Add tool PATH entries if not already present. Bun replaced Deno, so drop
+    # the old entry as well; otherwise a refreshed box keeps a dangling path
+    # in front of the one that now holds the global CLIs. The DENO_INSTALL
+    # form appears on boxes set up by an older Deno installer.
+    sed -i '\#\.deno\|DENO_INSTALL#d' "$SHELL_ENVS"
+    grep -qF '.bun/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.bun/bin:$PATH"'  >>"$SHELL_ENVS"
     grep -qF '.local/bin' "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >>"$SHELL_ENVS"
   fi
+
+  # Deno also wrote a source line for ~/.deno/env into the login profile
+  # files, which this installer does not otherwise own. Those lines outlive
+  # an uninstalled Deno and fail with "No such file or directory" on every
+  # login, so strip them. .bashrc and .zshrc are rewritten by install_omadots
+  # later in the run and do not need this. A bare $DENO_INSTALL path would
+  # expand to /bin once the variable is gone, hence matching that too.
+  local profile_file
+  for profile_file in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zshenv"; do
+    if [ -f "$profile_file" ]; then
+      sed -i '\#\.deno\|DENO_INSTALL#d' "$profile_file"
+    fi
+  done
 
   if [ -f "$SHELL_ALIASES" ]; then
     # Remove nvim aliases

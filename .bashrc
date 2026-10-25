@@ -1,4 +1,4 @@
 source ~/.config/shell/all
 [[ -z $TMUX ]] && t
 
-export PATH="$HOME/.deno/bin:$PATH"
+export PATH="$HOME/.bun/bin:$PATH"
