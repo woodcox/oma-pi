@@ -1,0 +1,18 @@
+# Yazi file manager launcher.
+# Vendored from the upstream Bash/Zsh shell wrapper:
+# https://yazi-rs.github.io/docs/quick-start/#shell-wrapper
+# Kept in fns/ rather than ~/.bashrc because install.sh blanket-copies config/
+# over ~/.config, so a hand-written ~/.config/shell/fns/yazi would be wiped on
+# the next omapi-refresh.
+#
+# `y` starts Yazi and cds the shell to the last directory on quit (Q quits
+# without changing directory). `command` keeps this from recursing if yazi is
+# ever aliased to y.
+y() {
+  local tmp cwd
+  tmp="$(mktemp -t "yazi-cwd.XXXXXX")" || return 1
+  command yazi "$@" --cwd-file="$tmp"
+  IFS= read -r -d '' cwd < "$tmp"
+  [ "$cwd" != "$PWD" ] && [ -d "$cwd" ] && builtin cd -- "$cwd" || builtin true
+  command rm -f -- "$tmp"
+}

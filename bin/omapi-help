@@ -88,7 +88,7 @@ page_commands() {
   cmd "git-id"                       "Set global git user.name and user.email"
 
   section "File & Navigation"
-  cmd "nnn"  "file manager (nnn)"
+  cmd "y"    "file manager (Yazi, cds on exit)"
   cmd "ff"  "fzf fuzzy finder"
   cmd "eff"  "fzf fuzzy finder in editor (MS Edit)"
   cmd "cd"  "zoxide (smart cd)"
