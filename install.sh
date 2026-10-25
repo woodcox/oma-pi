@@ -208,6 +208,75 @@ install_msedit_binary() {
   echo "✓ MS Edit ${version} (as 'msedit')"
 }
 
+install_yazi_binary() {
+  section "Installing Yazi from GitHub releases..."
+
+  local arch
+  local current_version
+  local version
+  local dir
+  local tmpdir
+  local yazi_bin
+
+  arch="$(detect_arch)"
+  case "$arch" in
+    aarch64|x86_64) ;;
+    *)
+      echo "Error: unsupported architecture for the Yazi package" >&2
+      return 1
+      ;;
+  esac
+
+  version="$(github_latest_tag sxyazi/yazi)" || {
+    echo "Error: could not determine the latest Yazi release (GitHub API unreachable or rate limited)" >&2
+    return 1
+  }
+  version="${version#v}"
+
+  if command -v yazi &>/dev/null; then
+    yazi_bin="$(command -v yazi)"
+  else
+    yazi_bin="$HOME/.local/bin/yazi"
+  fi
+  if [ -x "$yazi_bin" ]; then
+    current_version="$("$yazi_bin" --version 2>/dev/null | awk '/Version:/{print $2; exit}')"
+    if [ "$current_version" = "$version" ]; then
+      echo "✓ Yazi ${version} already installed"
+      return 0
+    fi
+  fi
+
+  # The GNU build requires glibc 2.39; Raspberry Pi OS bookworm still ships
+  # 2.36, so that asset cannot even start there. The musl build is statically
+  # linked and runs on every release this installer supports.
+  dir="yazi-${arch}-unknown-linux-musl"
+  tmpdir="$(mktemp -d)"
+
+  if ! curl -fL "https://github.com/sxyazi/yazi/releases/download/v${version}/${dir}.zip" \
+       -o "$tmpdir/yazi.zip"; then
+    echo "Error: could not download Yazi ${version}" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+  if ! unzip -q "$tmpdir/yazi.zip" -d "$tmpdir"; then
+    echo "Error: could not extract Yazi ${version}" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  # Both binaries are installed: yazi is the TUI and ya is its CLI companion,
+  # which the release ships and the shell completions expect.
+  mkdir -p "$HOME/.local/bin"
+  if ! install -m 0755 "$tmpdir/$dir/yazi" "$tmpdir/$dir/ya" "$HOME/.local/bin/"; then
+    echo "Error: could not install Yazi to $HOME/.local/bin" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  rm -rf "$tmpdir"
+  echo "✓ Yazi ${version}"
+}
+
 install_fresh_binary() {
   section "Installing Fresh from GitHub releases..."
 
@@ -440,6 +509,9 @@ run_installation() {
 
   # MS Edit binary: the default $EDITOR
   install_msedit_binary
+
+  # Yazi binary: the interactive file manager, plus its ya CLI
+  install_yazi_binary
 
   # Configs and bins
   install_configs

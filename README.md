@@ -14,9 +14,6 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
     `ListenStream=22`, the `Port` directive is ignored, and the script would
     report a port move that never happened. Those three releases are not
     supported.
-  - On Ubuntu, `nnn` lives in `universe`, which a stock server image does not
-    enable. The installer skips it and says so rather than failing the run.
-    Enable it with `sudo add-apt-repository universe` to get the file manager.
 - Harden the RPi / VM by following: 
   
 
@@ -32,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 ## What it sets up
 
 - **Shell**: Bash with starship prompt, fzf, eza, zoxide
-- **Files**: nnn as the interactive file manager
+- **Files**: [Yazi](https://github.com/sxyazi/yazi) as the interactive file manager
 - **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
 - **Dev tools**: deno, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
@@ -91,7 +88,8 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
       - `lsa` for listing including hidden files
       - `lta` for a nested listing with hidden files
  - [Btop](https://github.com/aristocratos/btop)
- - [nnn](https://github.com/jarun/nnn) file manager
+ - [Yazi](https://github.com/sxyazi/yazi) file manager: `y` opens it and changes
+   the shell to the last directory on exit (`Q` quits without changing)
  - [tldr](https://tldr.sh/)
 
 ## Security hardening
