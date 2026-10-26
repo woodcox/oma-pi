@@ -142,6 +142,13 @@ install_packages() {
     sudo apt install -y gum
   fi
 
+  # mise (not in Ubuntu repos)
+  if ! command -v mise &>/dev/null; then
+    section "Installing mise..."
+    curl -fsSL https://mise.run | sh 2>/dev/null
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+
   # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
   if ! command -v fastfetch &>/dev/null; then
     section "Installing fastfetch..."
@@ -173,15 +180,10 @@ install_packages() {
     echo "✓ fastfetch installed with neofetch preset"
   fi
 
-  # Bun runtime, replacing Deno as the JavaScript runtime and the installer
-  # for the optional tools below.
+  # Bun runtime
   #
-  # Bun installs itself to ~/.bun/bin. Put that directory on PATH before
-  # running the installer: it skips appending its own PATH line when bun is
-  # already reachable, and install_omadots rewrites ~/.bashrc and ~/.zshrc
-  # later in the run anyway. config/shell/envs owns the persistent entry.
-  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-  export PATH="$BUN_INSTALL/bin:$PATH"
+  # Bun installs itself to ~/.bun/bin and adds to the shell rc files to allow optional_ai_apps to install. `config/shell/envs` owns the persistent entry.
+  export PATH="$HOME/.bun/bin:$PATH"
   if ! command -v bun &>/dev/null; then
     section "Installing Bun..."
     curl -fsSL https://bun.sh/install | bash
@@ -243,18 +245,18 @@ EOF
   sudo apt update
   sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-  echo "Docker installation complete ✅"
+  echo "✓ Docker installation complete"
 }
 
-# Bun installs global CLIs under $BUN_INSTALL/bin, using the bin name each
-# package declares. Not fatal: a failure here should not skip the remaining
+# Bun installs global CLIs using the bin name each package declares. 
+# Not fatal: a failure here should not skip the remaining
 # optional tools, docker and the service setup that follow. Report it rather
 # than letting the `|| true` that used to be here hide it completely.
 bun_global_install() {
   local name="$1"
   local package="$2"
 
-  if ! bun install -g "$package"; then
+  if ! bun install -g --trust "$package"; then
     echo "Error: failed to install $name" >&2
   fi
 }
@@ -272,32 +274,26 @@ install_optional_ai_tools() {
     return
   fi
 
-  # A refresh should not re-ask about a tool this box already has, and none of
-  # these are cheap to repeat: the two Bun installs are npm trees under
-  # ~/.bun/install/global, and the Hermes installer writes a set of shims into
-  # ~/.local/bin. Report what is present and ask only about what is actually
-  # missing, so every question that does get asked has a real decision behind
-  # it.
+  # A refresh should not re-ask about a tool this box already has.
+  # Report what is present and ask only about what is actually
+  # missing, so every question is a real decision.
   #
-  # claude-code is matched under both names on purpose. The package is named
-  # claude-code, but its bin is `claude`, which is also what every alias in
-  # config/shell/aliases calls, so a box provisioned either way should count as
-  # already having it.
+  # Opencode
   if command -v opencode &>/dev/null; then
     echo "✓ opencode already installed ($(command -v opencode))"
   elif gum confirm "Install opencode?" </dev/tty; then
     bun_global_install opencode opencode-ai
   fi
 
+  # claude-code is matched under both names on purpose. The package is named
+  # claude-code, but its bin is `claude`.
   if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
     echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
   elif gum confirm "Install claude-code?" </dev/tty; then
     bun_global_install claude-code @anthropic-ai/claude-code
   fi
 
-  # The Hermes installer drops `hermes` plus `hermes-acp` and `hermes-agent`
-  # shims, so `hermes` alone is enough to detect it, with the other as a
-  # fallback in case a future release renames the entry point.
+  # Hermes-agent installer 
   if command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null; then
     echo "✓ Hermes Agent already installed ($(command -v hermes || command -v hermes-agent))"
   elif gum confirm "Install Hermes Agent?" </dev/tty; then
