@@ -290,10 +290,7 @@ install_optional_ai_tools() {
   fi
 
   # opencode-quota turns the Go plan's rolling, weekly and monthly windows into
-  # something the terminal (or an agent) can read: OpenCode itself only shows
-  # them in the console UI. It is only useful next to opencode, because it reads
-  # opencode's database and auth file to find the credentials it queries with,
-  # so it is offered here and skipped when opencode is absent.
+  # something the terminal (or an agent) can read.
   if command -v opencode &>/dev/null; then
     if command -v opencode-quota &>/dev/null; then
       echo "✓ opencode-quota already installed ($(command -v opencode-quota))"
