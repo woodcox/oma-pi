@@ -91,8 +91,8 @@ ensure_git_config() {
   echo "✓ Git identity lives in ~/.gitconfig, which reinstalls do not overwrite"
 }
 
-install_omadots() {
-  section "Installing Omadots configs..."
+install_dots() {
+  section "Installing dots configs..."
 
   section "Copying dots to ~/.config..."
   mkdir -p "$HOME/.config"
@@ -127,32 +127,6 @@ EOF_BASH
       echo "✓ Bash"
       ;;
   esac
-}
-
-patch_shell_config() {
-  section "Patching shell config for oma-pi..."
-
-  local SHELL_ENVS="$HOME/.config/shell/envs"
-  local SHELL_ALIASES="$HOME/.config/shell/aliases"
-
-  if [ -f "$SHELL_ENVS" ]; then
-    ensure_trailing_newline "$SHELL_ENVS"
-
-    # Point EDITOR at MS Edit. Matches the nvim line it replaces, so a box
-    # last set up with nvim picks this up on refresh.
-    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' "$SHELL_ENVS"
-
-    # Add tool PATH entries if not already present
-    grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
-    grep -qF '.local/bin' "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >>"$SHELL_ENVS"
-  fi
-
-  if [ -f "$SHELL_ALIASES" ]; then
-    # Remove nvim aliases
-    sed -i '/nvim/d' "$SHELL_ALIASES"
-  fi
-
-  echo "✓ Shell config patched"
 }
 
 install_msedit_binary() {
@@ -392,6 +366,8 @@ install_configs() {
   mkdir -p "$HOME/.config"
   cp -Rf "$INSTALLER_DIR/config/"* "$HOME/.config/"
   echo "✓ Starship"
+  echo "✓ Btop"
+  echo "✓ Lazygit"
 
   if ! grep -q "if \[\[ -z \$TMUX \]\]" "$SHELL_RC" 2>/dev/null; then
     ensure_trailing_newline "$SHELL_RC"
@@ -505,7 +481,7 @@ run_installation() {
   ensure_git_config
 
   # Omadots
-  install_omadots
+  install_dots
 
   # MS Edit binary: the default $EDITOR
   install_msedit_binary
@@ -520,10 +496,6 @@ run_installation() {
   # Optional extras. Before patch_shell_config, which is the last step to
   # touch ~/.config.
   install_optional_editors
-
-  # Patch last: every step above re-copies config/ over ~/.config, so running
-  # this earlier would silently discard the EDITOR/alias edits.
-  patch_shell_config
 
   # Optional tools
   install_optional_ai_tools

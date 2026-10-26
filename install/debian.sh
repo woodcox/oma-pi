@@ -142,6 +142,13 @@ install_packages() {
     sudo apt install -y gum
   fi
 
+  # mise (not in Ubuntu repos)
+  if ! command -v mise &>/dev/null; then
+    section "Installing mise..."
+    curl -fsSL https://mise.run | sh 2>/dev/null
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+
   # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
   if ! command -v fastfetch &>/dev/null; then
     section "Installing fastfetch..."
@@ -173,13 +180,13 @@ install_packages() {
     echo "✓ fastfetch installed with neofetch preset"
   fi
 
-  # deno runtime
-  # Note: the installer adds ~/.deno/bin to shell rc files automatically.
-  # We also export it here so subsequent steps in this script can use deno.
-  if ! command -v deno &>/dev/null; then
-    section "Installing deno..."
-    curl -fsSL https://deno.land/install.sh | sh -s -- -y
-    export PATH="$HOME/.deno/bin:$PATH"
+  # Bun runtime
+  #
+  # Bun installs itself to ~/.bun/bin and adds to the shell rc files to allow optional_ai_apps to install. `config/shell/envs` owns the persistent entry.
+  export PATH="$HOME/.bun/bin:$PATH"
+  if ! command -v bun &>/dev/null; then
+    section "Installing Bun..."
+    curl -fsSL https://bun.sh/install | bash
   fi
 }
 
@@ -238,22 +245,18 @@ EOF
   sudo apt update
   sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-  echo "Docker installation complete ✅"
+  echo "✓ Docker installation complete"
 }
 
-# Deno treats a deno.json in the working directory (or any parent) as the
-# project config for the install, and writes deno.lock next to it. Running
-# from wherever the user happened to invoke the installer therefore created
-# ~/deno.json and ~/deno.lock in their home directory. Install from the
-# throwaway clone instead, which has no deno.json above it.
-deno_global_install() {
+# Bun installs global CLIs using the bin name each package declares. 
+# Not fatal: a failure here should not skip the remaining
+# optional tools, docker and the service setup that follow. Report it rather
+# than letting the `|| true` that used to be here hide it completely.
+bun_global_install() {
   local name="$1"
   local package="$2"
 
-  # Not fatal: a failure here should not skip the remaining optional tools,
-  # docker and the service setup that follow. Report it rather than letting
-  # the `|| true` that used to be here hide it completely.
-  if ! (cd "$INSTALLER_DIR" && deno install -g -A --name "$name" "$package"); then
+  if ! bun install -g --trust "$package"; then
     echo "Error: failed to install $name" >&2
   fi
 }
@@ -261,8 +264,8 @@ deno_global_install() {
 install_optional_ai_tools() {
   section "Optional AI coding assistants..."
 
-  if ! command -v deno &>/dev/null; then
-    echo "Skipping AI assistants (deno not found)."
+  if ! command -v bun &>/dev/null; then
+    echo "Skipping AI assistants (bun not found)."
     return
   fi
 
@@ -271,31 +274,26 @@ install_optional_ai_tools() {
     return
   fi
 
-  # A refresh should not re-ask about a tool this box already has, and none of
-  # these are cheap to repeat: the two deno installs are npm trees under
-  # ~/.deno, and the Hermes installer writes a set of shims into ~/.local/bin.
-  # Report what is present and ask only about what is actually missing, so
-  # every question that does get asked has a real decision behind it.
+  # A refresh should not re-ask about a tool this box already has.
+  # Report what is present and ask only about what is actually
+  # missing, so every question is a real decision.
   #
-  # claude-code is matched under both names on purpose. The deno install below
-  # puts it on PATH as `claude-code`, but the published npm package and every
-  # alias in config/shell/aliases call it `claude`, so a box provisioned either
-  # way should count as already having it.
+  # Opencode
   if command -v opencode &>/dev/null; then
     echo "✓ opencode already installed ($(command -v opencode))"
   elif gum confirm "Install opencode?" </dev/tty; then
-    deno_global_install opencode npm:opencode-ai
+    bun_global_install opencode opencode-ai
   fi
 
+  # claude-code is matched under both names on purpose. The package is named
+  # claude-code, but its bin is `claude`.
   if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
     echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
   elif gum confirm "Install claude-code?" </dev/tty; then
-    deno_global_install claude-code npm:@anthropic-ai/claude-code
+    bun_global_install claude-code @anthropic-ai/claude-code
   fi
 
-  # The Hermes installer drops `hermes` plus `hermes-acp` and `hermes-agent`
-  # shims, so `hermes` alone is enough to detect it, with the other as a
-  # fallback in case a future release renames the entry point.
+  # Hermes-agent installer 
   if command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null; then
     echo "✓ Hermes Agent already installed ($(command -v hermes || command -v hermes-agent))"
   elif gum confirm "Install Hermes Agent?" </dev/tty; then

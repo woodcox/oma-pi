@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Files**: [Yazi](https://github.com/sxyazi/yazi) as the interactive file manager
 - **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
-- **Dev tools**: deno, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
+- **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
 - **Optional AI tools**: opencode, claude-code, hermes-agent
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
