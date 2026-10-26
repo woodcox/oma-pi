@@ -32,9 +32,9 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Files**: [Yazi](https://github.com/sxyazi/yazi) as the interactive file manager
 - **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
-- **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
+- **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, mise, tmux, btop, jq and kitty-terminfo
 - **Optional AI tools**: opencode, claude-code, hermes-agent
-- **Optional tool**: [tuiboard](https://github.com/NazzarenoGiannelli/tuiboard), a terminal kanban on plain markdown (installed with Bun)
+- **Optional productivity tools**: [tuiboard]([https://github.com/NazzarenoGiannelli/tuiboard](https://tuiboard.nazzareno.xyz/), a terminal kanban on plain markdown (installed with Bun)
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
@@ -90,11 +90,10 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
       - `lsa` for listing including hidden files
       - `lta` for a nested listing with hidden files
  - [Btop](https://github.com/aristocratos/btop)
- - [Yazi](https://github.com/sxyazi/yazi) file manager: `y` opens it and changes
+ - [Yazi](https://github.com/sxyazi/yazi) file manager alias: `y` opens it and changes
    the shell to the last directory on exit (`Q` quits without changing)
  - [tldr](https://tldr.sh/)
- - [tuiboard](https://github.com/NazzarenoGiannelli/tuiboard): terminal kanban on
-   plain markdown, run as `tuiboard` or `tb`
+ - [tuiboard]([https://github.com/NazzarenoGiannelli/tuiboard](https://tuiboard.nazzareno.xyz/): alias `tb`
 
 ## Security hardening
 
