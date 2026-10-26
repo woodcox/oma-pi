@@ -93,7 +93,7 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - [Yazi](https://github.com/sxyazi/yazi) file manager alias: `y` opens it and changes
    the shell to the last directory on exit (`Q` quits without changing)
  - [tldr](https://tldr.sh/)
- - [tuiboard]([https://github.com/NazzarenoGiannelli/tuiboard](https://tuiboard.nazzareno.xyz/): alias `tb`
+ - [tuiboard](https://tuiboard.nazzareno.xyz/): alias `tb`
 
 ## Security hardening
 
