@@ -1,0 +1,6 @@
+[env]
+_.path = "{{ cwd }}/bin"
+
+[settings]
+experimental = false
+idiomatic_version_file_enable_tools = ["node"]
