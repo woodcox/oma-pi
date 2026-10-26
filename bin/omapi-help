@@ -100,6 +100,9 @@ page_commands() {
   cmd "lsa" "eza including hidden"
   cmd "lta" "eza tree including hidden"
 
+  section "Productivity"
+  cmd "tb"  "tuiboard (terminal kanban on markdown)"
+
   section "SSH Port Forwarding"
   cmd "fip <host> <port...>"           "Forward port(s) from remote host"
   cmd "dip <port...>"                  "Stop forwarding port(s)"

@@ -499,6 +499,7 @@ run_installation() {
 
   # Optional tools
   install_optional_ai_tools
+  install_optional_tuiboard
 
   # Setup Docker group with optional root level access
   install_docker

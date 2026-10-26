@@ -301,6 +301,73 @@ install_optional_ai_tools() {
   fi
 }
 
+# tuiboard is optional: it is a personal productivity TUI, not something every
+# Pi needs, and it brings its own dependency tree plus a native renderer.
+#
+# A refresh should be quiet when the box is already current: compare the
+# installed package version with the one on the npm registry and skip if they
+# match. An outdated install is updated without asking, because the user has
+# already opted in; only a missing install gets a prompt.
+install_optional_tuiboard() {
+  section "Optional tuiboard..."
+
+  if ! command -v bun &>/dev/null; then
+    echo "Skipping tuiboard (bun not found)."
+    return
+  fi
+  if ! command -v gum &>/dev/null; then
+    echo "Skipping tuiboard (gum not found)."
+    return
+  fi
+
+  local bun_root package_json installed latest
+  bun_root="$(dirname "$(bun pm bin -g 2>/dev/null)")"
+  # `dirname ""` prints ".", so treat that as no answer and fall back to Bun's
+  # documented default. BUN_INSTALL is exported by the Bun install step.
+  if [ -z "$bun_root" ] || [ "$bun_root" = "." ]; then
+    bun_root="${BUN_INSTALL:-$HOME/.bun}"
+  fi
+  package_json="$bun_root/install/global/node_modules/tuiboard/package.json"
+
+  installed=""
+  if [ -r "$package_json" ] && command -v jq &>/dev/null; then
+    installed="$(jq -r '.version // empty' "$package_json" 2>/dev/null || true)"
+  fi
+
+  latest=""
+  if command -v curl &>/dev/null && command -v jq &>/dev/null; then
+    latest="$(curl -fsSL --connect-timeout 10 --max-time 30 \
+      https://registry.npmjs.org/tuiboard/latest 2>/dev/null \
+      | jq -r '.version // empty' 2>/dev/null || true)"
+  fi
+
+  if [ -n "$installed" ]; then
+    if [ -n "$latest" ] && [ "$installed" = "$latest" ]; then
+      echo "✓ tuiboard $installed already up to date"
+      return
+    fi
+    if [ -z "$latest" ]; then
+      echo "✓ tuiboard $installed already installed (could not check for updates)"
+      return
+    fi
+    echo "Updating tuiboard $installed -> $latest..."
+  elif ! gum confirm "Install tuiboard (terminal kanban)?" </dev/tty; then
+    return
+  fi
+
+  # Pin to the version just looked up when there is one, so the install cannot
+  # race a fresh publish. Otherwise let Bun resolve the latest tag itself.
+  if bun install -g "tuiboard@${latest:-latest}"; then
+    installed=""
+    if [ -r "$package_json" ] && command -v jq &>/dev/null; then
+      installed="$(jq -r '.version // empty' "$package_json" 2>/dev/null || true)"
+    fi
+    echo "✓ tuiboard ${installed:-${latest:-installed}}"
+  else
+    echo "Error: failed to install tuiboard" >&2
+  fi
+}
+
 enable_services() {
   section "Enabling services..."
 
