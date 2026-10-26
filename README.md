@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
 - **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, tmux, btop, jq and kitty-terminfo
-- **Optional AI tools**: opencode, claude-code, hermes-agent
+- **Optional AI tools**: opencode, claude-code, hermes-agent, and [opencode-quota](https://github.com/slkiser/opencode-quota) for OpenCode Go usage limits
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
@@ -52,6 +52,7 @@ And you'll be offered to setup:
 - Tailscale
 - Optional editor (Fresh)
 - Optional AI assistants (opencode, claude-code and hermes-agent)
+- Optional opencode-quota (OpenCode Go usage limits, offered when opencode is installed)
 
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
 

@@ -289,6 +289,19 @@ install_optional_ai_tools() {
     bun_global_install opencode opencode-ai
   fi
 
+  # opencode-quota turns the Go plan's rolling, weekly and monthly windows into
+  # something the terminal (or an agent) can read: OpenCode itself only shows
+  # them in the console UI. It is only useful next to opencode, because it reads
+  # opencode's database and auth file to find the credentials it queries with,
+  # so it is offered here and skipped when opencode is absent.
+  if command -v opencode &>/dev/null; then
+    if command -v opencode-quota &>/dev/null; then
+      echo "✓ opencode-quota already installed ($(command -v opencode-quota))"
+    elif gum confirm "Install opencode-quota (OpenCode Go usage limits)?" </dev/tty; then
+      bun_global_install opencode-quota @slkiser/opencode-quota
+    fi
+  fi
+
   if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
     echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
   elif gum confirm "Install claude-code?" </dev/tty; then
