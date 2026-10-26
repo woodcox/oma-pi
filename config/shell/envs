@@ -1,10 +1,21 @@
-export EDITOR="msedit"
 export PATH="$PATH:$HOME/.local/bin"
-export SUDO_EDITOR="$EDITOR"
-export BAT_THEME=ansi
-export MANROFFOPT="-c"
 export PATH="$HOME/.bun/bin:$PATH"
+
+# One editor for everything. install.sh puts msedit in ~/.local/bin; fall back
+# to fresh or nano if this file is used on a box that skipped it.
+if command -v msedit >/dev/null 2>&1; then
+  export EDITOR="msedit"
+elif command -v fresh >/dev/null 2>&1; then
+  export EDITOR="fresh"
+else
+  export EDITOR="nano"
+fi
+
 # Terminal tools that honour $VISUAL should send files to the same editor as
 # everything else. Pinning VISUAL to $EDITOR means a VISUAL inherited from
 # outside cannot override that.
 export VISUAL="$EDITOR"
+
+export BAT_THEME=ansi
+# -c disables groff's SGR color, so man pages stay plain.
+export MANROFFOPT="-c"
