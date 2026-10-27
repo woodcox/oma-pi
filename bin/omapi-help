@@ -61,7 +61,7 @@ page_commands() {
   cmd "c"   "opencode"
   cmd "cx"  "claude --permission-mode bypassPermissions"
   cmd "ha"  "hermes"
-  cmd "opencode-quota" "Go plan usage bars (OpenCode Quota page)"
+  cmd "opencode-quota" "Opencode Go plan usage and quota"
 
   section "Docker"
   cmd "d"   "docker"
@@ -138,7 +138,7 @@ page_quota() {
   cmd "2" "Results incomplete, or no comparable percentage"
 
   section "Without the global install"
-  qcmd "npx @slkiser/opencode-quota@latest show" "Same data, opencode can stay closed"
+  qcmd "bunx --bun @slkiser/opencode-quota@latest show" "Same data, opencode can stay closed"
 }
 
 page_tmux() {

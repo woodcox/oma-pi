@@ -114,13 +114,11 @@ opencode-quota show --json --threshold 5        # exit 1 when comparable quota <
 percentage is below it or the command failed, `2` results were incomplete or no
 comparable percentage existed.
 
-Without the global install, `npx @slkiser/opencode-quota@latest show` does the same and
-also works while opencode is closed. The installer adds the plugin entry to
-`~/.config/opencode/opencode.json` only when you accept, which is what enables the
-sidebar panel, `/quota` and the `/tokens_*` commands; the CLI above works without it,
-but reports whatever the cache last held. See the upstream
-[external integration docs](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/external-integration.md)
-for the JSON schema and export/telemetry options.
+Without the global install, `bunx --bun @slkiser/opencode-quota@latest show` does the same and
+also works while opencode is closed. In opencode `/quota` and the `/tokens_*` commands open the sidebar panel; the CLI above works without it,
+but reports whatever the cache last held. See
+[opencode-quota docs](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/external-integration.md)
+for futher info.
 
 ## Security hardening
 
