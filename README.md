@@ -63,7 +63,9 @@ And you'll be offered to setup:
 
 ## Commands
 See `omapi-help` for the command list and Herdr key bindings, and the
-[Herdr docs](https://herdr.dev/docs/) for the full manual. Oma-Pi provides:
+[Herdr docs](https://herdr.dev/docs/) for the full manual. Herdr replaces tmux:
+tabs are tmux windows, workspaces are tmux sessions, and `t` attaches to the
+persistent `Work` session. Oma-Pi provides:
 
  - `omapi-setup`: Git name and email and github cli
  - `omapi-refresh`: Reinstall Oma-pi with initial configs
