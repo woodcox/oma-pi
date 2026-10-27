@@ -97,6 +97,31 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - [tldr](https://tldr.sh/)
  - [tuiboard](https://tuiboard.nazzareno.xyz/): alias `tb`
 
+### opencode-quota
+
+`opencode-quota` is offered by the installer when opencode is present. It reports the
+quota OpenCode saved last, so it works with opencode closed and never asks a provider.
+
+```bash
+opencode-quota show                             # Go plan: 5h / Weekly / Monthly bars
+opencode-quota show --provider opencode-go      # only the Go plan
+opencode-quota show --json                      # the same cached data as JSON
+opencode-quota show --json --provider copilot   # only Copilot
+opencode-quota show --json --threshold 5        # exit 1 when comparable quota < 5%
+```
+
+`--threshold` exit codes: `0` complete and above the threshold, `1` a comparable
+percentage is below it or the command failed, `2` results were incomplete or no
+comparable percentage existed.
+
+Without the global install, `npx @slkiser/opencode-quota@latest show` does the same and
+also works while opencode is closed. The installer adds the plugin entry to
+`~/.config/opencode/opencode.json` only when you accept, which is what enables the
+sidebar panel, `/quota` and the `/tokens_*` commands; the CLI above works without it,
+but reports whatever the cache last held. See the upstream
+[external integration docs](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/external-integration.md)
+for the JSON schema and export/telemetry options.
+
 ## Security hardening
 
 After installing you can run `omapi-harden` which applies the following hardening: 

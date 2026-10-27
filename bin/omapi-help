@@ -34,6 +34,11 @@ cmd() {
   printf "  ${GREEN}%-28s${RESET} %s\n" "$1" "$2"
 }
 
+qcmd() {
+  # qcmd "command" "description" — wider column for opencode-quota flags
+  printf "  ${GREEN}%-46s${RESET} %s\n" "$1" "$2"
+}
+
 hotkey() {
   # hotkey "keys" "description"
   printf "  ${YELLOW}%-28s${RESET} %s\n" "$1" "$2"
@@ -56,6 +61,7 @@ page_commands() {
   cmd "c"   "opencode"
   cmd "cx"  "claude --permission-mode bypassPermissions"
   cmd "ha"  "hermes"
+  cmd "opencode-quota" "Go plan usage bars (OpenCode Quota page)"
 
   section "Docker"
   cmd "d"   "docker"
@@ -111,6 +117,28 @@ page_commands() {
   section "System"
   cmd "btop" "resource monitor"
   cmd "tldr" "simplified man pages"
+}
+
+page_quota() {
+  clear
+  echo ""
+  header "OpenCode Quota"
+  echo -e "  ${DIM}Reads the quota opencode saved last; opencode can stay closed.${RESET}"
+
+  section "Usage"
+  qcmd "opencode-quota show"                           "Go plan: 5h / Weekly / Monthly bars"
+  qcmd "opencode-quota show --json"                    "The same cached data as JSON"
+  qcmd "opencode-quota show --provider opencode-go"    "Only the Go plan"
+  qcmd "opencode-quota show --json --provider copilot" "Only Copilot"
+
+  section "Thresholds (for CI)"
+  qcmd "opencode-quota show --json --threshold 5" "Exit 1 when comparable quota is below 5%"
+  cmd "0" "Complete, nothing below the threshold"
+  cmd "1" "Quota below the threshold, or the command failed"
+  cmd "2" "Results incomplete, or no comparable percentage"
+
+  section "Without the global install"
+  qcmd "npx @slkiser/opencode-quota@latest show" "Same data, opencode can stay closed"
 }
 
 page_tmux() {
@@ -211,12 +239,14 @@ while true; do
     --header "  What would you like to view?" \
     --header.foreground="240" \
     "Commands & Aliases" \
+    "OpenCode Quota" \
     "Functions" \
     "Tmux Reference" \
     "Quit")
 
   case "$CHOICE" in
     "Commands & Aliases") page_commands ;;
+    "OpenCode Quota")     page_quota    ;;
     "Functions")          page_functions ;;
     "Tmux Reference")     page_tmux     ;;
     "Quit"|"")            clear; exit 0 ;;
