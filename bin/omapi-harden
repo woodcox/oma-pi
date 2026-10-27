@@ -256,42 +256,62 @@ write_conf() {
     cat >/dev/null
     return 0
   fi
-  install -d -m 0755 "$(dirname "$target")"
-  # Write to a sibling temp and rename, never `cat >"$target"` directly.
-  # That redirection truncates the live config before reading anything: on a
-  # full SD card (ENOSPC), an I/O error, or a producer that dies mid-stream, the
-  # target is left empty or partial and set -e then aborts the run. rename(2)
-  # within one filesystem is atomic, so the target is either the old file or
-  # the complete new one - never a half-written one.
-  local tmp="${target}.omapi-tmp.$$"
-  if ! cat >"$tmp"; then
-    rm -f "$tmp"
+
+  # Every path this is called with is under /etc (apt.conf.d, sysctl.d,
+  # journald.conf.d, cron.daily), so each step below needs privilege. It did not
+  # have any: an unprivileged `install -d` and `cat >` failed with "Permission
+  # denied" and the task never ran at all, even with a working sudo timestamp -
+  # the escalating helper simply was not involved.
+  run_root install -d -m 0755 "$(dirname "$target")"
+
+  # Content is consumed into a temp file the caller owns. Writing it directly to
+  # a sibling of the target cannot work unprivileged, because that directory is
+  # root-owned; and mktemp is a different filesystem, so a mv from there would
+  # degrade to copy-then-delete and lose the atomicity.
+  local body
+  body="$(mktemp)"
+  if ! cat >"$body"; then
+    rm -f "$body"
     warn "could not write $path; it has NOT been changed"
     return 1
   fi
   # Refuse to install a config that came out empty. An empty sshd_config or
-  # after.rules is never what was intended, and replacing a working one with it
+  # rules file is never what was intended, and replacing a working one with it
   # is the worst outcome available.
-  if [[ ! -s $tmp ]]; then
-    rm -f "$tmp"
+  if [[ ! -s $body ]]; then
+    rm -f "$body"
     warn "$path came out empty; refusing to install it over the existing file"
     return 1
   fi
-  # Preserve the target's own mode: mv replaces the inode, so the new file
-  # would otherwise carry this script's umask. Applied to the STAGING file so
-  # the target is never observable with the wrong mode.
+
+  # Stage in the TARGET's own directory so the final rename is atomic, and let
+  # run_root do the placement - the redirection cannot be elevated by proxy, so
+  # the privileged child has to open the file itself.
+  local stage="${target}.omapi-tmp.$$"
   local tmode=644
-  [[ -e $target ]] && tmode="$(stat -c %a "$target" 2>/dev/null || printf 644)"
-  if ! chmod "$tmode" "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
+  [[ -e $target ]] && tmode="$(run_root stat -c %a "$target" 2>/dev/null || printf 644)"
+
+  if ! run_root cp "$body" "$stage"; then
+    rm -f "$body"
+    warn "could not stage $path; it has NOT been changed"
+    return 1
+  fi
+  # Set the mode on the STAGING file, before the rename: rename(2) replaces the
+  # inode, so this way the target goes straight from the correct old inode to
+  # the correct new one and is never observable with the wrong permissions.
+  if ! run_root chmod "$tmode" "$stage"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
     warn "could not set the mode on the staged $path; it has NOT been changed"
     return 1
   fi
-  if ! mv -f "$tmp" "$target"; then
-    rm -f "$tmp"
+  if ! run_root mv -f "$stage" "$target"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
     warn "could not install $path; it has NOT been changed"
     return 1
   fi
+  rm -f "$body"
   note "wrote $path"
 }
 

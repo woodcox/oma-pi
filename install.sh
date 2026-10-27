@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Common functions for Omaterm installation
+# Common functions for Omapi installation
 show_banner() {
   clear
   echo
@@ -26,31 +26,176 @@ section() {
   echo -e "\n==> $1"
 }
 
-# Fetch the latest release tag from the GitHub API.
-# Prefers the authenticated gh CLI so we don't burn the 60/hr anonymous rate
-# limit. Returns non-zero for every failure mode, because callers turn the
-# result straight into a download URL: a rate limit, an offline host or a
-# repo without releases would otherwise install a tarball named after the
-# error response.
-github_latest_tag() {
-  local repo="$1"
-  local url tag
-
-  url="https://api.github.com/repos/${repo}/releases/latest"
-
-  if command -v gh &>/dev/null && gh auth status &>/dev/null; then
-    tag="$(gh api -q '.tag_name' "$url" 2>/dev/null)" || return 1
+as_root() {
+  if [ "$EUID" -eq 0 ]; then
+    "$@"
   else
-    tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null \
-      | grep -Po '"tag_name": *"\K[^"]+' || true)"
+    sudo "$@"
+  fi
+}
+
+prompt_confirm() {
+  local prompt="$1"
+  local default="${2:-y}"
+  local suffix reply
+
+  if [ "$default" = "y" ]; then
+    suffix="[Y/n]"
+  else
+    suffix="[y/N]"
   fi
 
-  # gh echoes the raw response body on an HTTP error, so a plausible-looking
-  # but non-scalar result still has to be rejected.
-  [[ -n $tag && $tag != '{'* && $tag != '['* ]] || return 1
+  while true; do
+    printf "%s %s " "$prompt" "$suffix" > /dev/tty
+    IFS= read -r reply < /dev/tty || return 1
+    reply="${reply,,}"
 
-  printf '%s\n' "$tag"
+    case "$reply" in
+      "") [ "$default" = "y" ] && return 0 || return 1 ;;
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Please answer yes or no." > /dev/tty ;;
+    esac
+  done
 }
+
+default_install_user() {
+  local users
+
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    echo "$SUDO_USER"
+    return
+  fi
+
+  mapfile -t users < <(awk -F: '$3 >= 1000 && $3 < 60000 && $1 != "nobody" { print $1 }' /etc/passwd)
+  if [ "${#users[@]}" -eq 1 ]; then
+    echo "${users[0]}"
+  else
+    echo "omapi"
+  fi
+}
+
+prompt_username() {
+  local default_user="$1"
+  local username
+
+  while true; do
+    printf "User to use/create [%s]: " "$default_user" > /dev/tty
+    IFS= read -r username < /dev/tty || return 1
+    username="${username:-$default_user}"
+
+    if [ "$username" = "root" ]; then
+      echo "Please choose a non-root user." > /dev/tty
+    elif [[ "$username" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+      echo "$username"
+      return 0
+    else
+      echo "Use a Linux username like 'omapi' or 'alice'." > /dev/tty
+    fi
+  done
+}
+
+ensure_root_bootstrap_tools() {
+  local os_id="$1"
+
+  if command -v sudo &>/dev/null; then
+    return
+  fi
+
+  section "Installing sudo..."
+  case "$os_id" in
+    arch)
+      pacman -Syu --needed --noconfirm sudo
+      ;;
+    debian)
+      apt-get update
+      apt-get install -y sudo
+      ;;
+    fedora)
+      dnf install -y sudo
+      ;;
+  esac
+}
+
+admin_group_for_os() {
+  case "$1" in
+    debian) echo "sudo" ;;
+    arch|fedora) echo "wheel" ;;
+  esac
+}
+
+ensure_install_user() {
+  local username="$1"
+  local os_id="$2"
+  local admin_group
+
+  if getent passwd "$username" &>/dev/null; then
+    echo "✓ Using existing user: $username"
+  else
+    section "Creating user $username..."
+    useradd -m -s /bin/bash "$username"
+    echo "Set a password for $username. You'll use it for sudo during install."
+    passwd "$username" </dev/tty
+  fi
+
+  admin_group="$(admin_group_for_os "$os_id")"
+  getent group "$admin_group" &>/dev/null || groupadd "$admin_group"
+  usermod -aG "$admin_group" "$username"
+
+  mkdir -p /etc/sudoers.d
+  printf "%%%s ALL=(ALL:ALL) ALL\n" "$admin_group" > "/etc/sudoers.d/10-omapi-$admin_group"
+  chmod 0440 "/etc/sudoers.d/10-omapi-$admin_group"
+  echo "✓ Added $username to $admin_group"
+}
+
+maybe_reexec_as_non_root() {
+  local os_id="$1"
+  local installer_dir="$2"
+  local default_user target_user status
+
+  if [ "$EUID" -ne 0 ] || [ "${OMAPI_ALLOW_ROOT:-}" = "1" ]; then
+    return
+  fi
+
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo "Running as root without an interactive TTY; continuing as root."
+    ensure_root_bootstrap_tools "$os_id"
+    return
+  fi
+
+  echo
+  echo "Omapi is running as root. If we continue, user config will be installed under /root."
+  echo "It's usually better to install Omapi as a normal sudo-capable user."
+
+  if ! prompt_confirm "Create/use a non-root user and run the install there instead?" "y"; then
+    echo "Continuing as root. Set OMAPI_ALLOW_ROOT=1 to skip this prompt."
+    ensure_root_bootstrap_tools "$os_id"
+    return
+  fi
+
+  default_user="$(default_install_user)"
+  target_user="$(prompt_username "$default_user")"
+
+  ensure_root_bootstrap_tools "$os_id"
+  ensure_install_user "$target_user" "$os_id"
+
+  section "Restarting installer as $target_user..."
+  chmod -R a+rX "$installer_dir"
+
+  if sudo -iu "$target_user" env OMAPI_REF="$OMAPI_REF" bash "$installer_dir/install.sh"; then
+    echo
+    echo "Omapi installed for $target_user. You're back at the root shell."
+    echo "To start using Omapi, either log out and log back in as $target_user, or run:"
+    echo "  su - $target_user"
+    exit 0
+  else
+    status=$?
+    echo
+    echo "Omapi install failed for $target_user. You're back at the root shell."
+    exit "$status"
+  fi
+}
+
 
 # Guard against `>>` concatenating onto a last line that has no trailing newline
 ensure_trailing_newline() {
@@ -129,30 +274,31 @@ EOF_BASH
   esac
 }
 
-patch_shell_config() {
-  section "Patching shell config for oma-pi..."
 
-  local SHELL_ENVS="$HOME/.config/shell/envs"
-  local SHELL_ALIASES="$HOME/.config/shell/aliases"
+# Fetch the latest release tag from the GitHub API.
+# Prefers the authenticated gh CLI so we don't burn the 60/hr anonymous rate
+# limit. Returns non-zero for every failure mode, because callers turn the
+# result straight into a download URL: a rate limit, an offline host or a
+# repo without releases would otherwise install a tarball named after the
+# error response.
+github_latest_tag() {
+  local repo="$1"
+  local url tag
 
-  if [ -f "$SHELL_ENVS" ]; then
-    ensure_trailing_newline "$SHELL_ENVS"
+  url="https://api.github.com/repos/${repo}/releases/latest"
 
-    # Point EDITOR at MS Edit. Matches the nvim line it replaces, so a box
-    # last set up with nvim picks this up on refresh.
-    sed -i -e 's/^export EDITOR="nvim"$/export EDITOR="msedit"/' "$SHELL_ENVS"
-
-    # Add tool PATH entries if not already present
-    grep -qF '.deno/bin'  "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.deno/bin:$PATH"'  >>"$SHELL_ENVS"
-    grep -qF '.local/bin' "$SHELL_ENVS" || printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >>"$SHELL_ENVS"
+  if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+    tag="$(gh api -q '.tag_name' "$url" 2>/dev/null)" || return 1
+  else
+    tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null \
+      | grep -Po '"tag_name": *"\K[^"]+' || true)"
   fi
 
-  if [ -f "$SHELL_ALIASES" ]; then
-    # Remove nvim aliases
-    sed -i '/nvim/d' "$SHELL_ALIASES"
-  fi
+  # gh echoes the raw response body on an HTTP error, so a plausible-looking
+  # but non-scalar result still has to be rejected.
+  [[ -n $tag && $tag != '{'* && $tag != '['* ]] || return 1
 
-  echo "✓ Shell config patched"
+  printf '%s\n' "$tag"
 }
 
 install_msedit_binary() {
@@ -165,7 +311,7 @@ install_msedit_binary() {
   local tmpdir
 
   # detect_arch already returns the names these release assets use, so no
-  # translation layer is needed here the way fastfetch and Helix needed one.
+  # translation layer is needed here the way fastfetch needed one.
   # It exits inside the command substitution for an unsupported machine, which
   # leaves arch empty rather than failing, so reject that explicitly.
   arch="$(detect_arch)"
@@ -352,6 +498,15 @@ install_bins() {
   echo "✓ omapi-help"
 }
 
+install_mise_tools() {
+  section "Installing Deno..."
+  eval "$(mise activate bash)" 2>/dev/null || true
+
+  mise use -g deno
+
+  export PATH="$HOME/.local/share/mise/shims:$PATH"
+}
+
 interactive_setup() {
   section "Interactive setup..."
 
@@ -413,20 +568,7 @@ finish() {
   echo "Now logout and back in for everything to take effect"
 }
 
-configure_parallel_builds() {
-  section "Configuring parallel compilation..."
-  export MAKEFLAGS="-j$(nproc)"
-
-  if [ -f /etc/makepkg.conf ]; then
-    sudo sed -i "s/^#\?MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/" /etc/makepkg.conf
-  fi
-
-  echo "✓ Using $(nproc) cores for compilation"
-}
-
 run_installation() {
-  # Use all cores for compilation
-  configure_parallel_builds
 
   # OS-specific package installation
   install_packages
@@ -444,14 +586,12 @@ run_installation() {
   # Configs and bins
   install_configs
   install_bins
+  
+  # Mise tooling
+  install_mise_tools
 
-  # Optional extras. Before patch_shell_config, which is the last step to
-  # touch ~/.config.
+  # Optional extras
   install_optional_editors
-
-  # Patch last: every step above re-copies config/ over ~/.config, so running
-  # this earlier would silently discard the EDITOR/alias edits.
-  patch_shell_config
 
   # Optional tools
   install_optional_ai_tools
@@ -482,10 +622,12 @@ if ! command -v git &>/dev/null; then
 fi
 
 REPO="https://github.com/woodcox/oma-pi.git"
+OMAPI_REF="${OMAPI_REF:-main}"
 INSTALLER_DIR="$(mktemp -d)"
 trap 'rm -rf "$INSTALLER_DIR"' EXIT
 
-git clone --depth 1 "$REPO" "$INSTALLER_DIR"
+echo "Cloning Omapi from $REPO ($OMAPI_REF)..."
+git clone --depth 1 --branch "$OMAPI_REF" "$REPO" "$INSTALLER_DIR"
 
 # OS detection and dispatch
 if [ -f /etc/debian_version ]; then

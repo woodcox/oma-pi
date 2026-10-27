@@ -224,6 +224,13 @@ install_packages() {
     sudo apt update
     sudo apt install -y gum
   fi
+  
+  # mise (not in Ubuntu repos)
+  if ! command -v mise &>/dev/null; then
+    section "Installing mise..."
+    curl -fsSL https://mise.run | sh 2>/dev/null
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
 
   # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
   if ! command -v fastfetch &>/dev/null; then
@@ -367,7 +374,7 @@ install_optional_ai_tools() {
   if command -v opencode &>/dev/null; then
     echo "✓ opencode already installed ($(command -v opencode))"
   elif gum confirm "Install opencode?" </dev/tty; then
-    deno_global_install opencode npm:opencode-ai
+    deno_global_install opencode npm:opencode-ai/cli
   fi
 
   if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then

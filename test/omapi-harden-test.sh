@@ -1765,6 +1765,49 @@ test_mode_is_applied_before_the_rename_not_after() {
   return $rc
 }
 
+test_write_conf_escalates_for_etc_paths() {
+  # Every path write_conf is called with is under /etc - apt.conf.d, sysctl.d,
+  # journald.conf.d, cron.daily - and it had no privileged step at all. An
+  # unprivileged `install -d` and `cat >` failed with "Permission denied" and
+  # the whole task did nothing, even with a valid sudo timestamp, because the
+  # escalating helper was never invoked. Reproduced against the real /etc path.
+  setup_destdir
+  local rc=0
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  # Scope to the function, so an unrelated run_root elsewhere cannot satisfy it.
+  local body
+  # The range MUST close on the closing brace. With `/^}\$/` the `\$` is a
+  # literal dollar and the range runs to EOF - capturing 2988 lines, so an
+  # unrelated `install -d` elsewhere in the file satisfied the assertion and the
+  # test failed for a reason that had nothing to do with write_conf.
+  body="$(awk '/^write_conf\(\) \{/,/^\}/' "$f")"
+  if [[ -z $body ]]; then
+    printf '        could not locate write_conf in the source\n'
+    rc=1
+  else
+    if grep -qE '^[[:space:]]*install -d ' <<<"$body"; then
+      printf '        write_conf creates the directory without run_root\n'
+      rc=1
+    fi
+    if ! grep -qE '^[[:space:]]*run_root install -d ' <<<"$body"; then
+      printf '        write_conf does not create the directory with run_root\n'
+      rc=1
+    fi
+    if grep -qE '^[[:space:]]*mv -f "\$stage" "\$target"' <<<"$body"; then
+      printf '        the rename is still unprivileged\n'
+      rc=1
+    fi
+    # The call sits inside `if ! run_root mv ...`, so it does not start the
+    # line - match the call itself rather than the start of the statement.
+    if ! grep -qE 'run_root mv -f "\$stage" "\$target"' <<<"$body"; then
+      printf '        the rename is not performed with run_root\n'
+      rc=1
+    fi
+  fi
+  teardown_destdir
+  return $rc
+}
+
 test_netstat_ipv6_listeners_are_not_dropped() {
   # netstat labels IPv6 sockets tcp6/udp6 and renders them :::PORT or [::]:PORT.
   # The parser lowercased $1 and required exactly tcp/udp, so every IPv6
@@ -2874,6 +2917,7 @@ t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_w
 t 'SSH writes and rollback use privilege' test_harden_ssh_privileged_transaction
 t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode
 t 'mode applied before the rename'     test_mode_is_applied_before_the_rename_not_after
+t 'write_conf escalates for /etc paths'  test_write_conf_escalates_for_etc_paths
 t 'harden_ssh survives an unopenable tty' test_harden_ssh_survives_an_unopenable_tty
 t 'listening process survives missing ss'  test_listening_process_survives_missing_ss
 t 'ipv4 ruleset rejects ipv6 subnets'     test_ipv4_ruleset_rejects_ipv6_subnets
