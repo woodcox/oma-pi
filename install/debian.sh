@@ -248,16 +248,18 @@ EOF
   echo "✓ Docker installation complete"
 }
 
-# Bun installs global CLIs using the bin name each package declares. 
-# Not fatal: a failure here should not skip the remaining
-# optional tools, docker and the service setup that follow. Report it rather
-# than letting the `|| true` that used to be here hide it completely.
+# Bun installs global CLIs using the bin name each package declares.
+# Returns non-zero on failure so a caller that depends on the result (the
+# opencode-quota plugin entry) can check it. Failures stay non-fatal: callers
+# that do not care append `|| true`, so the remaining optional tools, docker
+# and the service setup still run.
 bun_global_install() {
   local name="$1"
   local package="$2"
 
   if ! bun install -g --trust "$package"; then
     echo "Error: failed to install $name" >&2
+    return 1
   fi
 }
 
@@ -331,7 +333,7 @@ install_optional_ai_tools() {
   if command -v opencode &>/dev/null; then
     echo "✓ opencode already installed ($(command -v opencode))"
   elif gum confirm "Install opencode?" </dev/tty; then
-    bun_global_install opencode opencode-ai
+    bun_global_install opencode opencode-ai || true
   fi
 
   # opencode-quota turns the Go plan's rolling, weekly and monthly windows into
@@ -341,8 +343,14 @@ install_optional_ai_tools() {
       echo "✓ opencode-quota already installed ($(command -v opencode-quota))"
       set_opencode_quota_plugin enable
     elif gum confirm "Install opencode-quota (OpenCode Go usage limits)?" </dev/tty; then
-      bun_global_install opencode-quota @slkiser/opencode-quota
-      set_opencode_quota_plugin enable
+      # Only declare the plugin once the CLI is actually on the box. A failed
+      # install must leave opencode.json alone: the entry is itself an install,
+      # so writing it would have opencode fetch the package at startup anyway.
+      if bun_global_install opencode-quota @slkiser/opencode-quota; then
+        set_opencode_quota_plugin enable
+      else
+        echo "Skipping opencode-quota plugin config (install failed)." >&2
+      fi
     else
       # Declining has to remove the entry too: opencode would otherwise fetch
       # and load the declared package itself at startup.
@@ -355,7 +363,7 @@ install_optional_ai_tools() {
   if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
     echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
   elif gum confirm "Install claude-code?" </dev/tty; then
-    bun_global_install claude-code @anthropic-ai/claude-code
+    bun_global_install claude-code @anthropic-ai/claude-code || true
   fi
 
   # Hermes-agent installer 
