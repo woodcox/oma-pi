@@ -21,6 +21,10 @@ split_horizontal = ["prefix+h", "alt+enter"]
 split_vertical = ["prefix+v", "alt+shift+enter"]
 close_pane = ["prefix+x", "alt+esc"]
 zoom = "prefix+z"
+# Herdr defaults these to prefix+r and prefix+shift+p, which the tmux layout
+# needs for renaming tabs and switching workspaces.
+rename_pane = "prefix+alt+p"
+resize_mode = "prefix+alt+r"
 
 focus_pane_left = "ctrl+alt+left"
 focus_pane_right = "ctrl+alt+right"
