@@ -33,8 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
 - **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, mise, tmux, btop, jq and kitty-terminfo
-- **Optional AI tools**: opencode, claude-code, hermes-agent
-- **Optional productivity tools**: [tuiboard]([https://github.com/NazzarenoGiannelli/tuiboard](https://tuiboard.nazzareno.xyz/), a terminal kanban on plain markdown (installed with Bun)
+- **Optional AI tools**: opencode, claude-code, hermes-agent and [opencode-quota](https://github.com/slkiser/opencode-quota) for OpenCode Go usage limits
+- **Optional productivity tools**: [tuiboard](https://tuiboard.nazzareno.xyz/), a terminal kanban on plain markdown (installed with Bun)
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
@@ -53,7 +53,9 @@ And you'll be offered to setup:
 - Tailscale
 - Optional editor (Fresh)
 - Optional AI assistants (opencode, claude-code and hermes-agent)
+- Optional opencode-quota (OpenCode Go usage limits, offered when opencode is installed)
 - Optional tuiboard (terminal kanban on markdown)
+
 
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
 
@@ -94,6 +96,29 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
    the shell to the last directory on exit (`Q` quits without changing)
  - [tldr](https://tldr.sh/)
  - [tuiboard](https://tuiboard.nazzareno.xyz/): alias `tb`
+
+### opencode-quota
+
+`opencode-quota` is offered by the installer when opencode is present. It reports the
+quota OpenCode saved last, so it works with opencode closed and never asks a provider.
+
+```bash
+opencode-quota show                             # Go plan: 5h / Weekly / Monthly bars
+opencode-quota show --provider opencode-go      # only the Go plan
+opencode-quota show --json                      # the same cached data as JSON
+opencode-quota show --json --provider copilot   # only Copilot
+opencode-quota show --json --threshold 5        # exit 1 when comparable quota < 5%
+```
+
+`--threshold` exit codes: `0` complete and above the threshold, `1` a comparable
+percentage is below it or the command failed, `2` results were incomplete or no
+comparable percentage existed.
+
+Without the global install, `bunx --bun @slkiser/opencode-quota@latest show` does the same and
+also works while opencode is closed. In opencode `/quota` and the `/tokens_*` commands open the sidebar panel; the CLI above works without it,
+but reports whatever the cache last held. See
+[opencode-quota docs](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/external-integration.md)
+for further info.
 
 ## Security hardening
 
