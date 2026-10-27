@@ -1,0 +1,130 @@
+# Herdr dev layouts. Requires running inside a Herdr pane.
+_herdr_require() {
+  [[ -n ${HERDR_ENV:-} ]] && return 0
+  echo "You must start herdr to use $1." >&2
+  return 1
+}
+
+# Split a pane and print the new pane id. Herdr's --ratio is the fraction of
+# the pane that the pane being split keeps, which is the opposite of tmux -p.
+_herdr_split() {
+  herdr pane split --pane "$1" --direction "$2" --ratio "$3" --cwd "$4" --no-focus \
+    | jq -r '.result.pane.pane_id'
+}
+
+_herdr_run() {
+  herdr pane run "$1" "$2" >/dev/null
+}
+
+# Create a Herdr dev layout with editor, ai, and terminal
+# Usage: tdl <c|cx|ha|other_ai> [<second_ai>]
+tdl() {
+  [[ -z ${1:-} ]] && { echo "Usage: tdl <c|cx|ha|other_ai> [<second_ai>]"; return 1; }
+  _herdr_require tdl || return 1
+
+  local current_dir="${PWD}"
+  local editor_pane="$HERDR_PANE_ID"
+  local ai="$1"
+  local ai2="${2:-}"
+  local ai_pane ai2_pane
+
+  # Name the tab after the base directory name
+  herdr tab rename "$HERDR_TAB_ID" "$(basename "$current_dir")" >/dev/null
+
+  # Terminal across the bottom 15%, AI on the right 30%, editor top-left.
+  _herdr_split "$editor_pane" down 0.85 "$current_dir" >/dev/null
+  ai_pane=$(_herdr_split "$editor_pane" right 0.7 "$current_dir")
+
+  # If a second AI was provided, split the AI pane in half vertically
+  if [[ -n $ai2 ]]; then
+    ai2_pane=$(_herdr_split "$ai_pane" down 0.5 "$current_dir")
+    _herdr_run "$ai2_pane" "$ai2"
+  fi
+
+  _herdr_run "$ai_pane" "$ai"
+  _herdr_run "$editor_pane" "$EDITOR ."
+}
+
+# Create a Herdr dev square layout with editor, diff watch, terminal, and opencode
+# Usage: tds
+tds() {
+  [[ -n ${1:-} ]] && { echo "Usage: tds"; return 1; }
+  _herdr_require tds || return 1
+  if ! command -v hunk &>/dev/null; then
+    echo "tds needs 'hunk' (https://github.com/jesseduffield/hunk), which is not installed."
+    return 1
+  fi
+
+  local current_dir="${PWD}"
+  local editor_pane="$HERDR_PANE_ID"
+  local terminal_pane diff_pane opencode_pane
+
+  herdr tab rename "$HERDR_TAB_ID" "$(basename "$current_dir")" >/dev/null
+
+  terminal_pane=$(_herdr_split "$editor_pane" down 0.5 "$current_dir")
+  diff_pane=$(_herdr_split "$editor_pane" right 0.5 "$current_dir")
+  opencode_pane=$(_herdr_split "$terminal_pane" right 0.5 "$current_dir")
+
+  _herdr_run "$editor_pane" "$EDITOR ."
+  _herdr_run "$diff_pane" "hunk diff --watch"
+  _herdr_run "$opencode_pane" "opencode"
+}
+
+# Create multiple tdl tabs, one per subdirectory in the current directory
+# Usage: tdlm <c|cx|ha|other_ai> [<second_ai>]
+tdlm() {
+  [[ -z ${1:-} ]] && { echo "Usage: tdlm <c|cx|ha|other_ai> [<second_ai>]"; return 1; }
+  _herdr_require tdlm || return 1
+
+  local ai="$1"
+  local ai2="${2:-}"
+  local base_dir="$PWD"
+  local first=true
+  local dir dirpath root_pane
+
+  # Name the workspace after the base directory
+  herdr workspace rename "$HERDR_WORKSPACE_ID" "$(basename "$base_dir")" >/dev/null
+
+  for dir in "$base_dir"/*/; do
+    [[ -d $dir ]] || continue
+    dirpath="${dir%/}"
+
+    if $first; then
+      # Reuse the current tab for the first project
+      herdr pane run "$HERDR_PANE_ID" "cd '$dirpath' && tdl $ai $ai2" >/dev/null
+      first=false
+    else
+      root_pane=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" \
+        --cwd "$dirpath" --label "$(basename "$dirpath")" --no-focus \
+        | jq -r '.result.root_pane.pane_id')
+      herdr pane run "$root_pane" "tdl $ai $ai2" >/dev/null
+    fi
+  done
+}
+
+# Create a multi-pane swarm layout with the same command started in each pane (great for AI)
+# Usage: tsl <pane_count> <command>
+tsl() {
+  [[ -z ${1:-} || -z ${2:-} ]] && { echo "Usage: tsl <pane_count> <command>"; return 1; }
+  _herdr_require tsl || return 1
+
+  local count="$1"
+  local cmd="$2"
+  local current_dir="${PWD}"
+  local first_pane="$HERDR_PANE_ID"
+  local new_pane ratio
+  local remaining=$((count - 1))
+
+  herdr tab rename "$HERDR_TAB_ID" "$(basename "$current_dir")" >/dev/null
+
+  # Split the first pane repeatedly. Giving each new pane a 1/(n+1) share of
+  # the original leaves every pane the same width.
+  while ((remaining > 0)); do
+    ratio=$(awk -v r="$remaining" 'BEGIN { printf "%.6f", r / (r + 1) }')
+    new_pane=$(_herdr_split "$first_pane" right "$ratio" "$current_dir")
+    _herdr_run "$new_pane" "$cmd"
+    ((remaining--))
+  done
+
+  _herdr_run "$first_pane" "$cmd"
+}
