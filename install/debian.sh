@@ -147,6 +147,7 @@ install_packages() {
     section "Installing mise..."
     curl -fsSL https://mise.run | sh 2>/dev/null
     export PATH="$HOME/.local/bin:$PATH"
+    echo "✓ mise installed"
   fi
 
   # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
