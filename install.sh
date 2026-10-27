@@ -365,9 +365,12 @@ install_configs() {
   section "Installing configs..."
   mkdir -p "$HOME/.config"
   cp -Rf "$INSTALLER_DIR/config/"* "$HOME/.config/"
-  echo "✓ Starship"
-  echo "✓ Btop"
-  echo "✓ Lazygit"
+  echo "✓ Btop config"
+  echo "✓ Git config"
+  echo "✓ Lazygit config"
+  echo "✓ Mise config"
+  echo "✓ Opencode config"
+  echo "✓ Starship config"
 
   if ! grep -q "if \[\[ -z \$TMUX \]\]" "$SHELL_RC" 2>/dev/null; then
     ensure_trailing_newline "$SHELL_RC"

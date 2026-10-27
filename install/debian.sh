@@ -147,6 +147,7 @@ install_packages() {
     section "Installing mise..."
     curl -fsSL https://mise.run | sh 2>/dev/null
     export PATH="$HOME/.local/bin:$PATH"
+    echo "✓ mise installed"
   fi
 
   # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
@@ -374,7 +375,11 @@ install_optional_ai_tools() {
   fi
 }
 
-# tuiboard is optional: it is a terminal productivity & kanban board for planning tasks for people & agents 
+# tuiboard is optional: it is a terminal kanban and planner for people and agents
+#
+# The installed version comes from the tool itself via `tuiboard doctor --json`. There
+# is no package.json fallback: if doctor cannot report a version, the install
+# is treated as absent. This is dependant on jq.
 install_optional_tuiboard() {
   section "Optional tuiboard..."
 
@@ -387,18 +392,11 @@ install_optional_tuiboard() {
     return
   fi
 
-  local bun_root package_json installed latest
-  bun_root="$(dirname "$(bun pm bin -g 2>/dev/null)")"
-  # `dirname ""` prints ".", so treat that as no answer and fall back to Bun's
-  # documented default. BUN_INSTALL is exported by the Bun install step.
-  if [ -z "$bun_root" ] || [ "$bun_root" = "." ]; then
-    bun_root="${BUN_INSTALL:-$HOME/.bun}"
-  fi
-  package_json="$bun_root/install/global/node_modules/tuiboard/package.json"
-
+  local installed latest
   installed=""
-  if [ -r "$package_json" ] && command -v jq &>/dev/null; then
-    installed="$(jq -r '.version // empty' "$package_json" 2>/dev/null || true)"
+  if command -v tuiboard &>/dev/null; then
+    installed="$(tuiboard doctor --json 2>/dev/null \
+      | jq -r '.version // empty' 2>/dev/null || true)"
   fi
 
   latest=""
@@ -425,11 +423,14 @@ install_optional_tuiboard() {
   # Pin to the version just looked up when there is one, so the install cannot
   # race a fresh publish. Otherwise let Bun resolve the latest tag itself.
   if bun install -g "tuiboard@${latest:-latest}"; then
-    installed=""
-    if [ -r "$package_json" ] && command -v jq &>/dev/null; then
-      installed="$(jq -r '.version // empty' "$package_json" 2>/dev/null || true)"
+    if ! command -v tuiboard &>/dev/null || \
+       ! installed="$(tuiboard doctor --json 2>/dev/null \
+         | jq -r '.version // empty' 2>/dev/null)" || \
+       [ -z "$installed" ]; then
+      echo "Error: tuiboard was installed, but doctor did not report a version." >&2
+      return
     fi
-    echo "✓ tuiboard ${installed:-${latest:-installed}}"
+    echo "✓ tuiboard $installed"
   else
     echo "Error: failed to install tuiboard" >&2
   fi
