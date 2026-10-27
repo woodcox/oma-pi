@@ -263,10 +263,7 @@ bun_global_install() {
 
 # opencode treats every package declared in `plugins` as installed: it resolves
 # and caches it at startup, whether or not the CLI was ever installed. So the
-# config entry is the opt-in, not a side effect of copying the config. The
-# shipped opencode.json deliberately carries no plugins key; this patches the
-# copied file only after the user has said yes, and removes the entry again if
-# they decline.
+# config entry is the opt-in, not a side effect of copying the config. 
 set_opencode_quota_plugin() {
   local action="$1"
   local config="$HOME/.config/opencode/opencode.json"
