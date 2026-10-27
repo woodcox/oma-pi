@@ -15,7 +15,7 @@ detect_arch() {
 install_packages() {
   local core_pkgs=(
     build-essential openssh-server
-    fzf zoxide tmux btop jq
+    fzf zoxide btop jq
     gpg kitty-terminfo
     unzip fontconfig
     # bat backs the `ff`/`sff` fuzzy finders, parted + exfatprogs back

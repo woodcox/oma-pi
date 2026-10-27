@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Files**: [Yazi](https://github.com/sxyazi/yazi) as the interactive file manager
 - **Editor**: [MS Edit](https://github.com/microsoft/edit) installed from official GitHub release binaries as `~/.local/bin/msedit`, the default `$EDITOR`
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
-- **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, mise, tmux, btop, jq and kitty-terminfo
+- **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, mise, herdr, btop, jq and kitty-terminfo
 - **Optional AI tools**: opencode, claude-code, hermes-agent and [opencode-quota](https://github.com/slkiser/opencode-quota) for OpenCode Go usage limits
 - **Optional productivity tools**: [tuiboard](https://tuiboard.nazzareno.xyz/), a terminal kanban on plain markdown (installed with Bun)
 - **Networking**: SSH, tailscale
@@ -62,7 +62,8 @@ And you'll be offered to setup:
 > Security note: the installer adds the user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
 
 ## Commands
-See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/terminal) for relevant commands and [hotkeys](https://learn.omacom.io/4/the-omapi-manual/113/hotkeys) for using:
+See `omapi-help` for the command list and Herdr key bindings, and the
+[Herdr docs](https://herdr.dev/docs/) for the full manual. Oma-Pi provides:
 
  - `omapi-setup`: Git name and email and github cli
  - `omapi-refresh`: Reinstall Oma-pi with initial configs
@@ -74,11 +75,11 @@ See the [Omaterm manual](https://learn.omacom.io/2/the-omarchy-manual/106/termin
  - Hermes: alias `ha=hermes`
  - Docker: alias `d`
  - Lazydocker: alias `lzd`
- - Tmux alias: 
-      - `t=tmux attach || tmux new -s Work`
+ - Herdr: alias `t=herdr --session Work`
       - `ic=tdl c`
       - `ix=tdl cx`
       - `icx=tdl c cx`
+      - config: `~/.config/herdr/config.toml`
  - Github: alias `gh`
  - Git alias:   
       - `g=git`

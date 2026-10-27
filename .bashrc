@@ -1,2 +1,2 @@
 source ~/.config/shell/all
-[[ -z $TMUX ]] && t
+[[ -z ${HERDR_ENV:-} ]] && t

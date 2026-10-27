@@ -100,7 +100,7 @@ install_dots() {
   echo "✓ Configs"
 
   section "Configuring shell..."
-  # Tracked so later steps (tmux auto-start) patch the rc file this shell
+  # Tracked so later steps (Herdr auto-start) patch the rc file this shell
   # actually reads, rather than assuming bash.
   SHELL_RC="$HOME/.bashrc"
 
@@ -251,6 +251,31 @@ install_yazi_binary() {
   echo "✓ Yazi ${version}"
 }
 
+install_herdr_binary() {
+  section "Installing Herdr..."
+
+  local herdr_bin
+
+  herdr_bin="$(command -v herdr 2>/dev/null || true)"
+  [[ -n $herdr_bin ]] || herdr_bin="$HOME/.local/bin/herdr"
+
+  if [[ -x $herdr_bin ]]; then
+    echo "✓ Herdr already installed ($("$herdr_bin" --version 2>/dev/null | awk '{print $2}'))"
+    return 0
+  fi
+
+  # Herdr publishes per-architecture Linux binaries and its installer verifies
+  # the SHA-256 from https://herdr.dev/latest.json before installing. It is not
+  # in the Debian repositories, so there is no apt package to prefer.
+  if ! curl -fsSL https://herdr.dev/install.sh \
+    | PATH="$HOME/.local/bin:$PATH" HERDR_INSTALL_DIR="$HOME/.local/bin" sh; then
+    echo "Error: could not install Herdr" >&2
+    return 1
+  fi
+
+  echo "✓ Herdr"
+}
+
 install_fresh_binary() {
   section "Installing Fresh from GitHub releases..."
 
@@ -334,7 +359,7 @@ install_fresh_binary() {
 # and has no test coverage here, so a bad release taking the whole install run
 # down with it is a worse trade than asking. MS Edit does not get this
 # treatment: it is the default $EDITOR, and config/shell/aliases and the tds
-# tmux layout both invoke it by name, so a box that declined would have
+# Herdr layout both invoke it by name, so a box that declined would have
 # $EDITOR pointing at nothing.
 install_optional_editors() {
   section "Optional editors..."
@@ -372,20 +397,26 @@ install_configs() {
   echo "✓ Opencode config"
   echo "✓ Starship config"
 
-  if ! grep -q "if \[\[ -z \$TMUX \]\]" "$SHELL_RC" 2>/dev/null; then
+  if ! grep -qF 'if [[ -z ${HERDR_ENV:-} ]]; then' "$SHELL_RC" 2>/dev/null; then
     ensure_trailing_newline "$SHELL_RC"
-    cat >>"$SHELL_RC" <<'BASHRC_TMUX'
-if [[ -z $TMUX ]]; then
+    cat >>"$SHELL_RC" <<'BASHRC_HERDR'
+if [[ -z ${HERDR_ENV:-} ]]; then
   t
 else
-  if [[ -z "$(tmux showenv FASTFETCH_SHOWN 2>/dev/null || true)" ]]; then
-    tmux setenv FASTFETCH_SHOWN 1
+  # Herdr has no server-wide environment like `tmux setenv`, so a marker keyed
+  # on the session socket stands in for FASTFETCH_SHOWN. Named sessions get
+  # their own socket, and therefore their own first-pane banner.
+  _oma_fastfetch_marker="${XDG_RUNTIME_DIR:-/tmp}/oma-pi-fastfetch-$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | md5sum | cut -d' ' -f1)"
+  if [[ ! -e $_oma_fastfetch_marker ]]; then
+    mkdir -p "$(dirname "$_oma_fastfetch_marker")"
+    : >"$_oma_fastfetch_marker"
     fastfetch
   fi
+  unset _oma_fastfetch_marker
 fi
-BASHRC_TMUX
-    echo "✓ Tmux auto-start"
-    echo "✓ fastfetch on tmux attach"
+BASHRC_HERDR
+    echo "✓ Herdr auto-start"
+    echo "✓ fastfetch on first Herdr pane"
   fi
 }
 
@@ -491,6 +522,9 @@ run_installation() {
 
   # Yazi binary: the interactive file manager, plus its ya CLI
   install_yazi_binary
+
+  # Herdr: the terminal workspace manager that replaces tmux
+  install_herdr_binary
 
   # Configs and bins
   install_configs
