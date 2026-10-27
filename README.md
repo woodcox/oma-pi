@@ -118,7 +118,7 @@ Without the global install, `bunx --bun @slkiser/opencode-quota@latest show` doe
 also works while opencode is closed. In opencode `/quota` and the `/tokens_*` commands open the sidebar panel; the CLI above works without it,
 but reports whatever the cache last held. See
 [opencode-quota docs](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/external-integration.md)
-for futher info.
+for further info.
 
 ## Security hardening
 
