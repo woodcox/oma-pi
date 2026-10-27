@@ -350,12 +350,14 @@ install_optional_tuiboard() {
   # Pin to the version just looked up when there is one, so the install cannot
   # race a fresh publish. Otherwise let Bun resolve the latest tag itself.
   if bun install -g "tuiboard@${latest:-latest}"; then
-    installed=""
-    if command -v tuiboard &>/dev/null; then
-      installed="$(tuiboard doctor --json 2>/dev/null \
-        | jq -r '.version // empty' 2>/dev/null || true)"
+    if ! command -v tuiboard &>/dev/null || \
+       ! installed="$(tuiboard doctor --json 2>/dev/null \
+         | jq -r '.version // empty' 2>/dev/null)" || \
+       [ -z "$installed" ]; then
+      echo "Error: tuiboard was installed, but doctor did not report a version." >&2
+      return
     fi
-    echo "✓ tuiboard ${installed:-${latest:-installed}}"
+    echo "✓ tuiboard $installed"
   else
     echo "Error: failed to install tuiboard" >&2
   fi
