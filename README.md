@@ -80,6 +80,7 @@ See `omapi-help` for the command list and Herdr key bindings, and the
       - `ix=tdl cx`
       - `icx=tdl c cx`
       - config: `~/.config/herdr/config.toml`
+      - update: `herdr update`
  - Github: alias `gh`
  - Git alias:   
       - `g=git`
