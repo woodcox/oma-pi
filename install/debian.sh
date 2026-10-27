@@ -302,13 +302,11 @@ install_optional_ai_tools() {
   fi
 }
 
-# tuiboard is optional: it is a personal productivity TUI, not something every
-# Pi needs, and it brings its own dependency tree plus a native renderer.
+# tuiboard is optional: it is a terminal kanban and planner for people and agents
 #
-# A refresh should be quiet when the box is already current: compare the
-# installed package version with the one on the npm registry and skip if they
-# match. An outdated install is updated without asking, because the user has
-# already opted in; only a missing install gets a prompt.
+# The installed version comes from the tool itself via `tuiboard doctor --json`. There
+# is no package.json fallback: if doctor cannot report a version, the install
+# is treated as absent. This is dependant on jq.
 install_optional_tuiboard() {
   section "Optional tuiboard..."
 
@@ -321,18 +319,11 @@ install_optional_tuiboard() {
     return
   fi
 
-  local bun_root package_json installed latest
-  bun_root="$(dirname "$(bun pm bin -g 2>/dev/null)")"
-  # `dirname ""` prints ".", so treat that as no answer and fall back to Bun's
-  # documented default. BUN_INSTALL is exported by the Bun install step.
-  if [ -z "$bun_root" ] || [ "$bun_root" = "." ]; then
-    bun_root="${BUN_INSTALL:-$HOME/.bun}"
-  fi
-  package_json="$bun_root/install/global/node_modules/tuiboard/package.json"
-
+  local installed latest
   installed=""
-  if [ -r "$package_json" ] && command -v jq &>/dev/null; then
-    installed="$(jq -r '.version // empty' "$package_json" 2>/dev/null || true)"
+  if command -v tuiboard &>/dev/null; then
+    installed="$(tuiboard doctor --json 2>/dev/null \
+      | jq -r '.version // empty' 2>/dev/null || true)"
   fi
 
   latest=""
@@ -360,8 +351,9 @@ install_optional_tuiboard() {
   # race a fresh publish. Otherwise let Bun resolve the latest tag itself.
   if bun install -g "tuiboard@${latest:-latest}"; then
     installed=""
-    if [ -r "$package_json" ] && command -v jq &>/dev/null; then
-      installed="$(jq -r '.version // empty' "$package_json" 2>/dev/null || true)"
+    if command -v tuiboard &>/dev/null; then
+      installed="$(tuiboard doctor --json 2>/dev/null \
+        | jq -r '.version // empty' 2>/dev/null || true)"
     fi
     echo "✓ tuiboard ${installed:-${latest:-installed}}"
   else
