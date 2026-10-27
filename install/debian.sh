@@ -261,6 +261,58 @@ bun_global_install() {
   fi
 }
 
+# opencode treats every package declared in `plugins` as installed: it resolves
+# and caches it at startup, whether or not the CLI was ever installed. So the
+# config entry is the opt-in, not a side effect of copying the config. The
+# shipped opencode.json deliberately carries no plugins key; this patches the
+# copied file only after the user has said yes, and removes the entry again if
+# they decline.
+set_opencode_quota_plugin() {
+  local action="$1"
+  local config="$HOME/.config/opencode/opencode.json"
+  local pkg="@slkiser/opencode-quota"
+  local filter tmp
+
+  [[ -f $config ]] || return 0
+  if ! command -v jq &>/dev/null; then
+    echo "Warning: jq not found, cannot update $config" >&2
+    return 0
+  fi
+
+  case "$action" in
+    enable)
+      filter='.plugins = ((.plugins // []) | if index($pkg) then . else . + [$pkg] end)'
+      ;;
+    disable)
+      # Drop the key entirely once the list is empty, so the file goes back to
+      # the shape the installer ships.
+      filter='.plugins = ((.plugins // []) - [$pkg])
+              | if (.plugins | length) == 0 then del(.plugins) else . end'
+      ;;
+    *)
+      echo "Error: unknown action for $config: $action" >&2
+      return 0
+      ;;
+  esac
+
+  tmp="$(mktemp "${config}.XXXXXX")"
+  # mktemp creates 0600; keep the mode the copied config had so opencode (or a
+  # human) can still read it.
+  chmod --reference="$config" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+
+  # jq leaves nothing behind on a parse error, so only move the staged file
+  # over the live config when jq actually produced output.
+  if jq --arg pkg "$pkg" "$filter" "$config" >"$tmp"; then
+    mv "$tmp" "$config" || {
+      rm -f "$tmp"
+      echo "Error: could not replace $config" >&2
+    }
+  else
+    rm -f "$tmp"
+    echo "Error: $config is not valid JSON, leaving it unchanged" >&2
+  fi
+}
+
 install_optional_ai_tools() {
   section "Optional AI coding assistants..."
 
@@ -290,8 +342,14 @@ install_optional_ai_tools() {
   if command -v opencode &>/dev/null; then
     if command -v opencode-quota &>/dev/null; then
       echo "✓ opencode-quota already installed ($(command -v opencode-quota))"
+      set_opencode_quota_plugin enable
     elif gum confirm "Install opencode-quota (OpenCode Go usage limits)?" </dev/tty; then
       bun_global_install opencode-quota @slkiser/opencode-quota
+      set_opencode_quota_plugin enable
+    else
+      # Declining has to remove the entry too: opencode would otherwise fetch
+      # and load the declared package itself at startup.
+      set_opencode_quota_plugin disable
     fi
   fi
 
