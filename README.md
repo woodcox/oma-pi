@@ -14,10 +14,6 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
     `ListenStream=22`, the `Port` directive is ignored, and the script would
     report a port move that never happened. Those three releases are not
     supported.
-- Harden the RPi / VM by following: 
-  
-
-  - `omapi-harden` automates the hardening those three guides describe, 
 
 ## Install
 
