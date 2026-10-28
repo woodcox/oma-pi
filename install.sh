@@ -358,7 +358,7 @@ install_fresh_binary() {
 # Only Fresh is offered rather than installed outright. It is young (Dec 2024)
 # and has no test coverage here, so a bad release taking the whole install run
 # down with it is a worse trade than asking. MS Edit does not get this
-# treatment: it is the default $EDITOR, and config/shell/aliases and the tds
+# treatment: it is the default $EDITOR, and config/shell/aliases and the hds
 # Herdr layout both invoke it by name, so a box that declined would have
 # $EDITOR pointing at nothing.
 install_optional_editors() {

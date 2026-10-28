@@ -17,10 +17,10 @@ _herdr_run() {
 }
 
 # Create a Herdr dev layout with editor, ai, and terminal
-# Usage: tdl <c|cx|ha|other_ai> [<second_ai>]
-tdl() {
-  [[ -z ${1:-} ]] && { echo "Usage: tdl <c|cx|ha|other_ai> [<second_ai>]"; return 1; }
-  _herdr_require tdl || return 1
+# Usage: hdl <oc|cc|ha|other_ai> [<second_ai>]
+hdl() {
+  [[ -z ${1:-} ]] && { echo "Usage: hdl <oc|cc|ha|other_ai> [<second_ai>]"; return 1; }
+  _herdr_require hdl || return 1
 
   local current_dir="${PWD}"
   local editor_pane="$HERDR_PANE_ID"
@@ -46,12 +46,12 @@ tdl() {
 }
 
 # Create a Herdr dev square layout with editor, diff watch, terminal, and opencode
-# Usage: tds
-tds() {
-  [[ -n ${1:-} ]] && { echo "Usage: tds"; return 1; }
-  _herdr_require tds || return 1
+# Usage: hds
+hds() {
+  [[ -n ${1:-} ]] && { echo "Usage: hds"; return 1; }
+  _herdr_require hds || return 1
   if ! command -v hunk &>/dev/null; then
-    echo "tds needs 'hunk' (https://github.com/jesseduffield/hunk), which is not installed."
+    echo "hds needs 'hunk' (https://github.com/jesseduffield/hunk), which is not installed."
     return 1
   fi
 
@@ -70,11 +70,11 @@ tds() {
   _herdr_run "$opencode_pane" "opencode"
 }
 
-# Create multiple tdl tabs, one per subdirectory in the current directory
-# Usage: tdlm <c|cx|ha|other_ai> [<second_ai>]
-tdlm() {
-  [[ -z ${1:-} ]] && { echo "Usage: tdlm <c|cx|ha|other_ai> [<second_ai>]"; return 1; }
-  _herdr_require tdlm || return 1
+# Create multiple hdl tabs, one per subdirectory in the current directory
+# Usage: hdlm <oc|cc|ha|other_ai> [<second_ai>]
+hdlm() {
+  [[ -z ${1:-} ]] && { echo "Usage: hdlm <oc|cc|ha|other_ai> [<second_ai>]"; return 1; }
+  _herdr_require hdlm || return 1
 
   local ai="$1"
   local ai2="${2:-}"
@@ -91,22 +91,22 @@ tdlm() {
 
     if $first; then
       # Reuse the current tab for the first project
-      herdr pane run "$HERDR_PANE_ID" "cd '$dirpath' && tdl $ai $ai2" >/dev/null
+      herdr pane run "$HERDR_PANE_ID" "cd '$dirpath' && hdl $ai $ai2" >/dev/null
       first=false
     else
       root_pane=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" \
         --cwd "$dirpath" --label "$(basename "$dirpath")" --no-focus \
         | jq -r '.result.root_pane.pane_id')
-      herdr pane run "$root_pane" "tdl $ai $ai2" >/dev/null
+      herdr pane run "$root_pane" "hdl $ai $ai2" >/dev/null
     fi
   done
 }
 
 # Create a multi-pane swarm layout with the same command started in each pane (great for AI)
-# Usage: tsl <pane_count> <command>
-tsl() {
-  [[ -z ${1:-} || -z ${2:-} ]] && { echo "Usage: tsl <pane_count> <command>"; return 1; }
-  _herdr_require tsl || return 1
+# Usage: hsl <pane_count> <command>
+hsl() {
+  [[ -z ${1:-} || -z ${2:-} ]] && { echo "Usage: hsl <pane_count> <command>"; return 1; }
+  _herdr_require hsl || return 1
 
   local count="$1"
   local cmd="$2"

@@ -64,7 +64,7 @@ And you'll be offered to setup:
 ## Commands
 See `omapi-help` for the command list and Herdr key bindings, and the
 [Herdr docs](https://herdr.dev/docs/) for the full manual. Herdr replaces tmux:
-tabs are tmux windows, workspaces are tmux sessions, and `t` attaches to the
+tabs are tmux windows, workspaces are tmux sessions, and `h` attaches to the
 persistent `Work` session. Oma-Pi provides:
 
  - `omapi-setup`: Git name and email and github cli
@@ -72,15 +72,16 @@ persistent `Work` session. Oma-Pi provides:
  - `omapi-ssh`: Add SSH key for remote access
  - `omapi-harden`: One-time security hardening — run `omapi-harden --dry-run` first. See security hardening section for further details
 
- - [opencode](https://opencode.ai/): alias `c`
- - Claude: alias `cx=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
+ - [opencode](https://opencode.ai/): alias `oc`
+ - Claude: alias `cc=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
  - Hermes: alias `ha=hermes`
  - Docker: alias `d`
  - Lazydocker: alias `lzd`
- - Herdr: alias `t=herdr --session Work`
-      - `ic=tdl c`
-      - `ix=tdl cx`
-      - `icx=tdl c cx`
+ - Herdr: alias `h=herdr --session Work`
+      - `ic=hdl oc`
+      - `ix=hdl ha`
+      - `icx=hdl oc ha`
+      - layouts: `hdl`, `hdlm`, `hds`, `hsl`
       - config: `~/.config/herdr/config.toml`
       - update: `herdr update`
  - Github: alias `gh`
