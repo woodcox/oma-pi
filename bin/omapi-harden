@@ -1110,8 +1110,6 @@ KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 3
-# oma-pi runs Herdr, a terminal workspace manager, and tailscale sessions
-# side by side, so 2 (the value in the guides) is too tight to be usable.
 MaxSessions 5
 LoginGraceTime 30
 ClientAliveInterval 300

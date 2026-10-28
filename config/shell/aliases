@@ -51,15 +51,15 @@ alias ...='cd ../..'
 alias ....='cd ../../..'
 
 # Tools
-alias c='opencode'
-alias cx='printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions'
+alias oc='opencode'
+alias cc='printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions'
 alias ha='hermes'
 alias d='docker'
 alias r='rails'
-alias t='herdr --session Work'
-alias ic='tdl c'
-alias ix='tdl cx'
-alias icx='tdl c cx'
+alias h='herdr --session Work'
+alias ic='hdl oc'
+alias ix='hdl ha'
+alias icx='hdl oc ha'
 
 # Git
 alias g='git'
