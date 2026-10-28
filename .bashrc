@@ -1,2 +1,2 @@
 source ~/.config/shell/all
-[[ -z ${HERDR_ENV:-} ]] && t
+[[ -z ${HERDR_ENV:-} ]] && h
