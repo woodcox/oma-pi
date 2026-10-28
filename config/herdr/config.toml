@@ -8,50 +8,9 @@ onboarding = false
 # Follow the host terminal's ANSI palette, like the old tmux setup.
 name = "terminal"
 
-[keys]
-# tmux used Ctrl+Space as its prefix and Ctrl+B as a second prefix.
-prefix = ["ctrl+space", "ctrl+b"]
-
-# Config and help
-reload_config = "prefix+q"
-detach = "prefix+d"
-
-# Panes
-split_horizontal = ["prefix+h", "alt+enter"]
-split_vertical = ["prefix+v", "alt+shift+enter"]
-close_pane = ["prefix+x", "alt+esc"]
-zoom = "prefix+z"
-# Herdr defaults these to prefix+r and prefix+shift+p, which the tmux layout
-# needs for renaming tabs and switching workspaces.
-rename_pane = "prefix+alt+p"
-resize_mode = "prefix+alt+r"
-
-focus_pane_left = "ctrl+alt+left"
-focus_pane_right = "ctrl+alt+right"
-focus_pane_up = "ctrl+alt+up"
-focus_pane_down = "ctrl+alt+down"
-
-resize_pane_left = "ctrl+shift+alt+left"
-resize_pane_down = "ctrl+shift+alt+down"
-resize_pane_up = "ctrl+shift+alt+up"
-resize_pane_right = "ctrl+shift+alt+right"
-
-# Tabs (tmux windows)
-new_tab = "prefix+c"
-rename_tab = "prefix+r"
-close_tab = "prefix+k"
-previous_tab = ["prefix+p", "alt+left"]
-next_tab = ["prefix+n", "alt+right"]
-move_tab_previous = "alt+shift+left"
-move_tab_next = "alt+shift+right"
-switch_tab = "alt+1..9"
-
-# Workspaces (tmux sessions)
-new_workspace = "prefix+shift+c"
-rename_workspace = "prefix+shift+r"
-close_workspace = "prefix+shift+k"
-previous_workspace = ["prefix+shift+p", "alt+up"]
-next_workspace = ["prefix+shift+n", "alt+down"]
+# Keybindings intentionally use Herdr's defaults. The Oma-Pi layout helpers
+# (hdl, hds, hdlm, hsl) are shell functions, not Herdr keybindings; run them
+# from a pane and see `omapi-help` for their usage.
 
 [ui]
 mouse_capture = true
