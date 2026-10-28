@@ -401,7 +401,7 @@ install_configs() {
     ensure_trailing_newline "$SHELL_RC"
     cat >>"$SHELL_RC" <<'BASHRC_HERDR'
 if [[ -z ${HERDR_ENV:-} ]]; then
-  t
+  h
 else
   # Herdr has no server-wide environment like `tmux setenv`, so a marker keyed
   # on the session socket stands in for FASTFETCH_SHOWN. Named sessions get
