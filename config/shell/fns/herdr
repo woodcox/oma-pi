@@ -80,7 +80,7 @@ hdlm() {
   local ai2="${2:-}"
   local base_dir="$PWD"
   local first=true
-  local dir dirpath root_pane
+  local dir dirpath quoted_dirpath root_pane
 
   # Name the workspace after the base directory
   herdr workspace rename "$HERDR_WORKSPACE_ID" "$(basename "$base_dir")" >/dev/null
@@ -88,10 +88,11 @@ hdlm() {
   for dir in "$base_dir"/*/; do
     [[ -d $dir ]] || continue
     dirpath="${dir%/}"
+    printf -v quoted_dirpath '%q' "$dirpath"
 
     if $first; then
       # Reuse the current tab for the first project
-      herdr pane run "$HERDR_PANE_ID" "cd '$dirpath' && hdl $ai $ai2" >/dev/null
+      herdr pane run "$HERDR_PANE_ID" "cd $quoted_dirpath && hdl $ai $ai2" >/dev/null
       first=false
     else
       root_pane=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" \
@@ -106,6 +107,11 @@ hdlm() {
 # Usage: hsl <pane_count> <command>
 hsl() {
   [[ -z ${1:-} || -z ${2:-} ]] && { echo "Usage: hsl <pane_count> <command>"; return 1; }
+  if [[ ! $1 =~ ^[0-9]+$ ]] || ((10#$1 < 1)); then
+    echo "hsl: pane_count must be a positive integer" >&2
+    echo "Usage: hsl <pane_count> <command>" >&2
+    return 1
+  fi
   _herdr_require hsl || return 1
 
   local count="$1"
@@ -113,7 +119,7 @@ hsl() {
   local current_dir="${PWD}"
   local first_pane="$HERDR_PANE_ID"
   local new_pane ratio
-  local remaining=$((count - 1))
+  local remaining=$((10#$count - 1))
 
   herdr tab rename "$HERDR_TAB_ID" "$(basename "$current_dir")" >/dev/null
 
