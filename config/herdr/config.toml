@@ -5,8 +5,7 @@
 onboarding = false
 
 [theme]
-# Follow the host terminal's ANSI palette, like the old tmux setup.
-name = "terminal"
+name = "catppuccin"
 
 # Keybindings intentionally use Herdr's defaults. The Oma-Pi layout helpers
 # (hdl, hds, hdlm, hsl) are shell functions, not Herdr keybindings; run them
