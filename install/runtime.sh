@@ -2,7 +2,7 @@
 # Language runtimes, version managers, and JS-based terminal tools.
 #
 # Sourced by install.sh after install/debian.sh. Bun is installed first because
-# both the optional AI tools (install/ai-tools.sh) and tuiboard use it.
+# the optional AI tools, tuiboard, and hunk all use it.
 
 # Bun runtime
 #
@@ -84,5 +84,64 @@ install_optional_tuiboard() {
     echo "✓ tuiboard $installed"
   else
     echo "Error: failed to install tuiboard" >&2
+  fi
+}
+
+# hunk is optional: it is a terminal diff viewer for reviewing changes.
+#
+# The npm package is `hunkdiff` (the plain `hunk` package is unrelated), and
+# it exposes the `hunk` executable. `hunk --version` prints a bare version,
+# so no parsing is needed.
+install_optional_hunk() {
+  section "Optional hunk..."
+
+  if ! command -v bun &>/dev/null; then
+    echo "Skipping hunk (bun not found)."
+    return
+  fi
+  if ! command -v gum &>/dev/null; then
+    echo "Skipping hunk (gum not found)."
+    return
+  fi
+
+  local installed latest
+  installed=""
+  if command -v hunk &>/dev/null; then
+    installed="$(hunk --version 2>/dev/null | head -n 1 || true)"
+  fi
+
+  latest=""
+  if command -v curl &>/dev/null && command -v jq &>/dev/null; then
+    latest="$(curl -fsSL --connect-timeout 10 --max-time 30 \
+      https://registry.npmjs.org/hunkdiff/latest 2>/dev/null \
+      | jq -r '.version // empty' 2>/dev/null || true)"
+  fi
+
+  if [ -n "$installed" ]; then
+    if [ -n "$latest" ] && [ "$installed" = "$latest" ]; then
+      echo "✓ hunk $installed already up to date"
+      return
+    fi
+    if [ -z "$latest" ]; then
+      echo "✓ hunk $installed already installed (could not check for updates)"
+      return
+    fi
+    echo "Updating hunk $installed -> $latest..."
+  elif ! gum confirm "Install hunk (terminal diff viewer)?" </dev/tty; then
+    return
+  fi
+
+  # Pin to the version just looked up when there is one, so the install cannot
+  # race a fresh publish. Otherwise let Bun resolve the latest tag itself.
+  if bun install -g "hunkdiff@${latest:-latest}"; then
+    if ! command -v hunk &>/dev/null || \
+       ! installed="$(hunk --version 2>/dev/null | head -n 1)" || \
+       [ -z "$installed" ]; then
+      echo "Error: hunk was installed, but --version did not report one." >&2
+      return
+    fi
+    echo "✓ hunk $installed"
+  else
+    echo "Error: failed to install hunk" >&2
   fi
 }

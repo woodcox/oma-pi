@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | ba
 - **Optional editor**: [Fresh](https://getfresh.dev) (`~/.local/bin/fresh`)
 - **Dev tools**: bun, docker, git, github-cli, lazygit, lazydocker, mise, herdr, btop, jq and kitty-terminfo
 - **Optional AI tools**: opencode, claude-code, hermes-agent and [opencode-quota](https://github.com/slkiser/opencode-quota) for OpenCode Go usage limits
-- **Optional productivity tools**: [tuiboard](https://tuiboard.nazzareno.xyz/), a terminal kanban on plain markdown (installed with Bun)
+- **Optional productivity tools**: [tuiboard](https://tuiboard.nazzareno.xyz/), a terminal kanban on plain markdown, and [hunk](https://hunk.dev/), a terminal diff viewer (both installed with Bun)
 - **Networking**: SSH, tailscale
 - **Git**: Interactive config for user name/email, helpful aliases
 
@@ -51,6 +51,7 @@ And you'll be offered to setup:
 - Optional AI assistants (opencode, claude-code and hermes-agent)
 - Optional opencode-quota (OpenCode Go usage limits, offered when opencode is installed)
 - Optional tuiboard (terminal kanban on markdown)
+- Optional hunk (terminal diff viewer)
 
 
 > Warning - Before you install Docker, make sure you consider the security implications and firewall incompatibilities of ufw on https://docs.docker.com/engine/install/debian/#firewall-limitations
@@ -97,6 +98,7 @@ persistent `Work` session. Oma-Pi provides:
    the shell to the last directory on exit (`Q` quits without changing)
  - [tldr](https://tldr.sh/)
  - [tuiboard](https://tuiboard.nazzareno.xyz/): alias `tb`
+ - [hunk](https://hunk.dev/): review diffs with `hunk diff`
 
 ### opencode-quota
 
