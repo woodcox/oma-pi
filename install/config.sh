@@ -94,4 +94,5 @@ install_bins() {
   echo "✓ omapi-refresh"
   echo "✓ omapi-setup"
   echo "✓ omapi-help"
+  echo "✓ omapi-harden"
 }
