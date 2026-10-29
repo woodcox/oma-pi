@@ -3,7 +3,7 @@
 #
 # Managed binaries fall into two groups:
 #
-#   Mandatory (MS Edit, Yazi, Herdr):
+#   Mandatory (MS Edit, Yazi, Herdr, lazygit):
 #     1. If already installed, fetch the latest release and compare versions.
 #        When they match, skip the install.
 #     2. If installed but outdated, install the newer release.
@@ -263,6 +263,67 @@ install_fresh_binary() {
 
   rm -rf "$tmpdir"
   echo "✓ Fresh ${version}"
+}
+
+install_lazygit_binary() {
+  section "Installing lazygit from GitHub releases..."
+
+  local arch
+  local current_version
+  local version
+  local asset
+  local tmpdir
+
+  arch="$(detect_arch)"
+  case "$arch" in
+    aarch64) arch="arm64"  ;;
+    x86_64)  arch="x86_64" ;;
+    *)
+      echo "Error: unsupported architecture for the lazygit package" >&2
+      return 1
+      ;;
+  esac
+
+  version="$(github_latest_tag jesseduffield/lazygit)" || {
+    echo "Error: could not determine the latest lazygit release (GitHub API unreachable or rate limited)" >&2
+    return 1
+  }
+  version="${version#v}"   # release tag is v0.x.y, filenames are not
+
+  if command -v lazygit &>/dev/null; then
+    current_version="$(lazygit --version 2>/dev/null | sed -n 's/.*version=\([^, ]*\).*/\1/p')"
+    if [ "$current_version" = "$version" ]; then
+      echo "✓ lazygit ${version} already installed"
+      return 0
+    fi
+    echo "lazygit ${current_version:-unknown} installed; ${version} available - updating..."
+  fi
+
+  asset="lazygit_${version}_Linux_${arch}.tar.gz"
+  tmpdir="$(mktemp -d)"
+
+  curl -fL "https://github.com/jesseduffield/lazygit/releases/download/v${version}/${asset}" -o "$tmpdir/lazygit.tar.gz" || {
+    echo "Error: could not download lazygit ${version}" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
+  tar -xzf "$tmpdir/lazygit.tar.gz" -C "$tmpdir" lazygit || {
+    echo "Error: could not extract lazygit ${version}" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  # Keep lazygit system-wide, where earlier installs put it. Installing to
+  # ~/.local/bin while an older /usr/local/bin/lazygit exists would leave the
+  # old copy first on PATH and the update would appear not to take effect.
+  sudo install -m 0755 "$tmpdir/lazygit" /usr/local/bin/lazygit || {
+    echo "Error: could not install lazygit to /usr/local/bin" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  rm -rf "$tmpdir"
+  echo "✓ lazygit ${version}"
 }
 
 # Fresh is offered rather than installed outright. It is young (Dec 2024) and

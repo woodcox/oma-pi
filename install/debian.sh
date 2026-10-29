@@ -99,31 +99,6 @@ install_packages() {
     curl -sS https://starship.rs/install.sh | sh -s -- --yes
   fi
 
-  # lazygit (not in Ubuntu repos)
-  if ! command -v lazygit &>/dev/null; then
-    section "Installing lazygit..."
-    local LAZYGIT_VERSION
-    LAZYGIT_VERSION="$(github_latest_tag jesseduffield/lazygit)" || {
-      echo "Error: could not determine the latest lazygit release (GitHub API unreachable or rate limited)" >&2
-      return 1
-    }
-    LAZYGIT_VERSION="${LAZYGIT_VERSION#v}"   # release tag is v0.x.y, filenames are not
-
-    # lazygit uses "arm64" not "aarch64" in its release filenames
-    local ARCH LG_ARCH
-    ARCH="$(detect_arch)"
-    case "$ARCH" in
-      aarch64) LG_ARCH="arm64"  ;;
-      x86_64)  LG_ARCH="x86_64" ;;
-    esac
-
-    curl -Lo /tmp/lazygit.tar.gz \
-      "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_${LG_ARCH}.tar.gz"
-    tar xf /tmp/lazygit.tar.gz -C /tmp lazygit
-    sudo install /tmp/lazygit /usr/local/bin/
-    rm -f /tmp/lazygit.tar.gz /tmp/lazygit
-  fi
-
   # lazydocker (not in Ubuntu repos)
   if ! command -v lazydocker &>/dev/null; then
     section "Installing lazydocker..."
@@ -140,14 +115,6 @@ install_packages() {
       | sudo tee /etc/apt/sources.list.d/charm.list
     sudo apt update
     sudo apt install -y gum
-  fi
-
-  # mise (not in Ubuntu repos)
-  if ! command -v mise &>/dev/null; then
-    section "Installing mise..."
-    curl -fsSL https://mise.run | sh 2>/dev/null
-    export PATH="$HOME/.local/bin:$PATH"
-    echo "✓ mise installed"
   fi
 
   # fastfetch (not in Debian Bookworm repos; fetch .deb directly for aarch64)
