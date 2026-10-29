@@ -140,7 +140,7 @@ run_installation() {
   # OS-specific package installation
   install_packages
 
-  # Bun runtime, needed by the AI tools and tuiboard
+  # Bun runtime, needed by the AI tools, tuiboard, and hunk
   install_bun
 
   # mise: language/tool version manager
@@ -176,6 +176,7 @@ run_installation() {
   # Optional tools
   install_optional_ai_tools
   install_optional_tuiboard
+  install_optional_hunk
 
   # Setup Docker group with optional root level access
   install_docker
