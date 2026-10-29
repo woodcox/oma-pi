@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# JavaScript runtime and JS-based terminal tools.
+# Language runtimes, version managers, and JS-based terminal tools.
 #
 # Sourced by install.sh after install/debian.sh. Bun is installed first because
 # both the optional AI tools (install/ai-tools.sh) and tuiboard use it.
@@ -13,6 +13,16 @@ install_bun() {
   if ! command -v bun &>/dev/null; then
     section "Installing Bun..."
     curl -fsSL https://bun.sh/install | bash
+  fi
+}
+
+# mise (not in Ubuntu repos)
+install_mise() {
+  if ! command -v mise &>/dev/null; then
+    section "Installing mise..."
+    curl -fsSL https://mise.run | sh 2>/dev/null
+    export PATH="$HOME/.local/bin:$PATH"
+    echo "✓ mise installed"
   fi
 }
 

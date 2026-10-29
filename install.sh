@@ -143,6 +143,9 @@ run_installation() {
   # Bun runtime, needed by the AI tools and tuiboard
   install_bun
 
+  # mise: language/tool version manager
+  install_mise
+
   # Before any config copy, so a previous identity can be recovered from the
   # managed file and future ones have somewhere durable to live.
   ensure_git_config
@@ -158,6 +161,9 @@ run_installation() {
 
   # Herdr: the terminal workspace manager that replaces tmux
   install_herdr_binary
+
+  # lazygit: the Git TUI
+  install_lazygit_binary
 
   # Configs and bins
   install_configs
@@ -212,7 +218,7 @@ else
 fi
 
 source "$INSTALLER_DIR/install/docker.sh"
-source "$INSTALLER_DIR/install/js-tools.sh"
+source "$INSTALLER_DIR/install/runtime.sh"
 source "$INSTALLER_DIR/install/config.sh"
 source "$INSTALLER_DIR/install/binary.sh"
 source "$INSTALLER_DIR/install/ai-tools.sh"
