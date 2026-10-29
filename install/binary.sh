@@ -313,11 +313,9 @@ install_lazygit_binary() {
     return 1
   }
 
-  # Keep lazygit system-wide, where earlier installs put it. Installing to
-  # ~/.local/bin while an older /usr/local/bin/lazygit exists would leave the
-  # old copy first on PATH and the update would appear not to take effect.
-  sudo install -m 0755 "$tmpdir/lazygit" /usr/local/bin/lazygit || {
-    echo "Error: could not install lazygit to /usr/local/bin" >&2
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$tmpdir/lazygit" "$HOME/.local/bin/lazygit" || {
+    echo "Error: could not install lazygit to $HOME/.local/bin" >&2
     rm -rf "$tmpdir"
     return 1
   }
