@@ -129,263 +129,6 @@ EOF_BASH
   esac
 }
 
-install_msedit_binary() {
-  section "Installing MS Edit from GitHub releases..."
-
-  local arch
-  local current_version
-  local version
-  local asset
-  local tmpdir
-
-  # detect_arch already returns the names these release assets use, so no
-  # translation layer is needed here the way fastfetch and Helix needed one.
-  # It exits inside the command substitution for an unsupported machine, which
-  # leaves arch empty rather than failing, so reject that explicitly.
-  arch="$(detect_arch)"
-  case "$arch" in
-    aarch64|x86_64) ;;
-    *)
-      echo "Error: unsupported architecture for the MS Edit package" >&2
-      return 1
-      ;;
-  esac
-
-  version="$(github_latest_tag microsoft/edit)" || {
-    echo "Error: could not determine the latest MS Edit release (GitHub API unreachable or rate limited)" >&2
-    return 1
-  }
-  version="${version#v}"   # release tag is v2.0.0, asset filenames are not
-
-  if command -v msedit &>/dev/null; then
-    current_version="$(msedit --version 2>/dev/null | awk 'NR==1{print $NF}')"
-    if [ "$current_version" = "$version" ]; then
-      echo "✓ MS Edit ${version} already installed"
-      return 0
-    fi
-  fi
-
-  asset="edit-${version}-${arch}-linux-gnu.tar.gz"
-  tmpdir="$(mktemp -d)"
-
-  curl -fL "https://github.com/microsoft/edit/releases/download/v${version}/${asset}" -o "$tmpdir/msedit.tar.gz"
-  tar -xzf "$tmpdir/msedit.tar.gz" -C "$tmpdir"
-
-  # The release ships a single bare binary named `edit`, which would shadow
-  # the `edit(1)` line editor every Debian install already has. Install it
-  # under the name the project uses for it, as its own README and Homebrew
-  # formula do.
-  mkdir -p "$HOME/.local/bin"
-  install -m 0755 "$tmpdir/edit" "$HOME/.local/bin/msedit"
-
-  rm -rf "$tmpdir"
-  echo "✓ MS Edit ${version} (as 'msedit')"
-}
-
-install_yazi_binary() {
-  section "Installing Yazi from GitHub releases..."
-
-  local arch
-  local current_version
-  local version
-  local dir
-  local tmpdir
-  local yazi_bin
-
-  arch="$(detect_arch)"
-  case "$arch" in
-    aarch64|x86_64) ;;
-    *)
-      echo "Error: unsupported architecture for the Yazi package" >&2
-      return 1
-      ;;
-  esac
-
-  version="$(github_latest_tag sxyazi/yazi)" || {
-    echo "Error: could not determine the latest Yazi release (GitHub API unreachable or rate limited)" >&2
-    return 1
-  }
-  version="${version#v}"
-
-  if command -v yazi &>/dev/null; then
-    yazi_bin="$(command -v yazi)"
-  else
-    yazi_bin="$HOME/.local/bin/yazi"
-  fi
-  if [ -x "$yazi_bin" ]; then
-    current_version="$("$yazi_bin" --version 2>/dev/null | awk '/Version:/{print $2; exit}')"
-    if [ "$current_version" = "$version" ]; then
-      echo "✓ Yazi ${version} already installed"
-      return 0
-    fi
-  fi
-
-  # The GNU build requires glibc 2.39; Raspberry Pi OS bookworm still ships
-  # 2.36, so that asset cannot even start there. The musl build is statically
-  # linked and runs on every release this installer supports.
-  dir="yazi-${arch}-unknown-linux-musl"
-  tmpdir="$(mktemp -d)"
-
-  if ! curl -fL "https://github.com/sxyazi/yazi/releases/download/v${version}/${dir}.zip" \
-       -o "$tmpdir/yazi.zip"; then
-    echo "Error: could not download Yazi ${version}" >&2
-    rm -rf "$tmpdir"
-    return 1
-  fi
-  if ! unzip -q "$tmpdir/yazi.zip" -d "$tmpdir"; then
-    echo "Error: could not extract Yazi ${version}" >&2
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  # Both binaries are installed: yazi is the TUI and ya is its CLI companion,
-  # which the release ships and the shell completions expect.
-  mkdir -p "$HOME/.local/bin"
-  if ! install -m 0755 "$tmpdir/$dir/yazi" "$tmpdir/$dir/ya" "$HOME/.local/bin/"; then
-    echo "Error: could not install Yazi to $HOME/.local/bin" >&2
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  rm -rf "$tmpdir"
-  echo "✓ Yazi ${version}"
-}
-
-install_herdr_binary() {
-  section "Installing Herdr..."
-
-  local herdr_bin
-
-  herdr_bin="$(command -v herdr 2>/dev/null || true)"
-  [[ -n $herdr_bin ]] || herdr_bin="$HOME/.local/bin/herdr"
-
-  if [[ -x $herdr_bin ]]; then
-    echo "✓ Herdr already installed ($("$herdr_bin" --version 2>/dev/null | awk '{print $2}'))"
-    return 0
-  fi
-
-  # Herdr publishes per-architecture Linux binaries and its installer verifies
-  # the SHA-256 from https://herdr.dev/latest.json before installing. It is not
-  # in the Debian repositories, so there is no apt package to prefer.
-  if ! curl -fsSL https://herdr.dev/install.sh \
-    | PATH="$HOME/.local/bin:$PATH" HERDR_INSTALL_DIR="$HOME/.local/bin" sh; then
-    echo "Error: could not install Herdr" >&2
-    return 1
-  fi
-
-  echo "✓ Herdr"
-}
-
-install_fresh_binary() {
-  section "Installing Fresh from GitHub releases..."
-
-  local arch
-  local current_version
-  local version
-  local asset
-  local tmpdir
-  local subdir
-
-  # Same reason as MS Edit: catch detect_arch's in-subshell exit, which would
-  # otherwise produce a download URL with an empty architecture in it.
-  arch="$(detect_arch)"
-  case "$arch" in
-    aarch64|x86_64) ;;
-    *)
-      echo "Error: unsupported architecture for the Fresh package" >&2
-      return 1
-      ;;
-  esac
-
-  version="$(github_latest_tag sinelaw/fresh)" || {
-    echo "Error: could not determine the latest Fresh release (GitHub API unreachable or rate limited)" >&2
-    return 1
-  }
-  version="${version#v}"
-
-  if command -v fresh &>/dev/null; then
-    current_version="$(fresh --version 2>/dev/null | awk 'NR==1{print $NF}')"
-    if [ "$current_version" = "$version" ]; then
-      echo "✓ Fresh ${version} already installed"
-      return 0
-    fi
-  fi
-
-  # The musl build is statically linked, so it carries no glibc floor. The gnu
-  # build is about the same size but needs glibc 2.30+, which is a floor this
-  # repo should not be quietly assuming given it supports bookworm and Ubuntu.
-  # Unlike the .deb assets, the tarballs carry no version in the filename, so
-  # the name is fixed apart from the architecture.
-  subdir="fresh-editor-${arch}-unknown-linux-musl"
-
-  # Fresh publishes the same target triple as both .tar.xz and .tar.gz. tar -xJf
-  # shells out to xz, so on a box that never installed xz-utils the extraction
-  # died after the download had already succeeded, and nothing in core_pkgs
-  # requires xz. Pick the gzip asset when xz is missing; the payload is the
-  # same static binary either way.
-  if command -v xz &>/dev/null; then
-    ext="tar.xz"
-  else
-    ext="tar.gz"
-  fi
-  asset="${subdir}.${ext}"
-  tmpdir="$(mktemp -d)"
-
-  curl -fL "https://github.com/sinelaw/fresh/releases/download/v${version}/${asset}" -o "$tmpdir/fresh.${ext}" || {
-    echo "Error: could not download Fresh ${version} from ${asset}" >&2
-    rm -rf "$tmpdir"
-    return 1
-  }
-  # The binary sits one level down inside a directory named after the target
-  # triple, so pull just it rather than unpacking ~40MB of icons next to it.
-  tar -xf "$tmpdir/fresh.${ext}" -C "$tmpdir" --strip-components=1 "${subdir}/fresh" || {
-    echo "Error: could not extract ${asset}" >&2
-    rm -rf "$tmpdir"
-    return 1
-  }
-
-  mkdir -p "$HOME/.local/bin"
-  install -m 0755 "$tmpdir/fresh" "$HOME/.local/bin/fresh" || {
-    echo "Error: could not install fresh to $HOME/.local/bin" >&2
-    rm -rf "$tmpdir"
-    return 1
-  }
-
-  rm -rf "$tmpdir"
-  echo "✓ Fresh ${version}"
-}
-
-# Only Fresh is offered rather than installed outright. It is young (Dec 2024)
-# and has no test coverage here, so a bad release taking the whole install run
-# down with it is a worse trade than asking. MS Edit does not get this
-# treatment: it is the default $EDITOR, and config/shell/aliases and the hds
-# Herdr layout both invoke it by name, so a box that declined would have
-# $EDITOR pointing at nothing.
-install_optional_editors() {
-  section "Optional editors..."
-
-  if ! command -v gum &>/dev/null; then
-    echo "Skipping Fresh (gum not found)."
-    return
-  fi
-
-  # Do not ask about an editor the box already has, for the same reason the
-  # AI tools check first. install_fresh_binary still compares versions and
-  # upgrades in place when it is called, so this skips the question, not that
-  # path: a box that wants the newer release can remove the binary and re-run.
-  if command -v fresh &>/dev/null; then
-    echo "✓ Fresh already installed ($(fresh --version 2>/dev/null | awk 'NR==1{print $NF}'))"
-    return
-  fi
-
-  if gum confirm "Install Fresh (terminal IDE)?" </dev/tty; then
-    # Called on the left of `||` because the failure is meant to be survivable.
-    # That also means `set -e` is disabled for the whole of install_fresh_binary,
-    # so the checks inside it are explicit rather than left to errexit.
-    install_fresh_binary || echo "Error: Fresh install failed, continuing" >&2
-  fi
-}
-
 install_configs() {
   section "Installing configs..."
   mkdir -p "$HOME/.config"
@@ -462,27 +205,6 @@ interactive_setup() {
   fi
 }
 
-configure_docker_access() {
-  section "Docker user access..."
-
-  if groups | grep -q docker; then
-    echo "✓ $USER is already in docker group"
-    return
-  fi
-
-  if gum confirm "Allow Docker without sudo by adding $USER to the docker group - this may impact the security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface)" </dev/tty; then
-    if command -v usermod &>/dev/null; then
-      sudo usermod -aG docker "$USER"
-    else
-      sudo adduser "$USER" docker
-    fi
-    echo "✓ Added $USER to docker group (log out/in to apply)"
-  else
-    echo "✓ Keeping Docker usage with sudo"
-  fi
-}
-
-
 finish() {
   section "Almost Finished!"
 
@@ -509,6 +231,9 @@ run_installation() {
 
   # OS-specific package installation
   install_packages
+
+  # Bun runtime, needed by the AI tools and tuiboard
+  install_bun
 
   # Before any config copy, so a previous identity can be recovered from the
   # managed file and future ones have somewhere durable to live.
@@ -577,5 +302,10 @@ else
   echo "Oma-Pi only supports Debian based OS such as Raspberry Pi OS, Debian and Ubuntu"
   exit 1
 fi
+
+source "$INSTALLER_DIR/install/docker.sh"
+source "$INSTALLER_DIR/install/js-tools.sh"
+source "$INSTALLER_DIR/install/install-binary.sh"
+source "$INSTALLER_DIR/install/ai-tools.sh"
 
 run_installation
