@@ -305,7 +305,7 @@ fi
 
 source "$INSTALLER_DIR/install/docker.sh"
 source "$INSTALLER_DIR/install/js-tools.sh"
-source "$INSTALLER_DIR/install/install-binary.sh"
+source "$INSTALLER_DIR/install/binary.sh"
 source "$INSTALLER_DIR/install/ai-tools.sh"
 
 run_installation
