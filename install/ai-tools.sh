@@ -22,12 +22,12 @@ bun_global_install() {
 # One entry per install: "<github-owner/repo>|<skill-name>". Use "*" as the
 # skill name to install every skill the repo ships.
 # Add skills here:
-===================================================
+# ===================================================
 AI_SKILLS=(
   "modem-dev/hunk|hunk-review"
   "mattpocock/skills|*"
 )
-===================================================
+# ===================================================
 
 # opencode treats every package declared in `plugins` as installed: it resolves
 # and caches it at startup, whether or not the CLI was ever installed. So the
