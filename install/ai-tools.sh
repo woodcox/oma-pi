@@ -19,6 +19,16 @@ bun_global_install() {
   fi
 }
 
+# One entry per install: "<github-owner/repo>|<skill-name>". Use "*" as the
+# skill name to install every skill the repo ships.
+# Add skills here:
+===================================================
+AI_SKILLS=(
+  "modem-dev/hunk|hunk-review"
+  "mattpocock/skills|*"
+)
+===================================================
+
 # opencode treats every package declared in `plugins` as installed: it resolves
 # and caches it at startup, whether or not the CLI was ever installed. So the
 # config entry is the opt-in, not a side effect of copying the config.
@@ -68,6 +78,125 @@ set_opencode_quota_plugin() {
   fi
 }
 
+# Hermes does not scan ~/.agents/skills on its own. Listing it under
+# skills.external_dirs in config.yaml is what makes the skills CLI's global
+# installs visible to it. Idempotent, and bails out (without touching the
+# file) on YAML shapes it does not understand, such as inline `skills: {}`.
+set_hermes_external_skills_dir() {
+  local config="$HOME/.hermes/config.yaml"
+  local entry="~/.agents/skills"
+  local tmp
+
+  if [[ ! -f $config ]]; then
+    echo "Note: $config not found; run Hermes once, then re-run this installer to link skills." >&2
+    return 0
+  fi
+
+  if grep -qE '^[[:space:]]+-[[:space:]]+["'\'']?(~|\$HOME|/[^[:space:]]+)/\.agents/skills["'\'']?[[:space:]]*$' "$config"; then
+    echo "✓ Hermes already reads ~/.agents/skills"
+    return 0
+  fi
+
+  if grep -qE '^skills:' "$config" && ! grep -qE '^skills:[[:space:]]*(#.*)?$' "$config"; then
+    echo "Warning: unsupported 'skills:' layout in $config; add '$entry' to skills.external_dirs by hand" >&2
+    return 0
+  fi
+  if grep -qE '^[[:space:]]+external_dirs:[[:space:]]*[^[:space:]#]' "$config"; then
+    echo "Warning: inline external_dirs in $config; add '$entry' by hand" >&2
+    return 0
+  fi
+
+  tmp="$(mktemp "${config}.XXXXXX")"
+  chmod --reference="$config" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+
+  if awk -v entry="$entry" '
+    /^skills:[[:space:]]*(#.*)?$/ { print; in_skills = 1; seen = 1; next }
+    in_skills && /^[^[:space:]#]/ {
+      # Reached the next top-level key without finding external_dirs.
+      if (!done) { print "  external_dirs:"; print "    - " entry; done = 1 }
+      in_skills = 0
+    }
+    in_skills && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
+      print; print "    - " entry; done = 1; next
+    }
+    { print }
+    END {
+      if (!seen) {
+        print "skills:"; print "  external_dirs:"; print "    - " entry
+      } else if (in_skills && !done) {
+        print "  external_dirs:"; print "    - " entry
+      }
+    }
+  ' "$config" >"$tmp"; then
+    mv "$tmp" "$config" || {
+      rm -f "$tmp"
+      echo "Error: could not replace $config" >&2
+      return 1
+    }
+    echo "✓ added ~/.agents/skills to Hermes skills.external_dirs"
+  else
+    rm -f "$tmp"
+    echo "Error: failed to update $config" >&2
+    return 1
+  fi
+}
+
+
+# True if at least one entry still needs installing. A "*" entry cannot be
+# checked on disk, so it always counts as pending.
+ai_skills_pending() {
+  local entry skill
+  for entry in "${AI_SKILLS[@]}"; do
+    skill="${entry#*|}"
+    [[ $skill == "*" || ! -d $HOME/.agents/skills/$skill ]] && return 0
+  done
+  return 1
+}
+
+# True if the Claude Code CLI is on the box. The package is claude-code, but
+# its bin is `claude`, so check both names.
+have_claude_code() {
+  command -v claude &>/dev/null || command -v claude-code &>/dev/null
+}
+
+have_hermes() {
+  command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null
+}
+
+# The skills CLI installs each global skill once into ~/.agents/skills and
+# links it into every agent named with -a (opencode, claude-code). Hermes has
+# no CLI target, so it reads ~/.agents/skills via skills.external_dirs.
+install_ai_skills() {
+  local entry source skill failed=0
+  local -a cmd agent_args=()
+
+  command -v opencode &>/dev/null && agent_args+=(-a opencode)
+  have_claude_code && agent_args+=(-a claude-code)
+
+  for entry in "${AI_SKILLS[@]}"; do
+    source="${entry%%|*}"
+    skill="${entry#*|}"
+
+    if [[ $skill != "*" && -d $HOME/.agents/skills/$skill ]]; then
+      echo "✓ $skill already installed"
+      continue
+    fi
+
+    cmd=(bunx skills@latest add "$source" -g -y --skill "$skill" "${agent_args[@]}")
+    if ! "${cmd[@]}"; then
+      echo "Error: failed to install skills from $source ($skill)" >&2
+      failed=1
+    fi
+  done
+
+  if have_hermes; then
+    set_hermes_external_skills_dir
+  fi
+
+  return "$failed"
+}
+
+
 install_optional_ai_tools() {
   section "Optional AI coding assistants..."
 
@@ -116,16 +245,26 @@ install_optional_ai_tools() {
 
   # claude-code is matched under both names on purpose. The package is named
   # claude-code, but its bin is `claude`.
-  if command -v claude-code &>/dev/null || command -v claude &>/dev/null; then
+  if have_claude_code; then
     echo "✓ claude-code already installed ($(command -v claude-code || command -v claude))"
   elif gum confirm "Install claude-code?" </dev/tty; then
     bun_global_install claude-code @anthropic-ai/claude-code || true
   fi
 
   # Hermes-agent installer
-  if command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null; then
+  if have_hermes; then
     echo "✓ Hermes Agent already installed ($(command -v hermes || command -v hermes-agent))"
   elif gum confirm "Install Hermes Agent?" </dev/tty; then
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+  fi
+
+  # Shared agent skills: only worth installing if an agent will use them.
+  if command -v opencode &>/dev/null || have_claude_code || have_hermes; then
+    if ! ai_skills_pending; then
+      echo "✓ agent skills already installed"
+      install_ai_skills || true   # still ensure the Hermes config entry exists
+    elif gum confirm "Install agent skills (${#AI_SKILLS[@]} sources) for opencode / claude-code / Hermes?" </dev/tty; then
+      install_ai_skills || true
+    fi
   fi
 }
