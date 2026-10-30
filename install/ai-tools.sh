@@ -110,21 +110,50 @@ set_hermes_external_skills_dir() {
   chmod --reference="$config" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
 
   if awk -v entry="$entry" '
+    BEGIN { ind = "  " }
+
     /^skills:[[:space:]]*(#.*)?$/ { print; in_skills = 1; seen = 1; next }
+
+    # First indented line under skills: sets the block indentation.
+    in_skills && !have_child && /^[[:space:]]+[^[:space:]#]/ {
+      match($0, /^[[:space:]]+/); ind = substr($0, 1, RLENGTH); have_child = 1
+    }
+
+    # Between "external_dirs:" and its first item: pass blanks/comments through.
+    pending && /^[[:space:]]*(#.*)?$/ { print; next }
+
+    # First real line after "external_dirs:" decides the item indentation.
+    pending {
+      pending = 0
+      if ($0 ~ /^[[:space:]]*-[[:space:]]/) {
+        match($0, /^[[:space:]]*/); print substr($0, 1, RLENGTH) "- " entry
+      } else {
+        print ekey "  - " entry   # empty list: indent relative to the key
+      }
+      done = 1
+      # fall through so this line is handled normally
+    }
+
     in_skills && /^[^[:space:]#]/ {
       # Reached the next top-level key without finding external_dirs.
-      if (!done) { print "  external_dirs:"; print "    - " entry; done = 1 }
+      if (!done) { print ind "external_dirs:"; print ind "  - " entry; done = 1 }
       in_skills = 0
     }
-    in_skills && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
-      print; print "    - " entry; done = 1; next
+
+    in_skills && !done && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
+      match($0, /^[[:space:]]+/); ekey = substr($0, 1, RLENGTH)
+      print; pending = 1; next
     }
+
     { print }
+
     END {
       if (!seen) {
         print "skills:"; print "  external_dirs:"; print "    - " entry
+      } else if (pending) {
+        print ekey "  - " entry          # file ended right after the key
       } else if (in_skills && !done) {
-        print "  external_dirs:"; print "    - " entry
+        print ind "external_dirs:"; print ind "  - " entry
       }
     }
   ' "$config" >"$tmp"; then
