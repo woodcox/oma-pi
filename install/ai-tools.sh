@@ -162,7 +162,10 @@ skill_installed_for_agents() {
   if have_claude_code && [[ ! -d "$(claude_skills_dir)/$skill" ]]; then
     return 1
   fi
-  if have_hermes && [[ ! -d "$(hermes_skills_dir)/$skill" ]]; then
+  # Hermes bundles categories (for example ~/.hermes/skills/research/) that can
+  # share a name with a skill, so require the skill's own SKILL.md. -f follows
+  # symlinks, so a dangling link still counts as missing.
+  if have_hermes && [[ ! -f "$(hermes_skills_dir)/$skill/SKILL.md" ]]; then
     return 1
   fi
 }
