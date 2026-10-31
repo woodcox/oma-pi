@@ -19,13 +19,52 @@ bun_global_install() {
   fi
 }
 
-# One entry per install: "<github-owner/repo>|<skill-name>". Use "*" as the
-# skill name to install every skill the repo ships.
+# One entry per skill: "<github-owner/repo>|<skill-name>". Entries that share a
+# repo are installed with one `skills add` call, so listing every skill does
+# not clone the repo once per skill. Avoid "*": it cannot be checked on disk,
+# so ai_skills_pending would ask to install it on every run.
 # Add skills here:
 # ===================================================
 AI_SKILLS=(
   "modem-dev/hunk|hunk-review"
-  "mattpocock/skills|*"
+  "mattpocock/skills|ask-matt"
+  "mattpocock/skills|chief-of-staff"
+  "mattpocock/skills|claude-handoff"
+  "mattpocock/skills|code-review"
+  "mattpocock/skills|codebase-design"
+  "mattpocock/skills|diagnosing-bugs"
+  "mattpocock/skills|domain-modeling"
+  "mattpocock/skills|git-guardrails-claude-code"
+  "mattpocock/skills|grill-me"
+  "mattpocock/skills|grill-with-docs"
+  "mattpocock/skills|grilling"
+  "mattpocock/skills|handoff"
+  "mattpocock/skills|implement"
+  "mattpocock/skills|implement-spec"
+  "mattpocock/skills|improve-codebase-architecture"
+  "mattpocock/skills|loop-me"
+  "mattpocock/skills|migrate-to-shoehorn"
+  "mattpocock/skills|pr"
+  "mattpocock/skills|prototype"
+  "mattpocock/skills|research"
+  "mattpocock/skills|retro"
+  "mattpocock/skills|scaffold-exercises"
+  "mattpocock/skills|setup-matt-pocock-skills"
+  "mattpocock/skills|setup-pre-commit"
+  "mattpocock/skills|setup-ts-deep-modules"
+  "mattpocock/skills|tdd"
+  "mattpocock/skills|teach"
+  "mattpocock/skills|to-questionnaire"
+  "mattpocock/skills|to-spec"
+  "mattpocock/skills|to-tickets"
+  "mattpocock/skills|triage"
+  "mattpocock/skills|wait-what"
+  "mattpocock/skills|wayfinder"
+  "mattpocock/skills|wizard"
+  "mattpocock/skills|writing-beats"
+  "mattpocock/skills|writing-for-agents"
+  "mattpocock/skills|writing-fragments"
+  "mattpocock/skills|writing-shape"
 )
 # ===================================================
 
@@ -78,155 +117,6 @@ set_opencode_quota_plugin() {
   fi
 }
 
-# Hermes does not scan ~/.agents/skills on its own. Listing it under
-# skills.external_dirs in config.yaml is what makes the skills CLI's global
-# installs visible to it. Idempotent, and bails out (without touching the
-# file) on YAML shapes it does not understand, such as inline `skills: {}`.
-set_hermes_external_skills_dir() {
-  local config="$HOME/.hermes/config.yaml"
-  local entry="~/.agents/skills"
-  local tmp
-
-  if [[ ! -f $config ]]; then
-    echo "Note: $config not found; run Hermes once, then re-run this installer to link skills." >&2
-    return 0
-  fi
-
-  # Only accept a match directly under skills.external_dirs: the same path can
-  # appear under another key (for example skills.trusted_project_dirs or a
-  # nested skills.config.<skill>.external_dirs), which Hermes does not use for
-  # external skills. Absolute entries must be this user's home, not just any
-  # path ending in /.agents/skills.
-  if awk -v home="$HOME" '
-    function indent(line) {
-      match(line, /^[[:space:]]*/)
-      return RLENGTH
-    }
-    function entry_path(line,    v) {
-      v = line
-      sub(/^[[:space:]]+-[[:space:]]+/, "", v)
-      sub(/[[:space:]]+$/, "", v)
-      if (v ~ /^"[^"]*"$/ || v ~ /^'\''[^'\'']*'\''$/) {
-        v = substr(v, 2, length(v) - 2)
-      }
-      return v
-    }
-    /^skills:[[:space:]]*(#.*)?$/ {
-      in_skills = 1
-      in_external = 0
-      child_indent = -1
-      next
-    }
-    # The first child sets the indentation of keys directly under skills.
-    in_skills && child_indent < 0 && /^[[:space:]]+[^[:space:]#]/ {
-      child_indent = indent($0)
-    }
-    in_skills && /^[^[:space:]#]/ {
-      in_skills = 0
-      in_external = 0
-    }
-    in_skills && child_indent >= 0 && indent($0) == child_indent &&
-      /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
-      external_indent = child_indent
-      in_external = 1
-      next
-    }
-    # A sibling key closes the list. A sequence item at the key indentation is
-    # still part of it (YAML allows indentationless sequences).
-    in_skills && in_external &&
-      $0 !~ /^[[:space:]]*(#.*)?$/ &&
-      $0 !~ /^[[:space:]]*-[[:space:]]/ &&
-      indent($0) <= external_indent {
-      in_external = 0
-    }
-    in_skills && in_external && /^[[:space:]]+-[[:space:]]/ {
-      p = entry_path($0)
-      if (p == "~/.agents/skills" ||
-          p == "$HOME/.agents/skills" ||
-          (home != "" && p == home "/.agents/skills")) {
-        found = 1
-      }
-    }
-    END { exit !found }
-  ' "$config"; then
-    echo "✓ Hermes already reads ~/.agents/skills"
-    return 0
-  fi
-
-  if grep -qE '^skills:' "$config" && ! grep -qE '^skills:[[:space:]]*(#.*)?$' "$config"; then
-    echo "Warning: unsupported 'skills:' layout in $config; add '$entry' to skills.external_dirs by hand" >&2
-    return 0
-  fi
-  if grep -qE '^[[:space:]]+external_dirs:[[:space:]]*[^[:space:]#]' "$config"; then
-    echo "Warning: inline external_dirs in $config; add '$entry' by hand" >&2
-    return 0
-  fi
-
-  tmp="$(mktemp "${config}.XXXXXX")"
-  chmod --reference="$config" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
-
-  if awk -v entry="$entry" '
-    BEGIN { ind = "  " }
-
-    /^skills:[[:space:]]*(#.*)?$/ { print; in_skills = 1; seen = 1; next }
-
-    # First indented line under skills: sets the block indentation.
-    in_skills && !have_child && /^[[:space:]]+[^[:space:]#]/ {
-      match($0, /^[[:space:]]+/); ind = substr($0, 1, RLENGTH); have_child = 1
-    }
-
-    # Between "external_dirs:" and its first item: pass blanks/comments through.
-    pending && /^[[:space:]]*(#.*)?$/ { print; next }
-
-    # First real line after "external_dirs:" decides the item indentation.
-    pending {
-      pending = 0
-      if ($0 ~ /^[[:space:]]*-[[:space:]]/) {
-        match($0, /^[[:space:]]*/); print substr($0, 1, RLENGTH) "- " entry
-      } else {
-        print ekey "  - " entry   # empty list: indent relative to the key
-      }
-      done = 1
-      # fall through so this line is handled normally
-    }
-
-    in_skills && /^[^[:space:]#]/ {
-      # Reached the next top-level key without finding external_dirs.
-      if (!done) { print ind "external_dirs:"; print ind "  - " entry; done = 1 }
-      in_skills = 0
-    }
-
-    in_skills && !done && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
-      match($0, /^[[:space:]]+/); key_ind = substr($0, 1, RLENGTH)
-      if (key_ind == ind) { ekey = key_ind; print; pending = 1; next }
-    }
-
-    { print }
-
-    END {
-      if (!seen) {
-        print "skills:"; print "  external_dirs:"; print "    - " entry
-      } else if (pending) {
-        print ekey "  - " entry          # file ended right after the key
-      } else if (in_skills && !done) {
-        print ind "external_dirs:"; print ind "  - " entry
-      }
-    }
-  ' "$config" >"$tmp"; then
-    mv "$tmp" "$config" || {
-      rm -f "$tmp"
-      echo "Error: could not replace $config" >&2
-      return 1
-    }
-    echo "✓ added ~/.agents/skills to Hermes skills.external_dirs"
-  else
-    rm -f "$tmp"
-    echo "Error: failed to update $config" >&2
-    return 1
-  fi
-}
-
-
 # True if at least one entry still needs installing. A "*" entry cannot be
 # checked on disk, so it always counts as pending.
 ai_skills_pending() {
@@ -250,6 +140,18 @@ claude_skills_dir() {
   printf '%s/skills\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 }
 
+# True if the Hermes Agent CLI is on the box. The venv entry point is named
+# hermes; some installs expose hermes-agent instead.
+have_hermes() {
+  command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null
+}
+
+# Hermes keeps a link (or copy) of each skill in $HERMES_HOME/skills. The
+# skills CLI resolves the same way: HERMES_HOME, then ~/.hermes.
+hermes_skills_dir() {
+  printf '%s/skills\n' "${HERMES_HOME:-$HOME/.hermes}"
+}
+
 # True only when every agent this installer targets already has the skill.
 # Checking the canonical directory alone would skip the CLI call that links a
 # skill into a newly installed agent.
@@ -260,41 +162,53 @@ skill_installed_for_agents() {
   if have_claude_code && [[ ! -d "$(claude_skills_dir)/$skill" ]]; then
     return 1
   fi
-}
-
-have_hermes() {
-  command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null
+  if have_hermes && [[ ! -d "$(hermes_skills_dir)/$skill" ]]; then
+    return 1
+  fi
 }
 
 # The skills CLI installs each global skill once into ~/.agents/skills and
-# links it into every agent named with -a (opencode, claude-code). Hermes has
-# no CLI target, so it reads ~/.agents/skills via skills.external_dirs; the
-# caller configures that even when no skills need installing.
+# links it into every agent named with -a (opencode, claude-code,
+# hermes-agent). Skills that share a source go to one call, because --skill
+# accepts several names and cloning the repo once per skill is slow.
 install_ai_skills() {
   local entry source skill failed=0
-  local -a cmd agent_args=()
+  local -a cmd agent_args=() sources=() pending=()
 
   # OpenCode is a universal target, so listing it makes the CLI write the
   # canonical ~/.agents/skills copy. Include it even when OpenCode is not
   # installed: with only Claude Code selected the CLI switches to copy mode and
-  # writes solely to ~/.claude/skills, leaving Hermes (which reads the
-  # canonical directory) and ai_skills_pending unaware of the skill. Adding a
-  # universal target keeps the canonical copy plus Claude Code's link.
+  # writes solely to ~/.claude/skills, leaving the canonical directory (and
+  # ai_skills_pending) unaware of the skill. Adding a universal target keeps
+  # the canonical copy plus each agent's link.
   agent_args=(-a opencode)
   have_claude_code && agent_args+=(-a claude-code)
+  have_hermes && agent_args+=(-a hermes-agent)
 
   for entry in "${AI_SKILLS[@]}"; do
     source="${entry%%|*}"
-    skill="${entry#*|}"
+    [[ " ${sources[*]} " == *" $source "* ]] || sources+=("$source")
+  done
 
-    if [[ $skill != "*" ]] && skill_installed_for_agents "$skill"; then
-      echo "✓ $skill already installed"
-      continue
-    fi
+  for source in "${sources[@]}"; do
+    pending=()
+    for entry in "${AI_SKILLS[@]}"; do
+      [[ ${entry%%|*} == "$source" ]] || continue
+      skill="${entry#*|}"
+      if [[ $skill != "*" ]] && skill_installed_for_agents "$skill"; then
+        echo "✓ $skill already installed"
+      else
+        pending+=("$skill")
+      fi
+    done
+    [[ ${#pending[@]} -gt 0 ]] || continue
 
-    cmd=(bunx skills@latest add "$source" -g -y --skill "$skill" "${agent_args[@]}")
+    cmd=(bunx skills@latest add "$source" -g -y --skill "${pending[@]}" "${agent_args[@]}")
     if ! "${cmd[@]}"; then
-      echo "Error: failed to install skills from $source ($skill)" >&2
+      echo "Error: failed to install skills from $source (${pending[*]})" >&2
+      if have_hermes; then
+        echo "  If Hermes did not get its links, check that the skills CLI still supports -a hermes-agent." >&2
+      fi
       failed=1
     fi
   done
@@ -366,17 +280,10 @@ install_optional_ai_tools() {
 
   # Shared agent skills: only worth installing if an agent will use them.
   if command -v opencode &>/dev/null || have_claude_code || have_hermes; then
-    # Hermes reads the shared directory through config.yaml, so configure it
-    # even if the skills are already installed or the user declines another
-    # install. A "*" entry keeps ai_skills_pending true forever, which would
-    # otherwise leave a newly added Hermes without the external_dirs entry.
-    if have_hermes; then
-      set_hermes_external_skills_dir || true
-    fi
     if ! ai_skills_pending; then
       echo "✓ agent skills already installed"
       install_ai_skills || true   # still repair missing agent links
-    elif gum confirm "Install agent skills (${#AI_SKILLS[@]} sources) for opencode / claude-code / Hermes?" </dev/tty; then
+    elif gum confirm "Install agent skills (${#AI_SKILLS[@]} skills) for opencode / claude-code / Hermes?" </dev/tty; then
       install_ai_skills || true
     fi
   fi
