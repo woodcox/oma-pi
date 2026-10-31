@@ -291,7 +291,10 @@ install_lazygit_binary() {
   version="${version#v}"   # release tag is v0.x.y, filenames are not
 
   if command -v lazygit &>/dev/null; then
-    current_version="$(lazygit --version 2>/dev/null | sed -n 's/.*version=\([^, ]*\).*/\1/p')"
+    # lazygit prints "... version=0.66.2, ..., git version=2.39.5". Match the
+    # standalone version= field only; a greedy .*version= would grab git's.
+    current_version="$(lazygit --version 2>/dev/null \
+      | awk -F', ' '{for (i=1; i<=NF; i++) if ($i ~ /^version=/) {sub(/^version=/, "", $i); print $i; exit}}')"
     if [ "$current_version" = "$version" ]; then
       echo "✓ lazygit ${version} already installed"
       return 0
