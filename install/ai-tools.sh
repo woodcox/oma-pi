@@ -92,7 +92,42 @@ set_hermes_external_skills_dir() {
     return 0
   fi
 
-  if grep -qE '^[[:space:]]+-[[:space:]]+["'\'']?(~|\$HOME|/[^[:space:]]+)/\.agents/skills["'\'']?[[:space:]]*$' "$config"; then
+  # Only accept a match under skills.external_dirs: the same path can appear
+  # under another key (for example skills.trusted_project_dirs), which Hermes
+  # does not use for external skills.
+  if awk '
+    function indent(line) {
+      match(line, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    /^skills:[[:space:]]*(#.*)?$/ {
+      in_skills = 1
+      in_external = 0
+      next
+    }
+    in_skills && /^[^[:space:]#]/ {
+      in_skills = 0
+      in_external = 0
+    }
+    in_skills && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
+      external_indent = indent($0)
+      in_external = 1
+      next
+    }
+    # A sibling key closes the list. A sequence item at the key indentation is
+    # still part of it (YAML allows indentationless sequences).
+    in_skills && in_external &&
+      $0 !~ /^[[:space:]]*(#.*)?$/ &&
+      $0 !~ /^[[:space:]]*-[[:space:]]/ &&
+      indent($0) <= external_indent {
+      in_external = 0
+    }
+    in_skills && in_external &&
+      /^[[:space:]]+-[[:space:]]+["'\'']?(~|\$HOME|\/[^[:space:]]+)\/\.agents\/skills["'\'']?[[:space:]]*$/ {
+      found = 1
+    }
+    END { exit !found }
+  ' "$config"; then
     echo "✓ Hermes already reads ~/.agents/skills"
     return 0
   fi
@@ -188,6 +223,24 @@ have_claude_code() {
   command -v claude &>/dev/null || command -v claude-code &>/dev/null
 }
 
+# Claude Code keeps its own copy (or link) of each skill; the CLI honours
+# CLAUDE_CONFIG_DIR when it chooses that directory.
+claude_skills_dir() {
+  printf '%s/skills\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+
+# True only when every agent this installer targets already has the skill.
+# Checking the canonical directory alone would skip the CLI call that links a
+# skill into a newly installed agent.
+skill_installed_for_agents() {
+  local skill="$1"
+
+  [[ -d $HOME/.agents/skills/$skill ]] || return 1
+  if have_claude_code && [[ ! -d "$(claude_skills_dir)/$skill" ]]; then
+    return 1
+  fi
+}
+
 have_hermes() {
   command -v hermes &>/dev/null || command -v hermes-agent &>/dev/null
 }
@@ -199,14 +252,20 @@ install_ai_skills() {
   local entry source skill failed=0
   local -a cmd agent_args=()
 
-  command -v opencode &>/dev/null && agent_args+=(-a opencode)
+  # OpenCode is a universal target, so listing it makes the CLI write the
+  # canonical ~/.agents/skills copy. Include it even when OpenCode is not
+  # installed: with only Claude Code selected the CLI switches to copy mode and
+  # writes solely to ~/.claude/skills, leaving Hermes (which reads the
+  # canonical directory) and ai_skills_pending unaware of the skill. Adding a
+  # universal target keeps the canonical copy plus Claude Code's link.
+  agent_args=(-a opencode)
   have_claude_code && agent_args+=(-a claude-code)
 
   for entry in "${AI_SKILLS[@]}"; do
     source="${entry%%|*}"
     skill="${entry#*|}"
 
-    if [[ $skill != "*" && -d $HOME/.agents/skills/$skill ]]; then
+    if [[ $skill != "*" ]] && skill_installed_for_agents "$skill"; then
       echo "✓ $skill already installed"
       continue
     fi
