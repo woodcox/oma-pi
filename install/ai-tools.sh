@@ -268,7 +268,8 @@ have_hermes() {
 
 # The skills CLI installs each global skill once into ~/.agents/skills and
 # links it into every agent named with -a (opencode, claude-code). Hermes has
-# no CLI target, so it reads ~/.agents/skills via skills.external_dirs.
+# no CLI target, so it reads ~/.agents/skills via skills.external_dirs; the
+# caller configures that even when no skills need installing.
 install_ai_skills() {
   local entry source skill failed=0
   local -a cmd agent_args=()
@@ -297,10 +298,6 @@ install_ai_skills() {
       failed=1
     fi
   done
-
-  if have_hermes; then
-    set_hermes_external_skills_dir
-  fi
 
   return "$failed"
 }
