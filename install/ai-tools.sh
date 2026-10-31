@@ -92,25 +92,42 @@ set_hermes_external_skills_dir() {
     return 0
   fi
 
-  # Only accept a match under skills.external_dirs: the same path can appear
-  # under another key (for example skills.trusted_project_dirs), which Hermes
-  # does not use for external skills.
-  if awk '
+  # Only accept a match directly under skills.external_dirs: the same path can
+  # appear under another key (for example skills.trusted_project_dirs or a
+  # nested skills.config.<skill>.external_dirs), which Hermes does not use for
+  # external skills. Absolute entries must be this user's home, not just any
+  # path ending in /.agents/skills.
+  if awk -v home="$HOME" '
     function indent(line) {
       match(line, /^[[:space:]]*/)
       return RLENGTH
     }
+    function entry_path(line,    v) {
+      v = line
+      sub(/^[[:space:]]+-[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (v ~ /^"[^"]*"$/ || v ~ /^'\''[^'\'']*'\''$/) {
+        v = substr(v, 2, length(v) - 2)
+      }
+      return v
+    }
     /^skills:[[:space:]]*(#.*)?$/ {
       in_skills = 1
       in_external = 0
+      child_indent = -1
       next
+    }
+    # The first child sets the indentation of keys directly under skills.
+    in_skills && child_indent < 0 && /^[[:space:]]+[^[:space:]#]/ {
+      child_indent = indent($0)
     }
     in_skills && /^[^[:space:]#]/ {
       in_skills = 0
       in_external = 0
     }
-    in_skills && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
-      external_indent = indent($0)
+    in_skills && child_indent >= 0 && indent($0) == child_indent &&
+      /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
+      external_indent = child_indent
       in_external = 1
       next
     }
@@ -122,9 +139,13 @@ set_hermes_external_skills_dir() {
       indent($0) <= external_indent {
       in_external = 0
     }
-    in_skills && in_external &&
-      /^[[:space:]]+-[[:space:]]+["'\'']?(~|\$HOME|\/[^[:space:]]+)\/\.agents\/skills["'\'']?[[:space:]]*$/ {
-      found = 1
+    in_skills && in_external && /^[[:space:]]+-[[:space:]]/ {
+      p = entry_path($0)
+      if (p == "~/.agents/skills" ||
+          p == "$HOME/.agents/skills" ||
+          (home != "" && p == home "/.agents/skills")) {
+        found = 1
+      }
     }
     END { exit !found }
   ' "$config"; then
@@ -176,8 +197,8 @@ set_hermes_external_skills_dir() {
     }
 
     in_skills && !done && /^[[:space:]]+external_dirs:[[:space:]]*(#.*)?$/ {
-      match($0, /^[[:space:]]+/); ekey = substr($0, 1, RLENGTH)
-      print; pending = 1; next
+      match($0, /^[[:space:]]+/); key_ind = substr($0, 1, RLENGTH)
+      if (key_ind == ind) { ekey = key_ind; print; pending = 1; next }
     }
 
     { print }
@@ -348,9 +369,16 @@ install_optional_ai_tools() {
 
   # Shared agent skills: only worth installing if an agent will use them.
   if command -v opencode &>/dev/null || have_claude_code || have_hermes; then
+    # Hermes reads the shared directory through config.yaml, so configure it
+    # even if the skills are already installed or the user declines another
+    # install. A "*" entry keeps ai_skills_pending true forever, which would
+    # otherwise leave a newly added Hermes without the external_dirs entry.
+    if have_hermes; then
+      set_hermes_external_skills_dir || true
+    fi
     if ! ai_skills_pending; then
       echo "✓ agent skills already installed"
-      install_ai_skills || true   # still ensure the Hermes config entry exists
+      install_ai_skills || true   # still repair missing agent links
     elif gum confirm "Install agent skills (${#AI_SKILLS[@]} sources) for opencode / claude-code / Hermes?" </dev/tty; then
       install_ai_skills || true
     fi
