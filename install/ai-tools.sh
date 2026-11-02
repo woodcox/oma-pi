@@ -152,15 +152,64 @@ hermes_skills_dir() {
   printf '%s/skills\n' "${HERMES_HOME:-$HOME/.hermes}"
 }
 
-# How a skill that collides with an entry in the Hermes skills directory is
-# handled. The choices are private to this installer, so they live beside the
-# Hermes profile rather than in the shared ~/.agents tree.
-skill_choices_file() {
-  printf '%s/.oma-pi-skill-choices\n' "${HERMES_HOME:-$HOME/.hermes}"
+# ---------------------------------------------------------------------------
+# Skill collision handling
+#
+# The skills CLI writes every global skill into the shared canonical directory
+# (~/.agents/skills) and, when passed -a <agent>, links or copies it into that
+# agent's own directory. With -y it does not ask before deleting whatever is
+# already at the destination; that is how a bundled Hermes category was
+# destroyed once. So this installer lets the CLI write only the canonical copy
+# and manages the per-agent entries itself, after checking who owns them.
+#
+# A skill that collides is resolved once:
+#   rename     install it as <skill>-<github-user>-<git-repo>, keeping the old
+#              entry in place
+#   skip       do not touch the colliding entry
+#   overwrite  back the old entry up, then install over it
+# The choice is remembered per skill in ~/.agents/.oma-pi-skill-choices.
+# ---------------------------------------------------------------------------
+
+# The shared copy every universal agent (OpenCode included) reads.
+canonical_skills_dir() {
+  printf '%s/skills\n' "$HOME/.agents"
 }
 
-# Print "<action>\t<target>" for a stored choice. The target is only meaningful
-# for a rename. Returns non-zero when the skill has no choice yet.
+# The skills CLI writes its lock here, so it is also the record of which
+# canonical copies came from which source.
+skill_lock_file() {
+  if [[ -n ${XDG_STATE_HOME:-} ]]; then
+    printf '%s/skills/.skill-lock.json\n' "$XDG_STATE_HOME"
+  else
+    printf '%s/.skill-lock.json\n' "$HOME/.agents"
+  fi
+}
+
+# Choices are private to this installer but shared across the agents it
+# manages, so they live beside the canonical skills tree.
+skill_choices_file() {
+  printf '%s/.oma-pi-skill-choices\n' "$HOME/.agents"
+}
+
+# Move the Hermes-only choice file written by the previous installer, so a
+# refresh does not ask about collisions that were already answered.
+migrate_hermes_skill_choices() {
+  local shared legacy
+
+  shared="$(skill_choices_file)"
+  legacy="${HERMES_HOME:-$HOME/.hermes}/.oma-pi-skill-choices"
+  [[ -f $shared || ! -f $legacy ]] && return 0
+  mkdir -p "$(dirname "$shared")" || return 1
+  if cp "$legacy" "$shared"; then
+    echo "Migrated skill choices from $legacy" >&2
+  else
+    echo "Warning: could not migrate $legacy" >&2
+  fi
+  return 0
+}
+
+# Print "<action>\t<target>" for a stored choice. Returns non-zero when the
+# skill has no choice yet.
 skill_choice_get() {
   local skill="$1" stored action target
   local file
@@ -195,7 +244,7 @@ skill_name_slug() {
 }
 
 # The rename format is <skill>-<github-user>-<git-repo>.
-skill_rename_target() {
+skill_rename_base() {
   local skill="$1" source="$2" owner repo
 
   owner="${source%%/*}"
@@ -203,46 +252,156 @@ skill_rename_target() {
   printf '%s-%s-%s\n' "$skill" "$(skill_name_slug "$owner")" "$(skill_name_slug "$repo")"
 }
 
-# True when the Hermes entry is the symlink the skills CLI creates for this
-# skill. A copy is treated as foreign on purpose: it may be a bundled category
-# or a user's own skill with the same name.
-hermes_skill_is_ours() {
-  local skill="$1" target canonical
-
-  target="$(hermes_skills_dir)/$skill"
-  [[ -L $target && -e $target ]] || return 1
-  canonical="$(readlink -f "$HOME/.agents/skills/$skill" 2>/dev/null)" || return 1
-  [[ -n $canonical && "$(readlink -f "$target" 2>/dev/null)" == "$canonical" ]]
-}
-
-# True when installing this skill for Hermes would replace something that is
-# not ours (for example the bundled ~/.hermes/skills/research/ category).
-hermes_skill_conflict() {
-  local skill="$1" target
-
-  target="$(hermes_skills_dir)/$skill"
-  [[ -e $target || -L $target ]] || return 1
-  hermes_skill_is_ours "$skill" && return 1
+# Every agent scope this installer manages, in the order it should check them.
+# Canonical comes first: whether it collides decides if a rename is global.
+skill_scopes() {
+  printf 'canonical\n'
+  have_claude_code && printf 'claude-code\n'
+  have_hermes && printf 'hermes-agent\n'
   return 0
 }
 
-# Ask how to install a colliding skill. Rename is both the first entry and the
-# fallback, because it is the only choice that keeps the existing Hermes skill.
-prompt_skill_conflict() {
-  local skill="$1" source="$2" target renamed choice action
+skill_scope_dir() {
+  case "$1" in
+    canonical) canonical_skills_dir ;;
+    claude-code) claude_skills_dir ;;
+    hermes-agent) hermes_skills_dir ;;
+    *) return 1 ;;
+  esac
+}
 
-  target="$(hermes_skills_dir)/$skill"
+skill_scope_label() {
+  case "$1" in
+    canonical) printf 'OpenCode (shared skills)' ;;
+    claude-code) printf 'Claude Code' ;;
+    hermes-agent) printf 'Hermes Agent' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Backups live outside every agent's skills tree so no agent indexes them.
+skill_backup_root() {
+  case "$1" in
+    canonical) printf '%s/.oma-pi-backups\n' "$HOME/.agents" ;;
+    claude-code) printf '%s/.oma-pi-backups\n' "$(dirname "$(claude_skills_dir)")" ;;
+    hermes-agent) printf '%s/.oma-pi-backups\n' "${HERMES_HOME:-$HOME/.hermes}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# True when a directory was copied here by this installer (rename/overwrite).
+skill_entry_is_marker_copy() {
+  local target="$1" skill="$2"
+
+  [[ -f $target/.oma-pi-skill-source ]] &&
+    [[ "$(cat "$target/.oma-pi-skill-source")" == "$skill" ]]
+}
+
+# True when the entry at <scope>/<skill> is one this installer may replace.
+skill_entry_is_ours() {
+  local scope="$1" skill="$2" source="$3" dir target canonical resolved canonical_dir lock
+
+  dir="$(skill_scope_dir "$scope")" || return 1
+  target="$dir/$skill"
+  [[ -e $target || -L $target ]] || return 1
+  skill_entry_is_marker_copy "$target" "$skill" && return 0
+
+  # Canonical copies are recorded in the skills CLI lock file.
+  if [[ $scope == canonical ]]; then
+    lock="$(skill_lock_file)"
+    [[ -f $lock ]] || return 1
+    command -v jq &>/dev/null || return 1
+    [[ "$(jq -r --arg s "$skill" '.skills[$s].source // empty' "$lock" 2>/dev/null)" == "$source" ]]
+    return
+  fi
+
+  # Agent entries are ours when they link into our canonical skills tree.
+  [[ -L $target ]] || return 1
+  resolved="$(readlink -f "$target" 2>/dev/null)" || return 1
+  canonical_dir="$(readlink -f "$(canonical_skills_dir)" 2>/dev/null)" || return 1
+  [[ -n $resolved && -n $canonical_dir && $resolved == "$canonical_dir"/* ]] || return 1
+
+  # A link to a renamed copy carries our marker. A link to the original copy
+  # is ours only when the lock file says our source installed it.
+  skill_entry_is_marker_copy "$resolved" "$skill" && return 0
+  [[ "$(basename "$resolved")" == "$skill" ]] || return 1
+  skill_entry_is_ours canonical "$skill" "$source"
+}
+
+# True when installing <skill> into <scope> would replace an entry this
+# installer does not manage (a bundled agent skill, a hand-written copy, or a
+# skill from another source).
+skill_scope_conflict() {
+  local scope="$1" skill="$2" source="$3" dir target
+
+  dir="$(skill_scope_dir "$scope")" || return 1
+  target="$dir/$skill"
+  [[ -e $target || -L $target ]] || return 1
+  ! skill_entry_is_ours "$scope" "$skill" "$source"
+}
+
+# Pick a rename target that is not already used by an entry we do not own.
+# Existing marker copies are reusable, so a refresh keeps the same name.
+skill_rename_target() {
+  local skill="$1" source="$2" base candidate suffix=2 scope target free
+
+  base="$(skill_rename_base "$skill" "$source")"
+  candidate="$base"
+  while :; do
+    free=1
+    for scope in $(skill_scopes); do
+      target="$(skill_scope_dir "$scope")/$candidate"
+      if [[ -e $target || -L $target ]] && ! skill_entry_is_marker_copy "$target" "$skill"; then
+        free=0
+        break
+      fi
+    done
+    [[ $free -eq 1 ]] && {
+      printf '%s\n' "$candidate"
+      return 0
+    }
+    candidate="$base-$suffix"
+    suffix=$((suffix + 1))
+  done
+}
+
+# Move a colliding entry out of the way. Returns non-zero when it could not be
+# backed up, so the caller can leave the entry untouched.
+skill_backup_entry() {
+  local scope="$1" target="$2" root backup
+
+  root="$(skill_backup_root "$scope")" || return 1
+  mkdir -p "$root" || return 1
+  backup="$(mktemp -d "$root/$(basename "$target").XXXXXX")" || return 1
+  if ! mv -- "$target" "$backup/entry"; then
+    rmdir "$backup" 2>/dev/null || true
+    return 1
+  fi
+  echo "Backed up $(skill_scope_label "$scope") entry $target to $backup" >&2
+}
+
+# Ask how to install a colliding skill. Rename is both the first entry and the
+# fallback (including when gum is cancelled), because it is the only choice
+# that leaves every existing entry in place.
+prompt_skill_conflict() {
+  local skill="$1" source="$2" scope renamed choice action target conflicts=()
+
   renamed="$(skill_rename_target "$skill" "$source")"
+  for scope in $(skill_scopes); do
+    skill_scope_conflict "$scope" "$skill" "$source" || continue
+    conflicts+=("$(skill_scope_label "$scope"): $(skill_scope_dir "$scope")/$skill")
+  done
 
   printf '\n' >&2
-  printf 'Hermes already has %s\n' "$target" >&2
-  printf 'Installing %s would replace it.\n' "$skill" >&2
+  printf 'These skill entries already exist and are not managed by oma-pi:\n' >&2
+  printf '  %s\n' "${conflicts[@]}" >&2
+  printf 'Installing %s would replace them.\n' "$skill" >&2
 
   choice="$(gum choose \
-    --header "How should oma-pi install $skill for Hermes?" \
+    --header "How should oma-pi install $skill?" \
     "Rename to $renamed (recommended)" \
-    "Skip $skill in Hermes" \
-    "Overwrite $target" </dev/tty)" || choice=""
+    "Skip $skill where it collides" \
+    "Overwrite the conflicting entries" </dev/tty)" || choice=""
 
   case "$choice" in
     "Rename to "*) action=rename ;;
@@ -251,80 +410,102 @@ prompt_skill_conflict() {
     *) action=rename ;;
   esac
 
-  if [[ $action == rename ]]; then
-    if ! skill_choice_set "$skill" rename "$renamed"; then
-      echo "Error: could not save the rename choice for $skill" >&2
-      return 1
-    fi
-  elif ! skill_choice_set "$skill" "$action" ""; then
+  target=""
+  [[ $action == rename ]] && target="$renamed"
+  if ! skill_choice_set "$skill" "$action" "$target"; then
     echo "Error: could not save the '$action' choice for $skill" >&2
     return 1
   fi
   printf '%s\n' "$action"
 }
 
-# Resolve the Hermes action for a skill, prompting only when a real collision
-# has no stored answer. Prints "<action>\t<target>"; "install" means let the
-# skills CLI link it as usual.
-skill_hermes_action() {
-  local skill="$1" source="$2" stored action target
+# Resolve the action for a skill. Prints "<action>\t<target>"; "install" means
+# there is no collision, so the original name is safe. A stored choice is only
+# applied while the collision it answered still exists.
+skill_action() {
+  local skill="$1" source="$2" stored action target="" scope conflicts=0
 
-  if stored="$(skill_choice_get "$skill")"; then
-    action="${stored%%$'\t'*}"
-    target=""
-    [[ $stored == *$'\t'* ]] && target="${stored#*$'\t'}"
-    printf '%s\t%s\n' "$action" "$target"
-    return 0
-  fi
-
-  if ! hermes_skill_conflict "$skill"; then
+  for scope in $(skill_scopes); do
+    skill_scope_conflict "$scope" "$skill" "$source" && conflicts=1
+  done
+  if [[ $conflicts -eq 0 ]]; then
+    # Keep an overwrite choice even after it took effect, so a later repair
+    # (a new agent, a missing link) does not silently turn the Hermes copy back
+    # into a symlink. A rename choice is stale once the collision is gone.
+    if stored="$(skill_choice_get "$skill")" && [[ ${stored%%$'\t'*} == overwrite ]]; then
+      printf 'overwrite\t\n'
+      return 0
+    fi
     printf 'install\t\n'
     return 0
   fi
 
-  action="$(prompt_skill_conflict "$skill" "$source")" || return 1
-  if [[ $action == rename ]]; then
-    target="$(skill_rename_target "$skill" "$source")"
-  else
-    target=""
+  if stored="$(skill_choice_get "$skill")"; then
+    action="${stored%%$'\t'*}"
+    case "$action" in
+      rename)
+        # Recompute: the format is meant to be predictable, and a previous
+        # suffix may have become free.
+        target="$(skill_rename_target "$skill" "$source")"
+        ;;
+      skip|overwrite) ;;
+      *) action="" ;;
+    esac
+    if [[ -n $action ]]; then
+      printf '%s\t%s\n' "$action" "$target"
+      return 0
+    fi
   fi
+
+  action="$(prompt_skill_conflict "$skill" "$source")" || return 1
+  target=""
+  [[ $action == rename ]] && target="$(skill_rename_target "$skill" "$source")"
   printf '%s\t%s\n' "$action" "$target"
 }
-
-# True only when every agent this installer targets already has the skill.
-# Checking the canonical directory alone would skip the CLI call that links a
-# skill into a newly installed agent.
-skill_installed_for_agents() {
-  local skill="$1" stored action target
-
-  [[ -d $HOME/.agents/skills/$skill ]] || return 1
-  if have_claude_code && [[ ! -d "$(claude_skills_dir)/$skill" ]]; then
-    return 1
-  fi
-  if ! have_hermes; then
-    return 0
-  fi
+# True when this skill still needs work: a missing copy/link, or a collision
+# with no stored answer yet.
+skill_needs_work() {
+  local skill="$1" source="$2" stored action="" target="" scope conflict
+  local canonical_conflict=0 expected
 
   if stored="$(skill_choice_get "$skill")"; then
     action="${stored%%$'\t'*}"
     target=""
     [[ $stored == *$'\t'* ]] && target="${stored#*$'\t'}"
-    case "$action" in
-      skip) return 0 ;;
-      rename) [[ -n $target && -f "$(hermes_skills_dir)/$target/SKILL.md" ]] ;;
-      *) [[ -f "$(hermes_skills_dir)/$skill/SKILL.md" ]] ;;
-    esac
-    return
   fi
 
-  # Hermes bundles categories (for example ~/.hermes/skills/research/) that can
-  # share a name with a skill, so require the skill's own SKILL.md. -f follows
-  # symlinks, so a dangling link still counts as missing.
-  [[ -f "$(hermes_skills_dir)/$skill/SKILL.md" ]]
+  for scope in $(skill_scopes); do
+    conflict=0
+    skill_scope_conflict "$scope" "$skill" "$source" && conflict=1
+    [[ $scope == canonical && $conflict -eq 1 ]] && canonical_conflict=1
+
+    if [[ $conflict -eq 1 ]]; then
+      [[ -n $action ]] || return 0
+      case "$action" in
+        skip) continue ;;
+        rename)
+          expected="$(skill_rename_target "$skill" "$source")"
+          [[ -f "$(skill_scope_dir "$scope")/$expected/SKILL.md" ]] || return 0
+          ;;
+        overwrite)
+          skill_entry_is_ours "$scope" "$skill" "$source" || return 0
+          ;;
+        *) return 0 ;;
+      esac
+    else
+      if [[ $action == rename && $canonical_conflict -eq 1 ]]; then
+        expected="${target:-$(skill_rename_target "$skill" "$source")}"
+        [[ -e "$(skill_scope_dir "$scope")/$expected" ]] || return 0
+      else
+        [[ -e "$(skill_scope_dir "$scope")/$skill" ]] || return 0
+      fi
+    fi
+  done
+  return 1
 }
 
 # Rewrite the frontmatter name: line in place. The copied skill keeps the same
-# body; only the name Hermes indexes changes.
+# body; only the name the agent indexes changes.
 rewrite_skill_name() {
   local file="$1" name="$2" tmp first
 
@@ -355,121 +536,96 @@ rewrite_skill_name() {
   rm -f "$tmp"
 }
 
-# Install a canonical skill into Hermes under a different name. This is used
-# for the rename and overwrite choices: a copy avoids a symlink at a path that
-# Hermes' bundled-skill sync also writes through.
-install_hermes_copy() {
-  local skill="$1" target_name="$2" canonical target marker backup_root backup failed=0
+# Create (or refresh) a link from an agent directory to the canonical copy.
+# Falls back to a copy when the filesystem refuses links.
+link_agent_skill() {
+  local scope="$1" target_name="$2" canonical_name="$3" skill="$4" source="$5"
+  local dir target canonical rel
 
-  canonical="$HOME/.agents/skills/$skill"
+  dir="$(skill_scope_dir "$scope")" || return 1
+  target="$dir/$target_name"
+  canonical="$(canonical_skills_dir)/$canonical_name"
   if [[ ! -d $canonical ]]; then
-    echo "Warning: $canonical is missing; cannot install $target_name for Hermes" >&2
+    echo "Error: canonical copy $canonical is missing" >&2
+    return 1
+  fi
+  mkdir -p "$dir" || return 1
+
+  if [[ -e $target || -L $target ]]; then
+    if ! skill_entry_is_marker_copy "$target" "$skill" &&
+      ! skill_entry_is_ours "$scope" "$canonical_name" "$source"; then
+      echo "Error: refusing to replace unowned $target" >&2
+      return 1
+    fi
+    rm -rf -- "$target" || return 1
+  fi
+
+  rel="$(realpath --relative-to="$(dirname "$target")" "$canonical" 2>/dev/null)" || rel=""
+  if [[ -n $rel ]] && ln -s "$rel" "$target" 2>/dev/null; then
+    return 0
+  fi
+  install_agent_copy "$canonical" "$scope" "$skill" "$target_name" "$source"
+}
+
+# Copy a skill directory into an agent's tree and rewrite the frontmatter name.
+# Used for renames (the CLI has no --name), for Hermes overwrites (so its
+# bundled-skill sync cannot write back through a link), and for installing a
+# canonical-skipped skill into an agent that did not collide.
+install_agent_copy() {
+  local src="$1" scope="$2" skill="$3" target_name="$4" source="$5"
+  local dir target failed=0
+
+  dir="$(skill_scope_dir "$scope")" || return 1
+  target="$dir/$target_name"
+  if [[ ! -d $src ]]; then
+    echo "Error: source $src is missing; cannot install $target_name for $(skill_scope_label "$scope")" >&2
     return 1
   fi
 
-  target="$(hermes_skills_dir)/$target_name"
-  marker="$target/.oma-pi-skill-source"
-
+  mkdir -p "$dir" || return 1
   if [[ -e $target || -L $target ]]; then
-    if [[ -f $marker && "$(cat "$marker")" == "$skill" ]]; then
-      if ! rm -rf -- "$target"; then
-        echo "Error: could not replace $target" >&2
-        return 1
-      fi
+    if skill_entry_is_marker_copy "$target" "$skill" ||
+      skill_entry_is_ours "$scope" "$target_name" "$source"; then
+      rm -rf -- "$target" || return 1
     else
-      # Never destroy a bundled category or a user skill by accident. The
-      # backup lives outside the skills tree so Hermes does not index it.
-      backup_root="${HERMES_HOME:-$HOME/.hermes}/.oma-pi-backups"
-      if ! mkdir -p "$backup_root"; then
-        echo "Error: could not create $backup_root" >&2
-        return 1
-      fi
-      if ! backup="$(mktemp -d "$backup_root/${target_name}.XXXXXX")"; then
-        echo "Error: could not back up $target" >&2
-        return 1
-      fi
-      if ! mv "$target" "$backup/entry"; then
-        echo "Error: could not move $target to $backup" >&2
-        return 1
-      fi
-      echo "Backed up existing Hermes entry to $backup" >&2
+      echo "Error: refusing to replace unowned $target" >&2
+      return 1
     fi
   fi
 
-  if ! mkdir -p "$target"; then
-    echo "Error: could not create $target" >&2
+  if ! mkdir -p "$target" || ! cp -a "$src/." "$target/"; then
+    echo "Error: could not copy $src to $target" >&2
     return 1
   fi
-  if ! cp -a "$canonical/." "$target/"; then
-    echo "Error: could not copy $canonical to $target" >&2
-    return 1
-  fi
-  if ! printf '%s\n' "$skill" >"$marker"; then
-    echo "Error: could not write $marker" >&2
+  if ! printf '%s\n' "$skill" >"$target/.oma-pi-skill-source"; then
+    echo "Error: could not write $target/.oma-pi-skill-source" >&2
     return 1
   fi
   rewrite_skill_name "$target/SKILL.md" "$target_name" || failed=1
   return "$failed"
 }
 
-# Keep renamed/overwritten copies in step with the canonical ~/.agents copy.
-# The skills CLI only manages symlinks, so these copies need refreshing here.
-sync_hermes_skill_copies() {
-  local skill action target file failed=0
-
-  have_hermes || return 0
-  file="$(skill_choices_file)"
-  [[ -f $file ]] || return 0
-
-  while IFS=$'\t' read -r skill action target || [[ -n $skill ]]; do
-    [[ -n $skill ]] || continue
-    case "$action" in
-      rename)
-        if [[ -z $target ]]; then
-          echo "Error: rename choice for $skill has no target" >&2
-          failed=1
-        else
-          install_hermes_copy "$skill" "$target" || failed=1
-        fi
-        ;;
-      overwrite)
-        install_hermes_copy "$skill" "$skill" || failed=1
-        ;;
-      skip)
-        ;;
-      *)
-        echo "Warning: unknown choice '$action' for $skill, ignoring" >&2
-        ;;
-    esac
-  done <"$file"
-
-  return "$failed"
-}
-
-# The skills CLI installs each global skill once into ~/.agents/skills and
-# links it into every agent named with -a (opencode, claude-code,
-# hermes-agent). Skills that share a source go to one call, because --skill
-# accepts several names and cloning the repo once per skill is slow.
-#
-# A skill that collides with a Hermes entry is installed separately without
-# -a hermes-agent, then copied into Hermes by sync_hermes_skill_copies. Passing
-# hermes-agent for it would replace the existing directory (the bug that
-# destroyed ~/.hermes/skills/research/).
+# The skills CLI installs each global skill once into ~/.agents/skills and can
+# link it into each agent named with -a. This installer passes only `-a
+# opencode` (the universal target) and manages the other agents itself, so an
+# agent's bundled or hand-written entry is never handed to the CLI to delete.
+# Skills that share a source go to one call, because --skill accepts several
+# names and cloning the repo once per skill is slow.
 install_ai_skills() {
-  local entry source skill failed=0 stored action
-  local -a cmd agent_args=() non_hermes_args=() sources=() normal=() special=()
+  local entry source skill info action target scope expected
+  local stage tmp_home src dest conflict canonical_conflict global_rename
+  local failed=0
+  local -a sources=() normal=() staged=() cmd=()
+  local -A SKILL_ACTION=() SKILL_TARGET=() SKILL_SOURCE=()
 
-  # OpenCode is a universal target, so listing it makes the CLI write the
-  # canonical ~/.agents/skills copy. Include it even when OpenCode is not
-  # installed: with only Claude Code selected the CLI switches to copy mode and
-  # writes solely to ~/.claude/skills, leaving the canonical directory (and
-  # ai_skills_pending) unaware of the skill. Adding a universal target keeps
-  # the canonical copy plus each agent's link.
-  agent_args=(-a opencode)
-  non_hermes_args=(-a opencode)
-  have_claude_code && agent_args+=(-a claude-code)
-  have_claude_code && non_hermes_args+=(-a claude-code)
-  have_hermes && agent_args+=(-a hermes-agent)
+  migrate_hermes_skill_choices || failed=1
+
+  stage="$HOME/.agents/.oma-pi-staging"
+  rm -rf -- "$stage" 2>/dev/null || true
+  mkdir -p "$stage" || {
+    echo "Error: could not create $stage" >&2
+    return 1
+  }
 
   for entry in "${AI_SKILLS[@]}"; do
     source="${entry%%|*}"
@@ -478,65 +634,196 @@ install_ai_skills() {
 
   for source in "${sources[@]}"; do
     normal=()
-    special=()
+    staged=()
+
     for entry in "${AI_SKILLS[@]}"; do
       [[ ${entry%%|*} == "$source" ]] || continue
       skill="${entry#*|}"
 
-      if [[ $skill != "*" ]] && skill_installed_for_agents "$skill"; then
+      if ! skill_needs_work "$skill" "$source"; then
         echo "✓ $skill already installed"
         continue
       fi
 
-      if ! have_hermes || [[ $skill == "*" ]]; then
+      # A "*" entry cannot be checked for collisions on disk.
+      if [[ $skill == "*" ]]; then
         normal+=("$skill")
         continue
       fi
 
-      if ! stored="$(skill_hermes_action "$skill" "$source")"; then
-        echo "Error: could not resolve the Hermes conflict for $skill; installing it for the other agents only" >&2
-        special+=("$skill")
+      if ! info="$(skill_action "$skill" "$source")"; then
+        echo "Error: could not resolve the conflict for $skill; leaving it alone" >&2
         failed=1
         continue
       fi
-      action="${stored%%$'\t'*}"
+      action="${info%%$'\t'*}"
+      target=""
+      [[ $info == *$'\t'* ]] && target="${info#*$'\t'}"
+
+      SKILL_ACTION["$skill"]="$action"
+      SKILL_TARGET["$skill"]="$target"
+      SKILL_SOURCE["$skill"]="$source"
 
       case "$action" in
-        skip)
-          echo "Skipping $skill in Hermes"
-          special+=("$skill")
+        rename)
+          if skill_scope_conflict canonical "$skill" "$source"; then
+            # The shared copy belongs to something else. Download ours into an
+            # isolated HOME and copy it in under the new name, so the existing
+            # canonical skill is never touched. Once that copy exists it is the
+            # source for the agent entries, so a repair does not download it
+            # again.
+            if [[ ! -f "$(canonical_skills_dir)/$target/SKILL.md" ]]; then
+              staged+=("$skill")
+            fi
+          else
+            normal+=("$skill")
+          fi
           ;;
-        rename|overwrite)
-          special+=("$skill")
+        skip)
+          if skill_scope_conflict canonical "$skill" "$source"; then
+            # Still needed for agent scopes that did not collide.
+            staged+=("$skill")
+          else
+            normal+=("$skill")
+          fi
+          ;;
+        overwrite)
+          if skill_scope_conflict canonical "$skill" "$source"; then
+            if ! skill_backup_entry canonical "$(canonical_skills_dir)/$skill"; then
+              echo "Error: could not back up $(canonical_skills_dir)/$skill; leaving $skill alone" >&2
+              failed=1
+              continue
+            fi
+          fi
+          normal+=("$skill")
+          ;;
+        install)
+          normal+=("$skill")
           ;;
         *)
-          normal+=("$skill")
+          echo "Warning: unknown action '$action' for $skill, skipping" >&2
+          failed=1
           ;;
       esac
     done
 
     if [[ ${#normal[@]} -gt 0 ]]; then
-      cmd=(bunx skills@latest add "$source" -g -y --skill "${normal[@]}" "${agent_args[@]}")
+      cmd=(bunx skills@latest add "$source" -g -y --skill "${normal[@]}" -a opencode)
       if ! "${cmd[@]}"; then
         echo "Error: failed to install skills from $source (${normal[*]})" >&2
-        if have_hermes; then
-          echo "  If Hermes did not get its links, check that the skills CLI still supports -a hermes-agent." >&2
-        fi
         failed=1
       fi
     fi
 
-    if [[ ${#special[@]} -gt 0 ]]; then
-      cmd=(bunx skills@latest add "$source" -g -y --skill "${special[@]}" "${non_hermes_args[@]}")
-      if ! "${cmd[@]}"; then
-        echo "Error: failed to install skills from $source (${special[*]})" >&2
+    if [[ ${#staged[@]} -gt 0 ]]; then
+      tmp_home="$(mktemp -d)"
+      # Reuse the real bun cache so the extra download is cheap, but keep the
+      # skill tree and lock file isolated from the machine's own agents.
+      if HOME="$tmp_home" BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}" \
+        bunx skills@latest add "$source" -g -y --skill "${staged[@]}" -a opencode; then
+        for skill in "${staged[@]}"; do
+          src="$tmp_home/.agents/skills/$skill"
+          if [[ ! -d $src ]]; then
+            echo "Error: the skills CLI did not produce $src" >&2
+            failed=1
+            continue
+          fi
+          action="${SKILL_ACTION[$skill]}"
+          if [[ $action == rename ]]; then
+            target="${SKILL_TARGET[$skill]}"
+            dest="$(canonical_skills_dir)/$target"
+            if [[ -e $dest || -L $dest ]]; then
+              if skill_entry_is_marker_copy "$dest" "$skill"; then
+                rm -rf -- "$dest" || { failed=1; continue; }
+              elif ! skill_backup_entry canonical "$dest"; then
+                echo "Error: could not back up $dest" >&2
+                failed=1
+                continue
+              fi
+            fi
+            if ! mkdir -p "$dest" || ! cp -a "$src/." "$dest/"; then
+              echo "Error: could not copy $src to $dest" >&2
+              failed=1
+              continue
+            fi
+            printf '%s\n' "$skill" >"$dest/.oma-pi-skill-source"
+            rewrite_skill_name "$dest/SKILL.md" "$target" || failed=1
+          else
+            # Skipped canonical copy: keep the content for agent scopes that
+            # did not collide, then throw the isolated tree away.
+            if ! mkdir -p "$stage/$skill" || ! cp -a "$src/." "$stage/$skill/"; then
+              echo "Error: could not stage $skill" >&2
+              failed=1
+            fi
+          fi
+        done
+      else
+        echo "Error: failed to install skills from $source (${staged[*]}) in an isolated HOME" >&2
         failed=1
       fi
+      rm -rf -- "$tmp_home" 2>/dev/null || true
     fi
   done
 
-  sync_hermes_skill_copies || failed=1
+  # Manage Claude Code and Hermes entries ourselves. The CLI never saw their
+  # directories, so nothing here is deleted unless we checked it first.
+  for entry in "${AI_SKILLS[@]}"; do
+    skill="${entry#*|}"
+    [[ -n ${SKILL_ACTION[$skill]+x} ]] || continue
+    source="${SKILL_SOURCE[$skill]}"
+    action="${SKILL_ACTION[$skill]}"
+    target="${SKILL_TARGET[$skill]}"
 
+    canonical_conflict=0
+    skill_scope_conflict canonical "$skill" "$source" && canonical_conflict=1
+
+    for scope in $(skill_scopes); do
+      [[ $scope == canonical ]] && continue
+
+      conflict=0
+      skill_scope_conflict "$scope" "$skill" "$source" && conflict=1
+
+      if [[ $conflict -eq 1 ]]; then
+        case "$action" in
+          skip) continue ;;
+          overwrite)
+            if ! skill_backup_entry "$scope" "$(skill_scope_dir "$scope")/$skill"; then
+              echo "Error: could not back up $(skill_scope_dir "$scope")/$skill; leaving it alone" >&2
+              failed=1
+              continue
+            fi
+            ;;
+        esac
+      fi
+
+      global_rename=0
+      [[ $action == rename && $canonical_conflict -eq 1 ]] && global_rename=1
+
+      # A collision is renamed. A scope that did not collide keeps the
+      # original name unless the canonical collision forced a global rename.
+      expected="$skill"
+      if [[ $action == rename && ( $conflict -eq 1 || $canonical_conflict -eq 1 ) ]]; then
+        expected="$target"
+      fi
+
+      if [[ $action == rename && $conflict -eq 1 && $canonical_conflict -eq 0 ]]; then
+        # Agent-only collision: keep the canonical name, install the renamed
+        # copy from it.
+        install_agent_copy "$(canonical_skills_dir)/$skill" "$scope" "$skill" "$expected" "$source" || failed=1
+      elif [[ $action == skip && $canonical_conflict -eq 1 && $conflict -eq 0 ]]; then
+        # Canonical was skipped, so there is no shared copy to link to.
+        install_agent_copy "$stage/$skill" "$scope" "$skill" "$expected" "$source" || failed=1
+      elif [[ $scope == hermes-agent && ( $action == overwrite || $action == rename ) ]]; then
+        # Hermes syncs bundled skills through its skills directory; a copy
+        # keeps that sync from writing back into the canonical tree.
+        install_agent_copy "$(canonical_skills_dir)/$expected" "$scope" "$skill" "$expected" "$source" || failed=1
+      else
+        link_agent_skill "$scope" "$expected" "$expected" "$skill" "$source" || failed=1
+      fi
+    done
+  done
+
+  rm -rf -- "$stage" 2>/dev/null || true
   return "$failed"
 }
 
