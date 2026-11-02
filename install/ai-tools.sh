@@ -185,6 +185,41 @@ skill_lock_file() {
   fi
 }
 
+# The canonical ownership check reads the skills CLI lock file. Refuse to
+# guess when that file is missing or unreadable: treating every canonical
+# entry as unowned would make the default rename choice install duplicates
+# beside skills the installer already owns. Marker copies carry their own
+# ownership record, so a tree of only marker copies needs no lock.
+skill_lock_preflight() {
+  local lock canonical entry needs_lock=0
+
+  lock="$(skill_lock_file)"
+  canonical="$(canonical_skills_dir)"
+
+  if [[ -d $canonical ]]; then
+    while IFS= read -r -d '' entry; do
+      [[ -f $entry/.oma-pi-skill-source ]] && continue
+      needs_lock=1
+      break
+    done < <(find "$canonical/" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  fi
+  [[ $needs_lock -eq 0 ]] && return 0
+
+  if [[ ! -f $lock ]]; then
+    echo "Error: $lock is missing; cannot tell which canonical skills oma-pi installed. Restore it or remove the affected skill directories, then rerun." >&2
+    return 1
+  fi
+  if ! command -v jq &>/dev/null; then
+    echo "Error: jq is required to read $lock" >&2
+    return 1
+  fi
+  if ! jq -e '.skills | type == "object"' "$lock" >/dev/null 2>&1; then
+    echo "Error: could not parse $lock" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Choices are private to this installer but shared across the agents it
 # manages, so they live beside the canonical skills tree.
 skill_choices_file() {
@@ -208,8 +243,14 @@ migrate_hermes_skill_choices() {
   return 0
 }
 
+# True when a generated rename target is a plain skill directory name.
+skill_target_is_safe() {
+  [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != "." && $1 != ".." ]]
+}
+
 # Print "<action>\t<target>" for a stored choice. Returns non-zero when the
-# skill has no choice yet.
+# skill has no valid choice yet. A malformed line is ignored so it can never
+# send a path outside the skills tree.
 skill_choice_get() {
   local skill="$1" stored action target
   local file
@@ -218,6 +259,11 @@ skill_choice_get() {
   [[ -f $file ]] || return 1
   while IFS=$'\t' read -r stored action target || [[ -n $stored ]]; do
     [[ $stored == "$skill" ]] || continue
+    case "$action" in
+      rename) skill_target_is_safe "$target" || return 1 ;;
+      skip|overwrite) target="" ;;
+      *) return 1 ;;
+    esac
     printf '%s\t%s\n' "$action" "$target"
     return 0
   done <"$file"
@@ -228,14 +274,37 @@ skill_choice_get() {
 skill_choice_set() {
   local skill="$1" action="$2" target="${3:-}" file tmp
 
+  case "$action" in
+    rename)
+      if ! skill_target_is_safe "$target"; then
+        echo "Error: refusing to save an unsafe rename target: $target" >&2
+        return 1
+      fi
+      ;;
+    skip|overwrite) target="" ;;
+    *)
+      echo "Error: refusing to save an unknown skill action: $action" >&2
+      return 1
+      ;;
+  esac
+
   file="$(skill_choices_file)"
-  mkdir -p "$(dirname "$file")"
-  tmp="$(mktemp "${file}.XXXXXX")"
+  mkdir -p "$(dirname "$file")" || return 1
+  tmp="$(mktemp "${file}.XXXXXX")" || return 1
   if [[ -f $file ]]; then
-    awk -F '\t' -v skill="$skill" '$1 != skill' "$file" >"$tmp"
+    if ! awk -F '\t' -v skill="$skill" '$1 != skill' "$file" >"$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
   fi
-  printf '%s\t%s\t%s\n' "$skill" "$action" "$target" >>"$tmp"
-  mv "$tmp" "$file"
+  if ! printf '%s\t%s\t%s\n' "$skill" "$action" "$target" >>"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$file"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # Keep a generated name to the characters a skill name can safely contain.
@@ -299,7 +368,7 @@ skill_entry_is_marker_copy() {
 
 # True when the entry at <scope>/<skill> is one this installer may replace.
 skill_entry_is_ours() {
-  local scope="$1" skill="$2" source="$3" dir target canonical resolved canonical_dir lock
+  local scope="$1" skill="$2" source="$3" dir target canonical resolved canonical_dir lock recorded
 
   dir="$(skill_scope_dir "$scope")" || return 1
   target="$dir/$skill"
@@ -309,9 +378,19 @@ skill_entry_is_ours() {
   # Canonical copies are recorded in the skills CLI lock file.
   if [[ $scope == canonical ]]; then
     lock="$(skill_lock_file)"
-    [[ -f $lock ]] || return 1
-    command -v jq &>/dev/null || return 1
-    [[ "$(jq -r --arg s "$skill" '.skills[$s].source // empty' "$lock" 2>/dev/null)" == "$source" ]]
+    if [[ ! -f $lock ]]; then
+      echo "Error: $lock is missing; cannot classify $target" >&2
+      return 1
+    fi
+    if ! command -v jq &>/dev/null; then
+      echo "Error: jq is required to read $lock" >&2
+      return 1
+    fi
+    if ! recorded="$(jq -r --arg s "$skill" '.skills[$s].source // empty' "$lock" 2>/dev/null)"; then
+      echo "Error: could not parse $lock" >&2
+      return 1
+    fi
+    [[ $recorded == "$source" ]]
     return
   fi
 
@@ -516,7 +595,10 @@ rewrite_skill_name() {
     return 1
   fi
 
-  tmp="$(mktemp)"
+  tmp="$(mktemp)" || {
+    echo "Error: could not create a temporary file to rewrite $file" >&2
+    return 1
+  }
   if ! awk -v name="$name" '
     NR == 1 { print; fm = 1; next }
     fm && $0 ~ /^---[[:space:]]*$/ {
@@ -534,6 +616,32 @@ rewrite_skill_name() {
     return 1
   fi
   rm -f "$tmp"
+}
+
+# Copy <src> into a staging directory beside <parent> and print its path.
+# The caller replaces the live entry only after this succeeds, so a failed
+# copy cannot delete a working skill or leave a half-written one.
+stage_skill_copy() {
+  local src="$1" parent="$2" target_name="$3" skill="$4" tmp
+
+  mkdir -p "$parent" || return 1
+  tmp="$(mktemp -d "$parent/.oma-pi-${target_name}.XXXXXX")" || return 1
+  if ! cp -a "$src/." "$tmp/"; then
+    echo "Error: could not copy $src to $tmp" >&2
+    rm -rf -- "$tmp"
+    return 1
+  fi
+  chmod --reference="$src" "$tmp" 2>/dev/null || true
+  if ! printf '%s\n' "$skill" >"$tmp/.oma-pi-skill-source"; then
+    echo "Error: could not write $tmp/.oma-pi-skill-source" >&2
+    rm -rf -- "$tmp"
+    return 1
+  fi
+  if ! rewrite_skill_name "$tmp/SKILL.md" "$target_name"; then
+    rm -rf -- "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$tmp"
 }
 
 # Create (or refresh) a link from an agent directory to the canonical copy.
@@ -573,7 +681,7 @@ link_agent_skill() {
 # canonical-skipped skill into an agent that did not collide.
 install_agent_copy() {
   local src="$1" scope="$2" skill="$3" target_name="$4" source="$5"
-  local dir target failed=0
+  local dir target tmp
 
   dir="$(skill_scope_dir "$scope")" || return 1
   target="$dir/$target_name"
@@ -581,28 +689,29 @@ install_agent_copy() {
     echo "Error: source $src is missing; cannot install $target_name for $(skill_scope_label "$scope")" >&2
     return 1
   fi
+  if [[ -e $target || -L $target ]] &&
+    ! skill_entry_is_marker_copy "$target" "$skill" &&
+    ! skill_entry_is_ours "$scope" "$target_name" "$source"; then
+    echo "Error: refusing to replace unowned $target" >&2
+    return 1
+  fi
+  if ! tmp="$(stage_skill_copy "$src" "$dir" "$target_name" "$skill")"; then
+    return 1
+  fi
 
-  mkdir -p "$dir" || return 1
   if [[ -e $target || -L $target ]]; then
-    if skill_entry_is_marker_copy "$target" "$skill" ||
-      skill_entry_is_ours "$scope" "$target_name" "$source"; then
-      rm -rf -- "$target" || return 1
-    else
-      echo "Error: refusing to replace unowned $target" >&2
+    if ! rm -rf -- "$target"; then
+      echo "Error: could not replace $target" >&2
+      rm -rf -- "$tmp"
       return 1
     fi
   fi
 
-  if ! mkdir -p "$target" || ! cp -a "$src/." "$target/"; then
-    echo "Error: could not copy $src to $target" >&2
+  if ! mv -- "$tmp" "$target"; then
+    echo "Error: could not move $tmp to $target" >&2
+    rm -rf -- "$tmp"
     return 1
   fi
-  if ! printf '%s\n' "$skill" >"$target/.oma-pi-skill-source"; then
-    echo "Error: could not write $target/.oma-pi-skill-source" >&2
-    return 1
-  fi
-  rewrite_skill_name "$target/SKILL.md" "$target_name" || failed=1
-  return "$failed"
 }
 
 # The skills CLI installs each global skill once into ~/.agents/skills and can
@@ -613,12 +722,15 @@ install_agent_copy() {
 # names and cloning the repo once per skill is slow.
 install_ai_skills() {
   local entry source skill info action target scope expected
-  local stage tmp_home src dest conflict canonical_conflict global_rename
+  local stage tmp_home src dest conflict canonical_conflict tmp
   local failed=0
   local -a sources=() normal=() staged=() cmd=()
   local -A SKILL_ACTION=() SKILL_TARGET=() SKILL_SOURCE=()
 
   migrate_hermes_skill_choices || failed=1
+  if ! skill_lock_preflight; then
+    return 1
+  fi
 
   stage="$HOME/.agents/.oma-pi-staging"
   rm -rf -- "$stage" 2>/dev/null || true
@@ -689,13 +801,12 @@ install_ai_skills() {
           ;;
         overwrite)
           if skill_scope_conflict canonical "$skill" "$source"; then
-            if ! skill_backup_entry canonical "$(canonical_skills_dir)/$skill"; then
-              echo "Error: could not back up $(canonical_skills_dir)/$skill; leaving $skill alone" >&2
-              failed=1
-              continue
-            fi
+            # Download into the isolated HOME below, then back the live copy
+            # up only after the replacement is ready.
+            staged+=("$skill")
+          else
+            normal+=("$skill")
           fi
-          normal+=("$skill")
           ;;
         install)
           normal+=("$skill")
@@ -716,10 +827,18 @@ install_ai_skills() {
     fi
 
     if [[ ${#staged[@]} -gt 0 ]]; then
-      tmp_home="$(mktemp -d)"
+      if ! tmp_home="$(mktemp -d)"; then
+        echo "Error: could not create an isolated HOME for $source" >&2
+        failed=1
+        continue
+      fi
       # Reuse the real bun cache so the extra download is cheap, but keep the
-      # skill tree and lock file isolated from the machine's own agents.
-      if HOME="$tmp_home" BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}" \
+      # skill tree, config and lock file isolated from the machine's own
+      # agents. XDG_STATE_HOME in particular decides where the CLI writes its
+      # lock; leaving it set would add the staged skills to the real lock and
+      # make a later run treat an unowned canonical entry as ours.
+      if env -u XDG_STATE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME \
+        HOME="$tmp_home" BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}" \
         bunx skills@latest add "$source" -g -y --skill "${staged[@]}" -a opencode; then
         for skill in "${staged[@]}"; do
           src="$tmp_home/.agents/skills/$skill"
@@ -729,33 +848,69 @@ install_ai_skills() {
             continue
           fi
           action="${SKILL_ACTION[$skill]}"
-          if [[ $action == rename ]]; then
-            target="${SKILL_TARGET[$skill]}"
-            dest="$(canonical_skills_dir)/$target"
-            if [[ -e $dest || -L $dest ]]; then
-              if skill_entry_is_marker_copy "$dest" "$skill"; then
-                rm -rf -- "$dest" || { failed=1; continue; }
-              elif ! skill_backup_entry canonical "$dest"; then
-                echo "Error: could not back up $dest" >&2
+          case "$action" in
+            rename|overwrite)
+              if [[ $action == rename ]]; then
+                target="${SKILL_TARGET[$skill]}"
+              else
+                target="$skill"
+              fi
+              dest="$(canonical_skills_dir)/$target"
+
+              # Build the replacement first. Only touch the live entry after
+              # the copy, marker and frontmatter rewrite all succeed.
+              if ! tmp="$(stage_skill_copy "$src" "$(canonical_skills_dir)" "$target" "$skill")"; then
                 failed=1
                 continue
               fi
-            fi
-            if ! mkdir -p "$dest" || ! cp -a "$src/." "$dest/"; then
-              echo "Error: could not copy $src to $dest" >&2
+
+              if [[ -e $dest || -L $dest ]]; then
+                if [[ $action == rename ]] && skill_entry_is_marker_copy "$dest" "$skill"; then
+                  if ! rm -rf -- "$dest"; then
+                    rm -rf -- "$tmp"
+                    failed=1
+                    continue
+                  fi
+                elif ! skill_backup_entry canonical "$dest"; then
+                  echo "Error: could not back up $dest" >&2
+                  rm -rf -- "$tmp"
+                  failed=1
+                  continue
+                fi
+              fi
+
+              if ! mv -- "$tmp" "$dest"; then
+                echo "Error: could not move $tmp to $dest" >&2
+                rm -rf -- "$tmp"
+                failed=1
+                continue
+              fi
+              ;;
+            skip)
+              # Skipped canonical copy: keep the content for agent scopes that
+              # did not collide, then throw the isolated tree away.
+              if ! tmp="$(stage_skill_copy "$src" "$stage" "$skill" "$skill")"; then
+                failed=1
+                continue
+              fi
+              if [[ -e "$stage/$skill" || -L "$stage/$skill" ]]; then
+                if ! rm -rf -- "$stage/$skill"; then
+                  rm -rf -- "$tmp"
+                  failed=1
+                  continue
+                fi
+              fi
+              if ! mv -- "$tmp" "$stage/$skill"; then
+                echo "Error: could not stage $skill" >&2
+                rm -rf -- "$tmp"
+                failed=1
+              fi
+              ;;
+            *)
+              echo "Error: unexpected action '$action' for $skill in the isolated install" >&2
               failed=1
-              continue
-            fi
-            printf '%s\n' "$skill" >"$dest/.oma-pi-skill-source"
-            rewrite_skill_name "$dest/SKILL.md" "$target" || failed=1
-          else
-            # Skipped canonical copy: keep the content for agent scopes that
-            # did not collide, then throw the isolated tree away.
-            if ! mkdir -p "$stage/$skill" || ! cp -a "$src/." "$stage/$skill/"; then
-              echo "Error: could not stage $skill" >&2
-              failed=1
-            fi
-          fi
+              ;;
+          esac
         done
       else
         echo "Error: failed to install skills from $source (${staged[*]}) in an isolated HOME" >&2
@@ -777,6 +932,28 @@ install_ai_skills() {
     canonical_conflict=0
     skill_scope_conflict canonical "$skill" "$source" && canonical_conflict=1
 
+    # If a canonical rename/overwrite was needed but the staged download did
+    # not produce it, do not touch agent entries: the replacement source is
+    # missing, and backing them up would only lose the working copy.
+    if [[ $canonical_conflict -eq 1 ]]; then
+      case "$action" in
+        rename)
+          if ! skill_entry_is_marker_copy "$(canonical_skills_dir)/$target" "$skill"; then
+            echo "Error: canonical rename for $skill did not complete; leaving agent entries alone" >&2
+            failed=1
+            continue
+          fi
+          ;;
+        overwrite)
+          if ! skill_entry_is_ours canonical "$skill" "$source"; then
+            echo "Error: canonical overwrite for $skill did not complete; leaving agent entries alone" >&2
+            failed=1
+            continue
+          fi
+          ;;
+      esac
+    fi
+
     for scope in $(skill_scopes); do
       [[ $scope == canonical ]] && continue
 
@@ -787,6 +964,14 @@ install_ai_skills() {
         case "$action" in
           skip) continue ;;
           overwrite)
+            # Back up the agent entry only after the replacement source
+            # exists. Otherwise a failed download would delete a working
+            # bundled or hand-written skill for nothing.
+            if [[ ! -f "$(canonical_skills_dir)/$skill/SKILL.md" ]]; then
+              echo "Error: $(canonical_skills_dir)/$skill is missing; leaving $(skill_scope_dir "$scope")/$skill alone" >&2
+              failed=1
+              continue
+            fi
             if ! skill_backup_entry "$scope" "$(skill_scope_dir "$scope")/$skill"; then
               echo "Error: could not back up $(skill_scope_dir "$scope")/$skill; leaving it alone" >&2
               failed=1
@@ -795,9 +980,6 @@ install_ai_skills() {
             ;;
         esac
       fi
-
-      global_rename=0
-      [[ $action == rename && $canonical_conflict -eq 1 ]] && global_rename=1
 
       # A collision is renamed. A scope that did not collide keeps the
       # original name unless the canonical collision forced a global rename.
