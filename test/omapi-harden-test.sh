@@ -2825,12 +2825,195 @@ test_docker_ufw6_only_written_when_ipv6_enabled() {
 }
 
 # ---------------------------------------------------------------------------
+printf '\naccount policy and service minimisation\n'
+
+test_account_policy_replaces_values_in_place() {
+  setup_destdir
+  mkdir -p "$CONF_DEST/etc"
+  local f="$CONF_DEST/etc/login.defs" rc=0
+  printf '# stock comment\nUMASK\t\t022\nPASS_MAX_DAYS\t99999\nPASS_MIN_DAYS\t0\nPASS_WARN_AGE\t7\n' >"$f"
+  chmod 644 "$f"
+
+  configure_account_policy >/dev/null 2>&1
+
+  grep -qE '^PASS_MAX_DAYS[[:space:]]+365$' "$f" || rc=1
+  grep -qE '^PASS_MIN_DAYS[[:space:]]+1$' "$f" || rc=1
+  grep -qE '^PASS_WARN_AGE[[:space:]]+14$' "$f" || rc=1
+  grep -qE '^UMASK[[:space:]]+027$' "$f" || rc=1
+  # The stock comment has to survive: this is an edit, not a replacement.
+  grep -qx '# stock comment' "$f" || rc=1
+  # ... and so does the mode.
+  [[ $(stat -c %a "$f") == 644 ]] || rc=1
+
+  # A second run must not append a duplicate copy of every key.
+  configure_account_policy >/dev/null 2>&1
+  [[ $(grep -c '^PASS_MAX_DAYS' "$f") -eq 1 ]] || rc=1
+  [[ $(grep -c '^UMASK' "$f") -eq 1 ]] || rc=1
+
+  teardown_destdir
+  return $rc
+}
+
+test_account_policy_dry_run_touches_nothing() {
+  setup_destdir
+  mkdir -p "$CONF_DEST/etc"
+  local f="$CONF_DEST/etc/login.defs" rc=0 before
+  printf 'PASS_MAX_DAYS\t99999\nUMASK\t\t022\n' >"$f"
+  before="$(cat "$f")"
+  DRY_RUN=1
+  configure_account_policy >/dev/null 2>&1
+  DRY_RUN=0
+  [[ $(cat "$f") == "$before" ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_services_dry_run_touches_nothing() {
+  setup_destdir
+  stub systemctl
+  systemctl() {
+    case "$*" in
+      *is-enabled*cups.service*) printf 'enabled\n'; return 0 ;;
+      *is-active*cups.service*) printf 'active\n'; return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  local out rc=0
+  DRY_RUN=1
+  out="$(configure_services 2>&1)"
+  DRY_RUN=0
+  [[ $out == *"would run: systemctl disable --now cups.service"* ]] || {
+    printf '        the dry run did not plan the cups disable: %s\n' "$out"
+    rc=1
+  }
+  if [[ $out == *"[stub] run_root systemctl disable"* ]]; then
+    printf '        the dry run actually issued a systemctl disable\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_services_skips_units_that_are_not_installed() {
+  setup_destdir
+  stub systemctl
+  systemctl() { return 1; }
+  local out rc=0
+  out="$(configure_services 2>&1)"
+  if [[ $out == *"cups.service"* || $out == *"avahi-daemon.service"* ]]; then
+    printf '        an absent unit was reported as a hardening target\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_services_disables_a_safe_unit_by_default() {
+  setup_destdir
+  stub systemctl
+  systemctl() {
+    case "$*" in
+      *is-enabled*cups.service*) printf 'enabled\n'; return 0 ;;
+      *is-active*cups.service*) printf 'active\n'; return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  local out rc=0
+  out="$(configure_services 2>&1)"
+  [[ $out == *"[stub] run_root systemctl disable --now cups.service"* ]] || {
+    printf '        cups was not disabled by default: %s\n' "$out"
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
+test_services_leaves_optional_avahi_alone_by_default() {
+  # ASSUME_YES is set by setup_destdir, so this is the --yes path. avahi is
+  # how hostname.local resolves, so its default must be "leave it".
+  setup_destdir
+  stub systemctl
+  systemctl() {
+    case "$*" in
+      *is-enabled*avahi-daemon.service*) printf 'enabled\n'; return 0 ;;
+      *is-active*avahi-daemon.service*) printf 'active\n'; return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  local out rc=0
+  out="$(configure_services 2>&1)"
+  [[ $out == *"left avahi-daemon.service alone"* ]] || {
+    printf '        avahi was not left alone by default: %s\n' "$out"
+    rc=1
+  }
+  if [[ $out == *"systemctl disable --now avahi-daemon.service"* ]]; then
+    printf '        avahi was disabled by default\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+test_sshd_block_includes_depth_directives() {
+  setup_destdir
+  local rc=0 out
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "/home/admin/.ssh/authorized_keys"; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'admin\n'; }
+  stub ask
+  ask() { return 1; }
+  stub have
+  have() {
+    case "$1" in
+      gum | tailscale) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  DRY_RUN=1
+  out="$(harden_ssh 2>&1 || true)"
+  DRY_RUN=0
+
+  local directive
+  for directive in \
+    'MaxStartups 10:30:60' \
+    'LogLevel VERBOSE' \
+    'UseDNS no' \
+    'PermitUserEnvironment no' \
+    'GatewayPorts no' \
+    'AllowAgentForwarding no'; do
+    if [[ $out != *"$directive"* ]]; then
+      printf '        missing sshd directive: %s\n' "$directive"
+      rc=1
+    fi
+  done
+  # TCP forwarding is a different feature and must stay available.
+  if [[ $out == *"AllowTcpForwarding no"* ]]; then
+    printf '        AllowTcpForwarding was disabled, breaking ssh-port-forwarding\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
+# ---------------------------------------------------------------------------
 printf '\nrunning\n'
 
 t 'sshd managed block is prepended'                    test_sshd_block_prepended
 t 'sshd managed block is idempotent'                    test_sshd_block_is_idempotent
 t 'sshd config keeps mode and owner'                    test_sshd_preserves_mode_and_owner
 t 'sshd config is created when absent'                  test_sshd_creates_missing_config
+t 'sshd block includes depth directives'                test_sshd_block_includes_depth_directives
+t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
+t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
+t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
+t 'service minimisation skips absent units'             test_services_skips_units_that_are_not_installed
+t 'service minimisation disables safe units'            test_services_disables_a_safe_unit_by_default
+t 'service minimisation leaves avahi alone'             test_services_leaves_optional_avahi_alone_by_default
 
 t 'an empty authorized_keys blocks the lockout change'  test_no_lockout_without_key
 t 'a key in authorized_keys2 is found'                  test_no_lockout_with_second_path_only

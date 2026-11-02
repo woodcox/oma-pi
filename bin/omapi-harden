@@ -29,10 +29,11 @@
 #     depends on it.
 #   * net.ipv4.ip_forward is not forced to 0 when Docker is installed; the
 #     installer puts Docker on every box and its bridge needs forwarding.
-#   * Wi-Fi and Bluetooth are not disabled. That needs a /boot/config.txt
+#   * Wi-Fi and Bluetooth radios are not disabled. That needs a /boot/config.txt
 #     dtoverlay and a reboot, and getting it wrong drops this box off the
 #     network you are reading this over. The exact lines are printed at the
-#     end of the run instead.
+#     end of the run instead. The services task can stop bluetooth.service and
+#     hciuart.service, but that is not the same as turning the radio off.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -63,8 +64,8 @@ MANAGED_END="# END oma-pi hardening"
 # aideinit builds a file database over the whole filesystem. On an SD card
 # that is minutes of 100% CPU, so it is opt-in rather than part of the
 # default run.
-TASKS=(packages users ssh firewall fail2ban updates apparmor sysctl aide audit)
-DEFAULT_TASKS=(packages users ssh firewall fail2ban updates apparmor sysctl audit)
+TASKS=(packages users accounts services ssh firewall fail2ban updates apparmor sysctl aide audit)
+DEFAULT_TASKS=(packages users accounts services ssh firewall fail2ban updates apparmor sysctl audit)
 
 # ---------------------------------------------------------------------------
 # Output
@@ -100,6 +101,8 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
+  accounts    password ageing and umask defaults in /etc/login.defs
+  services    stop and disable services a headless server does not need
   ssh         sshd hardening: no root login, no passwords, key-only, limits
   firewall    ufw: deny incoming by default, allow only what is listening
   fail2ban    ban repeat SSH/auth failures, banaction matched to ufw
@@ -888,6 +891,207 @@ check_users() {
 }
 
 # ---------------------------------------------------------------------------
+# accounts (login.defs)
+# ---------------------------------------------------------------------------
+# Replace KEY=VALUE pairs in a line-oriented config, leaving every other line
+# (comments included) exactly where it was. An existing key is rewritten in
+# place; a key the file does not define is appended. Staged and renamed with
+# the target's own mode and owner, because a half-written login.defs is a box
+# where `useradd`, `passwd` and login itself start behaving strangely.
+replace_conf_values() {
+  local path="$1"
+  shift
+  local target="${CONF_DEST}${path}"
+  local pair
+
+  if ((DRY_RUN)); then
+    for pair in "$@"; do
+      printf '  %s•%s would set %s in %s\n' "$C_DIM" "$C_OFF" "$pair" "$path"
+    done
+    return 0
+  fi
+
+  if [[ ! -f $target ]]; then
+    warn "no ${path}; not changing it"
+    return 1
+  fi
+
+  local body
+  if ! body="$(mktemp)"; then
+    warn "could not create a staging file for ${path}; it has NOT been changed"
+    return 1
+  fi
+
+  if ! awk -v pairs="$*" '
+    BEGIN {
+      n = split(pairs, a, " ")
+      for (i = 1; i <= n; i++) {
+        split(a[i], kv, "=")
+        want[kv[1]] = kv[2]
+        order[i] = kv[1]
+      }
+    }
+    {
+      line = $0
+      if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]/) {
+        key = line
+        sub(/^[[:space:]]*/, "", key)
+        sub(/[[:space:]].*$/, "", key)
+        if (key in want) {
+          print key " " want[key]
+          seen[key] = 1
+          next
+        }
+      }
+      print
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        if (!(order[i] in seen)) print order[i] " " want[order[i]]
+      }
+    }
+  ' "$target" >"$body"; then
+    rm -f "$body"
+    warn "could not rewrite ${path}; it has NOT been changed"
+    return 1
+  fi
+
+  local stage="${target}.omapi-stage.$$"
+  local tmode towner tgroup
+  tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
+  towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
+  tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
+  if [[ -z $tmode || -z $towner || -z $tgroup ]] ||
+    ! run_root cp "$body" "$stage"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not stage ${path}; it has NOT been changed"
+    return 1
+  fi
+  if ! run_root chmod "$tmode" "$stage" 2>/dev/null ||
+    ! run_root chown "$towner:$tgroup" "$stage" 2>/dev/null; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not set the mode/owner on the staged ${path}; it has NOT been changed"
+    return 1
+  fi
+  if ! run_root mv -f "$stage" "$target"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not install ${path}; it has NOT been changed"
+    return 1
+  fi
+  rm -f "$body"
+  note "updated $path"
+}
+
+# Password ageing and the process umask live in login.defs. These are defaults
+# for NEW passwords and sessions: existing accounts keep the ageing already
+# recorded in /etc/shadow. That is deliberate. `chage -M 365` on an account
+# whose password is older than a year expires it immediately, which on a
+# headless box is a lockout dressed up as a policy.
+LOGIN_DEFS_POLICY=(
+  PASS_MAX_DAYS=365
+  PASS_MIN_DAYS=1
+  PASS_WARN_AGE=14
+  UMASK=027
+)
+
+configure_account_policy() {
+  section "Account policy (login.defs)"
+
+  note "defaults for new passwords and logins; existing accounts keep their /etc/shadow ageing"
+
+  if ! replace_conf_values /etc/login.defs "${LOGIN_DEFS_POLICY[@]}"; then
+    warn "password ageing and umask defaults were not applied"
+    return 0
+  fi
+
+  if ((!DRY_RUN)); then
+    # Report what actually landed, not what was asked for.
+    local f="${CONF_DEST}/etc/login.defs" k v
+    for k in PASS_MAX_DAYS PASS_MIN_DAYS PASS_WARN_AGE UMASK; do
+      v="$(awk -v k="$k" '$1 == k { v = $2 } END { if (v != "") print v }' "$f" 2>/dev/null || true)"
+      [[ -n $v ]] && ok "${k} ${v}"
+    done
+    note "existing accounts are unchanged: inspect one with 'sudo chage -l <user>'"
+    note "UMASK also needs pam_umask enabled to affect interactive SSH sessions"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# services
+# ---------------------------------------------------------------------------
+# Units a headless server does not need. `:y` disables unless declined; `:n`
+# leaves alone unless asked, because avahi is how `hostname.local` resolves and
+# rpcbind is how NFS works. An absent unit is skipped rather than reported as
+# a missing hardening step.
+SERVICES_SAFE_OFF=(
+  cups.service
+  cups.socket
+  cups-browsed.service
+  bluetooth.service
+  bluetooth.socket
+  hciuart.service
+  triggerhappy.service
+  ModemManager.service
+  whoopsie.service
+  apport.service
+)
+SERVICES_ASK_OFF=(
+  avahi-daemon.service
+  avahi-daemon.socket
+  rpcbind.service
+  rpcbind.socket
+)
+
+configure_services() {
+  section "Service minimisation"
+
+  if ! have systemctl; then
+    warn "systemctl is not available, skipping service minimisation"
+    return 0
+  fi
+
+  local entry unit default state active
+  local -a entries=()
+  local u
+  for u in "${SERVICES_SAFE_OFF[@]}"; do entries+=("${u}:y"); done
+  for u in "${SERVICES_ASK_OFF[@]}"; do entries+=("${u}:n"); done
+
+  for entry in "${entries[@]}"; do
+    unit="${entry%:*}"
+    default="${entry##*:}"
+    # is-enabled and is-active are read-only queries that work unprivileged.
+    # Deliberately not `peek`: peek gives up when there is no sudo prompt, and
+    # a non-interactive run then saw every unit as absent and disabled nothing
+    # while reporting success. Knowing a unit exists must never depend on
+    # privilege.
+    state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    case $state in
+      '' | not-found | masked) continue ;;
+    esac
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    if [[ $state == disabled && $active != active ]]; then
+      ok "${unit} already disabled"
+      continue
+    fi
+
+    if ask "disable and stop ${unit}? (not needed on a headless server)" "$default"; then
+      if ((DRY_RUN)); then
+        printf '  %s•%s would run: systemctl disable --now %s\n' "$C_DIM" "$C_OFF" "$unit"
+      elif run_root systemctl disable --now "$unit"; then
+        ok "${unit} disabled (undo: sudo systemctl enable --now ${unit})"
+      else
+        warn "could not disable ${unit}; it is still running"
+      fi
+    else
+      skip "left ${unit} alone"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # ssh
 # ---------------------------------------------------------------------------
 # Effective SSH port, preferring what sshd itself reports, because a
@@ -1111,9 +1315,18 @@ PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 3
 MaxSessions 5
+MaxStartups 10:30:60
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
+LogLevel VERBOSE
+UseDNS no
+PermitUserEnvironment no
+GatewayPorts no
+# Agent forwarding is off: a compromised remote host can otherwise use every
+# key loaded in your local agent. TCP forwarding is a different feature and is
+# deliberately untouched below - config/shell/fns/ssh-port-forwarding needs it.
+AllowAgentForwarding no
 # AllowTcpForwarding is intentionally untouched: config/shell/fns/ssh-port-forwarding
 # relies on it.
 EOF
@@ -3187,6 +3400,8 @@ main() {
 
   want_task packages && install_hardening_packages
   want_task users && check_users
+  want_task accounts && configure_account_policy
+  want_task services && configure_services
   want_task ssh && harden_ssh
   want_task firewall && configure_firewall
   want_task fail2ban && configure_fail2ban

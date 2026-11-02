@@ -127,7 +127,21 @@ for further info.
 
 After installing you can run `omapi-harden` which applies the following hardening: 
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
-security updates, AppArmor, and kernel and network sysctls. 
+security updates, AppArmor, kernel and network sysctls, password-ageing and umask
+defaults, and service minimisation (it offers to disable things a headless server
+does not need, such as cups, Bluetooth and triggerhappy). 
+
+Password ageing and umask are written to `/etc/login.defs` and apply to new
+passwords and logins. Existing accounts keep the ageing already recorded in
+`/etc/shadow` on purpose: applying a maximum age to an account whose password is
+older than that maximum marks it expired immediately, which on a headless box is
+a lockout. `UMASK` also needs `pam_umask` enabled to affect interactive SSH
+sessions; on stock Debian it is not, so treat that line as a default for
+`useradd` and anything else that reads `login.defs`.
+
+Service minimisation only touches units that are installed, asks for every one,
+and defaults to leaving avahi (`.local` discovery) and rpcbind (NFS) alone. Each
+disable prints the exact `systemctl enable --now` command to undo it.
 
 File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
@@ -204,7 +218,12 @@ Some deliberate choices worth knowing before you run it:
   you run the script, forwarding is turned off; start Docker and re-run if that
   matters. There is a test that fails if this ever regresses.
 - **`AllowTcpForwarding` stays on**, because `config/shell/fns/ssh-port-forwarding`
-  depends on it.
-- **Wi-Fi and Bluetooth are not disabled.** That needs a `sudo nano /boot/config.txt`
+  depends on it. Agent forwarding is a different feature and is turned off:
+  `AllowAgentForwarding no` stops a compromised remote host from using every key
+  loaded in your local agent. If a workflow needs `ssh -A`, override it in a
+  drop-in or with `ssh -o ForwardAgent=yes` per host.
+- **Wi-Fi and Bluetooth radios are not disabled.** That needs a `sudo nano /boot/config.txt`
   dtoverlay and a reboot, and getting it wrong drops the box off the network you
-  are managing it over. The exact lines are printed at the end of a run.
+  are managing it over. The exact lines are printed at the end of a run. The
+  service minimisation task can stop `bluetooth.service` and `hciuart.service`,
+  but that is not the same as switching the radio off.
