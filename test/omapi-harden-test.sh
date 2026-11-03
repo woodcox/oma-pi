@@ -2956,17 +2956,29 @@ test_services_never_touches_left_alone_units() {
   return $rc
 }
 
-test_sshd_block_includes_depth_directives() {
-  setup_destdir
-  local rc=0 out
+# One stub set for harden_ssh unit tests: a listening sshd on 22, ask answers
+# no to everything (defaults win, as in --yes runs where a prompt is refused),
+# and `have` says gum/tailscale are absent so the password-auth fallback paths
+# are taken rather than their tailscale side notes. With `no_key`, no sudoer
+# has a usable key; without it, the sudoer `admin` does. Testing one flag or
+# another does not change any of this, so each flag test is just
+#   stub_ssh_context [no_key]; set the flag; run harden_ssh
+stub_ssh_context() {
+  local mode="${1:-}"
   stub current_ssh_port
   current_ssh_port() { printf '22\n'; }
   stub have_usable_key
-  have_usable_key() { return 0; }
+  case $mode in
+    no_key) have_usable_key() { return 1; } ;;
+    *) have_usable_key() { return 0; } ;;
+  esac
   stub key_files_for_user
   key_files_for_user() { printf '%s\n' "/home/admin/.ssh/authorized_keys"; }
   stub non_root_sudoer_with_key
-  non_root_sudoer_with_key() { printf 'admin\n'; }
+  case $mode in
+    no_key) non_root_sudoer_with_key() { return 1; } ;;
+    *) non_root_sudoer_with_key() { printf 'admin\n'; } ;;
+  esac
   stub ask
   ask() { return 1; }
   stub have
@@ -2976,6 +2988,12 @@ test_sshd_block_includes_depth_directives() {
       *) return 0 ;;
     esac
   }
+}
+
+test_sshd_block_includes_depth_directives() {
+  setup_destdir
+  local rc=0 out
+  stub_ssh_context
   DRY_RUN=1
   out="$(harden_ssh 2>&1 || true)"
   DRY_RUN=0
@@ -3008,23 +3026,7 @@ test_sshd_agent_forwarding_flag() {
   # first value it reads, so omitting it would let a drop-in decide).
   setup_destdir
   local rc=0 out
-  stub current_ssh_port
-  current_ssh_port() { printf '22\n'; }
-  stub have_usable_key
-  have_usable_key() { return 0; }
-  stub key_files_for_user
-  key_files_for_user() { printf '%s\n' "/home/admin/.ssh/authorized_keys"; }
-  stub non_root_sudoer_with_key
-  non_root_sudoer_with_key() { printf 'admin\n'; }
-  stub ask
-  ask() { return 1; }
-  stub have
-  have() {
-    case "$1" in
-      gum | tailscale) return 1 ;;
-      *) return 0 ;;
-    esac
-  }
+  stub_ssh_context
   DRY_RUN=1
   AGENT_FORWARDING=1
   out="$(harden_ssh 2>&1 || true)"
@@ -3052,21 +3054,7 @@ test_sshd_password_ssh_flag() {
   # must be skipped: passwords staying on IS the way back in.
   setup_destdir
   local rc=0 out
-  stub current_ssh_port
-  current_ssh_port() { printf '22\n'; }
-  stub have_usable_key
-  have_usable_key() { return 1; }
-  stub non_root_sudoer_with_key
-  non_root_sudoer_with_key() { return 1; }
-  stub ask
-  ask() { return 1; }
-  stub have
-  have() {
-    case "$1" in
-      gum | tailscale) return 1 ;;
-      *) return 0 ;;
-    esac
-  }
+  stub_ssh_context no_key
   DRY_RUN=1
   PASSWORD_SSH=1
   out="$(harden_ssh 2>&1 || true)"
