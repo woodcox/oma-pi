@@ -109,7 +109,8 @@ Tasks (default: all but aide):
   users       no empty passwords, lock the default `pi` account, audit UID 0
   accounts    password ageing defaults in /etc/login.defs
   services    stop and disable services a headless server does not need
-  ssh         sshd hardening: no root login, no passwords, key-only, limits
+  ssh         sshd hardening: no root login, key-only by default
+              (--password-ssh keeps passwords), limits
   firewall    ufw: deny incoming by default, allow only what is listening
   fail2ban    ban repeat SSH/auth failures, banaction matched to ufw
   updates     unattended-upgrades for security patches, no surprise reboots
