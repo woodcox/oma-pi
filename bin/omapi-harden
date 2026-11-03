@@ -1080,9 +1080,7 @@ configure_services() {
     fi
 
     if ask "disable and stop ${unit}? (not needed on a headless server)" "y"; then
-      if ((DRY_RUN)); then
-        printf '  %s•%s would run: systemctl disable --now %s\n' "$C_DIM" "$C_OFF" "$unit"
-      elif run_root systemctl disable --now "$unit"; then
+      if run_root systemctl disable --now "$unit"; then
         ok "${unit} disabled (undo: sudo systemctl enable --now ${unit})"
       else
         warn "could not disable ${unit}; it is still running"

@@ -60,6 +60,15 @@ setup_destdir() {
   # inspects a result would see a missing file. cp/install are done for real
   # (they are safe in a destdir); everything else is just logged.
   run_root() {
+    # Mirror the real run_root's dry-run contract: print the command, run
+    # nothing. Before omapi-harden delegated its services dry-run print to
+    # run_root, no dry-run path reached this stub, so DRY_RUN-blindness was
+    # invisible; now the blocker would print "[stub] run_root" instead of the
+    # plan and "disabled" success lines that a real dry run does not show.
+    if ((DRY_RUN)); then
+      printf '  %s•%s would run: %s\n' "${C_DIM:-}" "${C_OFF:-}" "$*" >&2
+      return 0
+    fi
     printf '  [stub] run_root %s\n' "$*" >&2
     case $1 in
       cp) command cp "${@:2}" ;;
@@ -2872,11 +2881,17 @@ test_account_policy_dry_run_touches_nothing() {
 
 test_services_dry_run_touches_nothing() {
   setup_destdir
+  # `stub run_root` would log the dry-run "would run" line too, which says
+  # nothing: under DRY_RUN run_root prints instead of executing. The assertion
+  # that matters is that the real `systemctl disable` call is never reached,
+  # so watch for that directly in the systemctl stub.
   stub systemctl
+  local disable_ran=0
   systemctl() {
     case "$*" in
       *is-enabled*cups.service*) printf 'enabled\n'; return 0 ;;
       *is-active*cups.service*) printf 'active\n'; return 0 ;;
+      *disable*cups.service*) disable_ran=1; return 0 ;;
       *) return 1 ;;
     esac
   }
@@ -2888,8 +2903,8 @@ test_services_dry_run_touches_nothing() {
     printf '        the dry run did not plan the cups disable: %s\n' "$out"
     rc=1
   }
-  if [[ $out == *"[stub] run_root systemctl disable"* ]]; then
-    printf '        the dry run actually issued a systemctl disable\n'
+  if ((disable_ran)); then
+    printf '        the dry run executed systemctl disable\n'
     rc=1
   fi
   teardown_destdir
