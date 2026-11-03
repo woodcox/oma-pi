@@ -3026,7 +3026,9 @@ test_sshd_block_includes_depth_directives() {
     'UseDNS no' \
     'PermitUserEnvironment no' \
     'GatewayPorts no' \
-    'AllowAgentForwarding no'; do
+    'AllowAgentForwarding no' \
+    'PasswordAuthentication no' \
+    'KbdInteractiveAuthentication no'; do
     if [[ $out != *"$directive"* ]]; then
       printf '        missing sshd directive: %s\n' "$directive"
       rc=1
@@ -3067,8 +3069,8 @@ test_sshd_agent_forwarding_flag() {
 }
 
 test_sshd_password_ssh_flag() {
-  # Default path writes PasswordAuthentication no (asserted by the managed
-  # block tests); this is the --password-ssh opt-out for a box that is
+  # The default no on both directives is asserted by the depth-directives
+  # loop; this is the --password-ssh opt-out for a box that is
   # genuinely logged into with an ssh password. Keyboard-interactive follows
   # the same flag: under Debian it is the PAM password prompt, so leaving it
   # off would still reject some password clients. The key backdoor question
