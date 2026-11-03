@@ -140,7 +140,8 @@ nothing on a single-admin box and breaks anything the box writes for others to
 read.
 
 Service minimisation only touches units that are installed and asks for every
-one. It deliberately never touches avahi (`.local` discovery), rpcbind (NFS),
+one it can disable (units systemd cannot disable — static, indirect, masked —
+are skipped outright). It deliberately never touches avahi (`.local` discovery), rpcbind (NFS),
 or the apport/whoopsie crash-report pair. Each disable prints the exact
 `systemctl enable --now` command to undo it.
 
