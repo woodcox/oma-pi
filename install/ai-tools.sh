@@ -746,9 +746,9 @@ install_ai_skills() {
         continue   # skip means leave the colliding entries alone
       fi
 
-      if [[ $label == "Hermes Agent" ]]; then
-        # Hermes syncs bundled skills through its skills directory; a copy
-        # keeps that sync from writing back into the canonical tree.
+      # Link only to a canonical copy: staged content must be copied, or the
+      # staging cleanup at the end of the run would leave a dangling link.
+      if [[ $label == "Hermes Agent" || $src != "$canonical"/* ]]; then
         install_skill_entry "$dir" "$label" "$src" "$skill" "$source" "$cname" || failed=1
       else
         link_agent_skill "$dir" "$src" "$skill" "$source" "$cname" || failed=1

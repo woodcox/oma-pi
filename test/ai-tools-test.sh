@@ -212,6 +212,8 @@ check "no prompt (stored skip)"   '! grep -q "not managed by oma-pi" "$LOGS/t8.o
 check "foreign canonical intact"  'grep -q "canonical foreign" "$H/.agents/skills/research/SKILL.md"'
 check "hermes gets research"      'grep -q "name: research" "$H/.hermes/skills/research/SKILL.md"'
 check "hermes research marked"    '[[ $(marker "$H/.hermes/skills/research") == "mattpocock/skills" ]]'
+check "claude gets real copy"     '[[ ! -L "$H/.claude/skills/research" && -d "$H/.claude/skills/research" ]]'
+check "claude copy works"         'grep -q "name: research" "$H/.claude/skills/research/SKILL.md"'
 check "other skills still fine"   'grep -q "name: tdd" "$H/.hermes/skills/tdd/SKILL.md"'
 
 echo
