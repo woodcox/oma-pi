@@ -3096,6 +3096,12 @@ test_sshd_password_ssh_flag() {
     printf '        both values were written: %s\n' "$out"
     rc=1
   }
+  # Password opt-in must not leak root access: root never logs in with a
+  # password either way.
+  [[ $out == *"PermitRootLogin no"* ]] || {
+    printf '        --password-ssh lost the PermitRootLogin no guarantee: %s\n' "$out"
+    rc=1
+  }
   # The bare "no usable key" lockout warning must not fire on an explicit
   # password opt-in, and no key-only prompt may appear either.
   [[ $out == *"no non-root account with a usable authorized_keys"* ]] && {
