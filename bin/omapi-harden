@@ -42,6 +42,9 @@ set -euo pipefail
 ASSUME_YES=0
 DRY_RUN=0
 LOCKDOWN_SSH=0
+# Keep `AllowAgentForwarding no` in the sshd block. A workflow that genuinely
+# needs `ssh -A` into this box can opt back in with --agent-forwarding.
+AGENT_FORWARDING=0
 WANT_REPORT=0
 RUN_AUDIT=1
 NO_RESTART=0
@@ -101,7 +104,7 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
-  accounts    password ageing and umask defaults in /etc/login.defs
+  accounts    password ageing defaults in /etc/login.defs
   services    stop and disable services a headless server does not need
   ssh         sshd hardening: no root login, no passwords, key-only, limits
   firewall    ufw: deny incoming by default, allow only what is listening
@@ -116,6 +119,9 @@ Options:
   -y, --yes         accept recommended defaults, do not prompt
   -n, --dry-run     print the plan, run only read-only commands
       --lockdown-ssh additionally set `AllowUsers <you>` in sshd_config
+      --agent-forwarding
+                        allow SSH agent forwarding in the sshd block
+                        (default is off: AllowAgentForwarding no)
       --report       also save the audit report to ~/security-audit/
       --no-audit     skip the final report
       --no-restart   write configs but do not restart any service
@@ -985,47 +991,52 @@ replace_conf_values() {
   note "updated $path"
 }
 
-# Password ageing and the process umask live in login.defs. These are defaults
-# for NEW passwords and sessions: existing accounts keep the ageing already
-# recorded in /etc/shadow. That is deliberate. `chage -M 365` on an account
-# whose password is older than a year expires it immediately, which on a
-# headless box is a lockout dressed up as a policy.
+# Password ageing lives in login.defs. These are defaults for NEW passwords and
+# sessions: existing accounts keep the ageing already recorded in /etc/shadow.
+# That is deliberate. `chage -M 365` on an account whose password is older than
+# a year expires it immediately, which on a headless box is a lockout dressed
+# up as a policy.
+#
+# UMASK is deliberately NOT touched. It was 027; on a single-admin box a
+# group-restricted umask saves nothing and quietly breaks anything the box
+# writes for others to read, so the whole key is left as the distro set it.
 LOGIN_DEFS_POLICY=(
   PASS_MAX_DAYS=365
   PASS_MIN_DAYS=1
   PASS_WARN_AGE=14
-  UMASK=027
 )
 
 configure_account_policy() {
   section "Account policy (login.defs)"
 
-  note "defaults for new passwords and logins; existing accounts keep their /etc/shadow ageing"
+  note "defaults for new passwords; existing accounts keep their /etc/shadow ageing"
 
   if ! replace_conf_values /etc/login.defs "${LOGIN_DEFS_POLICY[@]}"; then
-    warn "password ageing and umask defaults were not applied"
+    warn "password ageing defaults were not applied"
     return 0
   fi
 
   if ((!DRY_RUN)); then
     # Report what actually landed, not what was asked for.
     local f="${CONF_DEST}/etc/login.defs" k v
-    for k in PASS_MAX_DAYS PASS_MIN_DAYS PASS_WARN_AGE UMASK; do
+    for k in "${LOGIN_DEFS_POLICY[@]%=*}"; do
       v="$(awk -v k="$k" '$1 == k { v = $2 } END { if (v != "") print v }' "$f" 2>/dev/null || true)"
       [[ -n $v ]] && ok "${k} ${v}"
     done
     note "existing accounts are unchanged: inspect one with 'sudo chage -l <user>'"
-    note "UMASK also needs pam_umask enabled to affect interactive SSH sessions"
   fi
 }
 
 # ---------------------------------------------------------------------------
 # services
 # ---------------------------------------------------------------------------
-# Units a headless server does not need. `:y` disables unless declined; `:n`
-# leaves alone unless asked, because avahi is how `hostname.local` resolves and
-# rpcbind is how NFS works. An absent unit is skipped rather than reported as
-# a missing hardening step.
+# Units a headless server does not need. An absent unit is skipped rather than
+# reported as a missing hardening step.
+#
+# Deliberately NOT in this list: apport and whoopsie (Ubuntu crash reporting -
+# opinionated to disable and worth nothing on a server); avahi (`hostname.local`
+# discovery) and rpcbind (how NFS works), which are features some users rely
+# on, not noise to remove.
 SERVICES_SAFE_OFF=(
   cups.service
   cups.socket
@@ -1035,14 +1046,6 @@ SERVICES_SAFE_OFF=(
   hciuart.service
   triggerhappy.service
   ModemManager.service
-  whoopsie.service
-  apport.service
-)
-SERVICES_ASK_OFF=(
-  avahi-daemon.service
-  avahi-daemon.socket
-  rpcbind.service
-  rpcbind.socket
 )
 
 configure_services() {
@@ -1053,15 +1056,8 @@ configure_services() {
     return 0
   fi
 
-  local entry unit default state active
-  local -a entries=()
-  local u
-  for u in "${SERVICES_SAFE_OFF[@]}"; do entries+=("${u}:y"); done
-  for u in "${SERVICES_ASK_OFF[@]}"; do entries+=("${u}:n"); done
-
-  for entry in "${entries[@]}"; do
-    unit="${entry%:*}"
-    default="${entry##*:}"
+  local unit state active
+  for unit in "${SERVICES_SAFE_OFF[@]}"; do
     # is-enabled and is-active are read-only queries that work unprivileged.
     # Deliberately not `peek`: peek gives up when there is no sudo prompt, and
     # a non-interactive run then saw every unit as absent and disabled nothing
@@ -1077,7 +1073,7 @@ configure_services() {
       continue
     fi
 
-    if ask "disable and stop ${unit}? (not needed on a headless server)" "$default"; then
+    if ask "disable and stop ${unit}? (not needed on a headless server)" "y"; then
       if ((DRY_RUN)); then
         printf '  %s•%s would run: systemctl disable --now %s\n' "$C_DIM" "$C_OFF" "$unit"
       elif run_root systemctl disable --now "$unit"; then
@@ -1297,6 +1293,12 @@ harden_ssh() {
     fi
   fi
 
+  # The one sshd directive the block writes is selectable. Always written,
+  # never omitted: sshd takes the first value it reads, so leaving the line
+  # out would let a drop-in below decide instead of the script.
+  local agent_forwarding="no"
+  ((AGENT_FORWARDING)) && agent_forwarding="yes"
+
   local block
   block="$(mktemp)"
 
@@ -1323,10 +1325,11 @@ LogLevel VERBOSE
 UseDNS no
 PermitUserEnvironment no
 GatewayPorts no
-# Agent forwarding is off: a compromised remote host can otherwise use every
-# key loaded in your local agent. TCP forwarding is a different feature and is
-# deliberately untouched below - config/shell/fns/ssh-port-forwarding needs it.
-AllowAgentForwarding no
+# Agent forwarding follows --agent-forwarding. Off by default: a compromised
+# remote host could otherwise use every key loaded in your local agent. The
+# line is always written so the choice sticks - sshd takes the first value it
+# reads, so omitting it would let a drop-in below decide instead.
+AllowAgentForwarding ${agent_forwarding}
 # AllowTcpForwarding is intentionally untouched: config/shell/fns/ssh-port-forwarding
 # relies on it.
 EOF
@@ -3351,6 +3354,7 @@ main() {
       -y | --yes) ASSUME_YES=1 ;;
       -n | --dry-run) DRY_RUN=1 ;;
       --lockdown-ssh) LOCKDOWN_SSH=1 ;;
+      --agent-forwarding) AGENT_FORWARDING=1 ;;
       --report) WANT_REPORT=1 ;;
       --no-audit) RUN_AUDIT=0 ;;
       --no-restart) NO_RESTART=1 ;;

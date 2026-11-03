@@ -2839,7 +2839,9 @@ test_account_policy_replaces_values_in_place() {
   grep -qE '^PASS_MAX_DAYS[[:space:]]+365$' "$f" || rc=1
   grep -qE '^PASS_MIN_DAYS[[:space:]]+1$' "$f" || rc=1
   grep -qE '^PASS_WARN_AGE[[:space:]]+14$' "$f" || rc=1
-  grep -qE '^UMASK[[:space:]]+027$' "$f" || rc=1
+  # UMASK is deliberately not in LOGIN_DEFS_POLICY: the distro value survives
+  # untouched, and the run must not append a second copy of it either.
+  grep -qE '^UMASK[[:space:]]+022$' "$f" || rc=1
   # The stock comment has to survive: this is an edit, not a replacement.
   grep -qx '# stock comment' "$f" || rc=1
   # ... and so does the mode.
@@ -2928,28 +2930,28 @@ test_services_disables_a_safe_unit_by_default() {
   return $rc
 }
 
-test_services_leaves_optional_avahi_alone_by_default() {
-  # ASSUME_YES is set by setup_destdir, so this is the --yes path. avahi is
-  # how hostname.local resolves, so its default must be "leave it".
+test_services_never_touches_left_alone_units() {
+  # These units are deliberately outside SERVICES_SAFE_OFF: avahi is how
+  # hostname.local resolves, rpcbind is how NFS works, and apport/whoopsie are
+  # opinionated crash reporting. Even enabled and active, they must not be
+  # offered for disabling (ASSUME_YES is set by setup_destdir).
   setup_destdir
   stub systemctl
   systemctl() {
-    case "$*" in
-      *is-enabled*avahi-daemon.service*) printf 'enabled\n'; return 0 ;;
-      *is-active*avahi-daemon.service*) printf 'active\n'; return 0 ;;
+    case "$1 $2" in
+      'is-enabled '* | 'is-active '*) printf 'active\n'; return 0 ;;
       *) return 1 ;;
     esac
   }
-  local out rc=0
+  local out rc=0 unit
   out="$(configure_services 2>&1)"
-  [[ $out == *"left avahi-daemon.service alone"* ]] || {
-    printf '        avahi was not left alone by default: %s\n' "$out"
-    rc=1
-  }
-  if [[ $out == *"systemctl disable --now avahi-daemon.service"* ]]; then
-    printf '        avahi was disabled by default\n'
-    rc=1
-  fi
+  for unit in avahi-daemon.service avahi-daemon.socket rpcbind.service \
+    rpcbind.socket whoopsie.service apport.service; do
+    if [[ $out == *"$unit"* ]]; then
+      printf '        a left-alone unit was offered for disabling: %s\n' "$unit"
+      rc=1
+    fi
+  done
   teardown_destdir
   return $rc
 }
@@ -3000,6 +3002,47 @@ test_sshd_block_includes_depth_directives() {
   return $rc
 }
 
+test_sshd_agent_forwarding_flag() {
+  # Default path already asserts `AllowAgentForwarding no`; this is the
+  # --agent-forwarding opt-in. The line must still be written (sshd takes the
+  # first value it reads, so omitting it would let a drop-in decide).
+  setup_destdir
+  local rc=0 out
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
+  stub have_usable_key
+  have_usable_key() { return 0; }
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "/home/admin/.ssh/authorized_keys"; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { printf 'admin\n'; }
+  stub ask
+  ask() { return 1; }
+  stub have
+  have() {
+    case "$1" in
+      gum | tailscale) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  DRY_RUN=1
+  AGENT_FORWARDING=1
+  out="$(harden_ssh 2>&1 || true)"
+  AGENT_FORWARDING=0
+  DRY_RUN=0
+
+  [[ $out == *"AllowAgentForwarding yes"* ]] || {
+    printf '        --agent-forwarding did not write AllowAgentForwarding yes: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"AllowAgentForwarding no"* ]] && {
+    printf '        both values were written: %s\n' "$out"
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nrunning\n'
 
@@ -3008,12 +3051,13 @@ t 'sshd managed block is idempotent'                    test_sshd_block_is_idemp
 t 'sshd config keeps mode and owner'                    test_sshd_preserves_mode_and_owner
 t 'sshd config is created when absent'                  test_sshd_creates_missing_config
 t 'sshd block includes depth directives'                test_sshd_block_includes_depth_directives
+t 'sshd --agent-forwarding opts in'                     test_sshd_agent_forwarding_flag
 t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
 t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
 t 'service minimisation skips absent units'             test_services_skips_units_that_are_not_installed
 t 'service minimisation disables safe units'            test_services_disables_a_safe_unit_by_default
-t 'service minimisation leaves avahi alone'             test_services_leaves_optional_avahi_alone_by_default
+t 'service minimisation never touches left-alones'      test_services_never_touches_left_alone_units
 
 t 'an empty authorized_keys blocks the lockout change'  test_no_lockout_without_key
 t 'a key in authorized_keys2 is found'                  test_no_lockout_with_second_path_only
