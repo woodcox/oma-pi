@@ -45,6 +45,9 @@ LOCKDOWN_SSH=0
 # Keep `AllowAgentForwarding no` in the sshd block. A workflow that genuinely
 # needs `ssh -A` into this box can opt back in with --agent-forwarding.
 AGENT_FORWARDING=0
+# Keep password SSH on. Default is key-only; a user who actually logs in with
+# an ssh password opts out of the default with --password-ssh.
+PASSWORD_SSH=0
 WANT_REPORT=0
 RUN_AUDIT=1
 NO_RESTART=0
@@ -122,6 +125,8 @@ Options:
       --agent-forwarding
                         allow SSH agent forwarding in the sshd block
                         (default is off: AllowAgentForwarding no)
+      --password-ssh    keep password login over SSH (PasswordAuthentication
+                        yes; default is key-only)
       --report       also save the audit report to ~/security-audit/
       --no-audit     skip the final report
       --no-restart   write configs but do not restart any service
@@ -1190,9 +1195,14 @@ harden_ssh() {
   fi
 
   # Lockout check, before anything is written. A key for a sudoer account is
-  # the way back in once passwords are off.
+  # the way back in once passwords are off. The whole check is moot when the
+  # user has asked to keep password SSH: --password-ssh means "I log in with a
+  # password", which is its own way back in, and fail2ban handles the brute
+  # force that unlocking the door invites.
   local backdoor_user=""
-  if ! backdoor_user="$(non_root_sudoer_with_key)"; then
+  if ((PASSWORD_SSH)); then
+    note "--password-ssh: password login stays on, so no key backdoor is needed"
+  elif ! backdoor_user="$(non_root_sudoer_with_key)"; then
     if have tailscale && tailscale status &>/dev/null; then
       # Single quotes, not double: backticks inside a double-quoted string
       # are a command substitution, and this one really did try to run
@@ -1299,6 +1309,17 @@ harden_ssh() {
   local agent_forwarding="no"
   ((AGENT_FORWARDING)) && agent_forwarding="yes"
 
+  local password_authentication="no"
+  ((PASSWORD_SSH)) && password_authentication="yes"
+
+  # Same shape for password access: key-only is the default, and the user who
+  # actually logs in with an ssh password opts out with --password-ssh. Both
+  # directives follow the flag: on Debian the keyboard-interactive method is
+  # the PAM password prompt, so switching PasswordAuthentication on while
+  # leaving KbdInteractiveAuthentication off would still lock out some
+  # clients. PermitRootLogin no stays regardless of the flag - root never
+  # logs in with a password either way.
+
   local block
   block="$(mktemp)"
 
@@ -1311,8 +1332,11 @@ harden_ssh() {
 # inside the block are lost on the next run.
 PermitRootLogin no
 PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
+# PasswordAuthentication follows --password-ssh. Key-only is the default, and
+# the value chosen is always written (first value wins, as with the block
+# above), so a re-run keeps the choice instead of letting a drop-in decide.
+PasswordAuthentication ${password_authentication}
+KbdInteractiveAuthentication ${password_authentication}
 PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 3
@@ -3355,6 +3379,7 @@ main() {
       -n | --dry-run) DRY_RUN=1 ;;
       --lockdown-ssh) LOCKDOWN_SSH=1 ;;
       --agent-forwarding) AGENT_FORWARDING=1 ;;
+      --password-ssh) PASSWORD_SSH=1 ;;
       --report) WANT_REPORT=1 ;;
       --no-audit) RUN_AUDIT=0 ;;
       --no-restart) NO_RESTART=1 ;;

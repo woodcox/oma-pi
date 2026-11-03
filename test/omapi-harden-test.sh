@@ -3043,6 +3043,62 @@ test_sshd_agent_forwarding_flag() {
   return $rc
 }
 
+test_sshd_password_ssh_flag() {
+  # Default path writes PasswordAuthentication no (asserted by the managed
+  # block tests); this is the --password-ssh opt-out for a box that is
+  # genuinely logged into with an ssh password. Keyboard-interactive follows
+  # the same flag: under Debian it is the PAM password prompt, so leaving it
+  # off would still reject some password clients. The key backdoor question
+  # must be skipped: passwords staying on IS the way back in.
+  setup_destdir
+  local rc=0 out
+  stub current_ssh_port
+  current_ssh_port() { printf '22\n'; }
+  stub have_usable_key
+  have_usable_key() { return 1; }
+  stub non_root_sudoer_with_key
+  non_root_sudoer_with_key() { return 1; }
+  stub ask
+  ask() { return 1; }
+  stub have
+  have() {
+    case "$1" in
+      gum | tailscale) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  DRY_RUN=1
+  PASSWORD_SSH=1
+  out="$(harden_ssh 2>&1 || true)"
+  PASSWORD_SSH=0
+  DRY_RUN=0
+
+  [[ $out == *"PasswordAuthentication yes"* ]] || {
+    printf '        --password-ssh did not write PasswordAuthentication yes: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"KbdInteractiveAuthentication yes"* ]] || {
+    printf '        --password-ssh did not enable keyboard-interactive: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"PasswordAuthentication no"* ]] && {
+    printf '        both values were written: %s\n' "$out"
+    rc=1
+  }
+  # The bare "no usable key" lockout warning must not fire on an explicit
+  # password opt-in, and no key-only prompt may appear either.
+  [[ $out == *"no non-root account with a usable authorized_keys"* ]] && {
+    printf '        --password-ssh still went through the key backdoor check\n'
+    rc=1
+  }
+  if [[ $out == *"switch SSH to key-only anyway"* ]]; then
+    printf '        --password-ssh was asked the key-only question\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nrunning\n'
 
@@ -3052,6 +3108,7 @@ t 'sshd config keeps mode and owner'                    test_sshd_preserves_mode
 t 'sshd config is created when absent'                  test_sshd_creates_missing_config
 t 'sshd block includes depth directives'                test_sshd_block_includes_depth_directives
 t 'sshd --agent-forwarding opts in'                     test_sshd_agent_forwarding_flag
+t 'sshd --password-ssh keeps passwords on'              test_sshd_password_ssh_flag
 t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
 t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing

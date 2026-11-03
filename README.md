@@ -166,13 +166,18 @@ If you would rather do it by hand, please see the three hardening guides below:
 
 Some deliberate choices worth knowing before you run it:
 
-- **It will not lock you out.** Before disabling SSH passwords it looks for a
-  non-root account with an `authorized_keys` entry that `ssh-keygen` actually
-  accepts. An empty file, a truncated paste or a private key pasted in all look
-  like a key to a naive check, and the result is a headless Pi you cannot reach.
-  With no usable key it stops and asks — and that question defaults to *no*, so
-  neither `--yes` nor `--force` can talk its way past it. Every config is
-  validated before its service restarts, and rolled back if it fails.
+- **It will not lock you out.** The sshd block is key-only by default, and that
+  default is flagged: before writing it the ssh task looks for a non-root
+  account with an `authorized_keys` entry that `ssh-keygen` actually accepts.
+  An empty file, a truncated paste or a private key pasted in all look like a
+  key to a naive check, and the result is a headless Pi you cannot reach. With
+  no usable key it stops and asks — and that question defaults to *no*, so
+  neither `--yes` nor `--force` can talk its way past it. **If you genuinely
+  log in with an ssh password, run with `--password-ssh`** — that keeps
+  `PasswordAuthentication yes` in the block, skips the key-backdoor check
+  (passwords staying on is the way back in), and relies on fail2ban and ufw for
+  the brute force. Every config is validated before its service restarts, and
+  rolled back if it fails.
 - **Prompts use `gum`**, reading `/dev/tty` directly, so they still appear when
   the script is iterating over ports or accounts. Without a terminal at all it
   says so and takes the documented default rather than silently guessing.
