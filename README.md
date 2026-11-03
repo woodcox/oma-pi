@@ -172,7 +172,7 @@ Some deliberate choices worth knowing before you run it:
   An empty file, a truncated paste or a private key pasted in all look like a
   key to a naive check, and the result is a headless Pi you cannot reach. With
   no usable key it stops and asks — and that question defaults to *no*, so
-  neither `--yes` nor `--force` can talk its way past it. **If you genuinely
+  `--yes` cannot talk its way past it. **If you genuinely
   log in with an ssh password, run with `--password-ssh`** — that keeps
   `PasswordAuthentication yes` in the block, skips the key-backdoor check
   (passwords staying on is the way back in), and relies on fail2ban and ufw for
