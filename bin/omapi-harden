@@ -1121,8 +1121,12 @@ configure_services() {
     # while reporting success. Knowing a unit exists must never depend on
     # privilege.
     state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    # A static (or indirect) unit cannot be disabled: `systemctl disable`
+    # refuses it outright, so offering it would be a prompt whose every
+    # answer ends in "could not disable". Not installed as far as this
+    # task is concerned.
     case $state in
-      '' | not-found | masked) continue ;;
+      '' | not-found | masked | static | indirect) continue ;;
     esac
     active="$(systemctl is-active "$unit" 2>/dev/null || true)"
     if [[ $state == disabled && $active != active ]]; then

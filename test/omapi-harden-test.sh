@@ -2955,12 +2955,16 @@ test_services_never_touches_left_alone_units() {
   # These units are deliberately outside SERVICES_SAFE_OFF: avahi is how
   # hostname.local resolves, rpcbind is how NFS works, and apport/whoopsie are
   # opinionated crash reporting. Even enabled and active, they must not be
-  # offered for disabling (ASSUME_YES is set by setup_destdir).
+  # offered for disabling (ASSUME_YES is set by setup_destdir). A static unit
+  # in the safe-off list is also skipped: systemctl disable refuses static
+  # units outright, so the offer would end in "could not disable".
   setup_destdir
   stub systemctl
   systemctl() {
-    case "$1 $2" in
-      'is-enabled '* | 'is-active '*) printf 'active\n'; return 0 ;;
+    case "$*" in
+      *is-enabled*cups.service*) printf 'static\n'; return 0 ;;
+      *is-enabled*) printf 'enabled\n'; return 0 ;;
+      *is-active*) printf 'active\n'; return 0 ;;
       *) return 1 ;;
     esac
   }
@@ -2973,6 +2977,16 @@ test_services_never_touches_left_alone_units() {
       rc=1
     fi
   done
+  # cups.service IS in the list, but its is-enabled state is static: it must
+  # not be offered, and cups.socket still must (it reports enabled here).
+  if [[ $out == *"disable and stop cups.service"* ]]; then
+    printf '        a static unit was offered for disabling\n'
+    rc=1
+  fi
+  if [[ $out != *"cups.socket"* ]]; then
+    printf '        a functional sibling was not offered: %s\n' "$out"
+    rc=1
+  fi
   teardown_destdir
   return $rc
 }
