@@ -213,8 +213,9 @@ Some deliberate choices worth knowing before you run it:
   those unattended is how a working stack dies at 3am, and they are not where
   this box's kernel-level exposure lives. Anything `apt upgrade` defers because
   it needs a new dependency is named out loud, because that class of hold is
-  silent by nature. `--report` also flags a kernel image in `/boot` that no
-  package owns — the signature of `rpi-update`, which installs a kernel outside
+  silent by nature. The audit that runs by default also flags a kernel image
+  in `/boot` that no package owns — the signature of `rpi-update`, which
+  installs a kernel outside
   apt's management so it quietly stops receiving patches. That check is scoped
   to kernel images: a Pi's `initrd.img-*`, `cmdline.txt` and `overlays` are
   untracked by design, and a check that fires on every machine is one nobody
