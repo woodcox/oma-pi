@@ -260,9 +260,9 @@ skill_choice_get() {
   while IFS=$'\t' read -r stored action target || [[ -n $stored ]]; do
     [[ $stored == "$skill" ]] || continue
     case "$action" in
-      rename) skill_target_is_safe "$target" || return 1 ;;
+      rename) skill_target_is_safe "$target" || continue ;;
       skip|overwrite) target="" ;;
-      *) return 1 ;;
+      *) continue ;;
     esac
     printf '%s\t%s\n' "$action" "$target"
     return 0
