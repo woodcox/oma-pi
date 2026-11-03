@@ -992,16 +992,18 @@ replace_conf_values() {
   local target="${CONF_DEST}${path}"
   local pair
 
+  # Checked before the dry-run branch: a run against a missing file must say
+  # so in both modes, not offer to write what the real run cannot.
+  if [[ ! -f $target ]]; then
+    warn "no ${path}; not changing it"
+    return 1
+  fi
+
   if ((DRY_RUN)); then
     for pair in "$@"; do
       printf '  %s•%s would set %s in %s\n' "$C_DIM" "$C_OFF" "$pair" "$path"
     done
     return 0
-  fi
-
-  if [[ ! -f $target ]]; then
-    warn "no ${path}; not changing it"
-    return 1
   fi
 
   local body
