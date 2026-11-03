@@ -145,6 +145,11 @@ teardown_destdir() {
   CONF_DEST=""
   DRY_RUN=0
   ASSUME_YES=0
+  # The sshd block's opt-in flags are run-state like DRY_RUN above: a test
+  # that sets one and returns early between set and reset must not leak the
+  # choice into whatever runs next.
+  AGENT_FORWARDING=0
+  PASSWORD_SSH=0
 }
 
 # A bash function returns the exit status of its LAST command. Every test that
