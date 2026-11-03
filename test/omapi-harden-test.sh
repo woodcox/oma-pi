@@ -1596,10 +1596,10 @@ test_harden_ssh_privileged_transaction() {
     command chmod 755 "$d" "$d/sshd_config.d"
     # Inject failures only at the transaction's own staging/backup operations.
     if [[ $scenario == backup && $1 == cp && ${!#} == "$main.omapi-backup" ]] ||
-       [[ $scenario == stage && $1 == cp && ${!#} == "$main.omapi-tmp" ]] ||
-       [[ $scenario == mode && $1 == chmod && ${!#} == "$main.omapi-tmp" ]] ||
-       [[ $scenario == owner && $1 == chown && ${!#} == "$main.omapi-tmp" ]] ||
-       [[ $scenario == rename && $1 == mv && ${!#} == "$main" && $3 == "$main.omapi-tmp" ]] ||
+       [[ $scenario == stage && $1 == cp && ${!#} == "$main".omapi-stage* ]] ||
+       [[ $scenario == mode && $1 == chmod && ${!#} == "$main".omapi-stage* ]] ||
+       [[ $scenario == owner && $1 == chown && ${!#} == "$main".omapi-stage* ]] ||
+       [[ $scenario == rename && $1 == mv && ${!#} == "$main" && $3 == "$main".omapi-stage* ]] ||
        [[ $scenario == drop_stage && $1 == cp && ${!#} == "$drop.omapi-tmp" ]]; then
       injected=1
       [[ $scenario == *stage ]] && printf 'partial\n' >"${!#}"
@@ -1655,7 +1655,7 @@ test_harden_ssh_privileged_transaction() {
     esac
     assert_eq "$(stat -c %a "$main")" 640 || rc=1
     assert_eq "$(stat -c %a "$drop")" 600 || rc=1
-    if [[ -e $main.omapi-tmp || -e $drop.omapi-tmp ]]; then
+    if compgen -G "$main.omapi-stage.*" >/dev/null || [[ -e $main.omapi-tmp || -e $drop.omapi-tmp ]]; then
       printf '        %s: staging file left behind\n' "$scenario"
       rc=1
     fi
@@ -1720,9 +1720,10 @@ test_harden_ssh_write_preserves_mode() {
     printf '        drop-in mode is %s, expected 600\n' "$d"
     rc=1
   fi
-  # And no staging file may survive a successful write.
+  # And no staging file may survive a successful write. The main file's stage
+  # is .omapi-stage.$$ (install_staged), the drop-ins' is .omapi-tmp.
   local leftovers
-  leftovers="$(ls "$d"/*.omapi-tmp "$d"/sshd_config.d/*.omapi-tmp 2>/dev/null | wc -l)"
+  leftovers="$((compgen -G "$d/sshd_config.omapi-stage.*" >/dev/null 2>&1 && echo x; ls "$d"/*.omapi-tmp "$d"/sshd_config.d/*.omapi-tmp 2>/dev/null) | wc -l)"
   if [[ $leftovers -ne 0 ]]; then
     printf '        %s staging file(s) left behind\n' "$leftovers"
     rc=1

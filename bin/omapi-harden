@@ -261,6 +261,79 @@ ask() {
   [[ $default == y ]]
 }
 
+# The shared tail of a staged config write: give the staging file the target's
+# own mode and owner, then rename it over the target. rename(2) within one
+# filesystem is atomic, so the target is either the old file or the complete
+# new one, and is never observable half-written or carrying the wrong mode:
+# all metadata is applied to the STAGING file before the rename.
+#
+#   install_staged <body> <target> <what> [<mode> [<owner>]]
+#
+# <what> is the file's display name in warnings ("/etc/login.defs"). With no
+# <mode>/<owner> given, mode/uid/gid are read from <target> and all three must
+# resolve: a failed stat is refused, never guessed, because renaming an
+# unknown mode onto a root-owned file can widen it, and that is worse than
+# leaving the file alone. With BOTH given, nothing is read - that is the
+# brand-new-target case, which has no metadata of its own to preserve.
+#
+# On failure the target is untouched and the staging file is removed; <body>
+# is removed on every path. Returns 1 after warning with <what>; callers that
+# need more on their way out (backup restoration, their own temp files) do it
+# after the call.
+#
+# Not used by the sshd_config.d drop-in rewrite: its failures warn and move on
+# to the next drop-in rather than failing the run, and its ownership comes
+# back through chown --reference=<target>.
+install_staged() {
+  local body="$1" target="$2" what="$3"
+  local want_mode="${4:-}" want_owner="${5:-}"
+  local stage="${target}.omapi-stage.$$"
+  local tmode owner_spec towner tgroup
+
+  if [[ -n $want_mode || -n $want_owner ]]; then
+    # Explicit metadata must be complete: owner without mode (or the reverse)
+    # would install half the intent.
+    if [[ -z $want_mode || -z $want_owner ]]; then
+      rm -f "$body"
+      warn "refusing to stage ${what}: mode and owner must be given together"
+      return 1
+    fi
+    tmode="$want_mode"
+    owner_spec="$want_owner"
+  else
+    tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
+    towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
+    tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
+    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
+      rm -f "$body"
+      warn "could not read the mode/owner of ${what}; it has NOT been changed"
+      return 1
+    fi
+    owner_spec="${towner}:${tgroup}"
+  fi
+
+  if ! run_root cp "$body" "$stage"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not stage ${what}; it has NOT been changed"
+    return 1
+  fi
+  if ! run_root chmod "$tmode" "$stage" 2>/dev/null ||
+    ! run_root chown "$owner_spec" "$stage" 2>/dev/null; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not set the mode/owner on the staged ${what}; it has NOT been changed"
+    return 1
+  fi
+  if ! run_root mv -f "$stage" "$target"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not install ${what}; it has NOT been changed"
+    return 1
+  fi
+  rm -f "$body"
+}
+
 # Write a managed config file. `install -d` for the parent, plain truncate for
 # the file itself so an existing file keeps its mode and owner.
 write_conf() {
@@ -278,34 +351,37 @@ write_conf() {
   # target is left empty or partial and set -e then aborts the run. rename(2)
   # within one filesystem is atomic, so the target is either the old file or
   # the complete new one - never a half-written one.
-  local tmp="${target}.omapi-tmp.$$"
-  if ! cat >"$tmp"; then
-    rm -f "$tmp"
+  local body
+  if ! body="$(mktemp)"; then
+    warn "could not create a staging file for $path; it has NOT been changed"
+    return 1
+  fi
+  if ! cat >"$body"; then
+    rm -f "$body"
     warn "could not write $path; it has NOT been changed"
     return 1
   fi
   # Refuse to install a config that came out empty. An empty sshd_config or
   # after.rules is never what was intended, and replacing a working one with it
   # is the worst outcome available.
-  if [[ ! -s $tmp ]]; then
-    rm -f "$tmp"
+  if [[ ! -s $body ]]; then
+    rm -f "$body"
     warn "$path came out empty; refusing to install it over the existing file"
     return 1
   fi
-  # Preserve the target's own mode: mv replaces the inode, so the new file
-  # would otherwise carry this script's umask. Applied to the STAGING file so
-  # the target is never observable with the wrong mode.
-  local tmode=644
-  [[ -e $target ]] && tmode="$(stat -c %a "$target" 2>/dev/null || printf 644)"
-  if ! chmod "$tmode" "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    warn "could not set the mode on the staged $path; it has NOT been changed"
-    return 1
-  fi
-  if ! mv -f "$tmp" "$target"; then
-    rm -f "$tmp"
-    warn "could not install $path; it has NOT been changed"
-    return 1
+  # 0640 root:root is what ufw ships for after.rules/after6.rules; 0644 is
+  # right for sshd_config. Defaulting to 0644 would make a hardening script
+  # create a world-readable rules file. An existing target's metadata is read
+  # back and preserved by install_staged instead of being set here.
+  local new_mode
+  case $target in
+    */ufw/after.rules|*/ufw/after6.rules) new_mode=640 ;;
+    *) new_mode=644 ;;
+  esac
+  if [[ -e $target ]]; then
+    install_staged "$body" "$target" "$path" || return 1
+  else
+    install_staged "$body" "$target" "$path" "$new_mode" "0:0" || return 1
   fi
   note "wrote $path"
 }
@@ -968,32 +1044,7 @@ replace_conf_values() {
     return 1
   fi
 
-  local stage="${target}.omapi-stage.$$"
-  local tmode towner tgroup
-  tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
-  towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
-  tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
-  if [[ -z $tmode || -z $towner || -z $tgroup ]] ||
-    ! run_root cp "$body" "$stage"; then
-    run_root rm -f "$stage" 2>/dev/null || true
-    rm -f "$body"
-    warn "could not stage ${path}; it has NOT been changed"
-    return 1
-  fi
-  if ! run_root chmod "$tmode" "$stage" 2>/dev/null ||
-    ! run_root chown "$towner:$tgroup" "$stage" 2>/dev/null; then
-    run_root rm -f "$stage" 2>/dev/null || true
-    rm -f "$body"
-    warn "could not set the mode/owner on the staged ${path}; it has NOT been changed"
-    return 1
-  fi
-  if ! run_root mv -f "$stage" "$target"; then
-    run_root rm -f "$stage" 2>/dev/null || true
-    rm -f "$body"
-    warn "could not install ${path}; it has NOT been changed"
-    return 1
-  fi
-  rm -f "$body"
+  install_staged "$body" "$target" "$path" || return 1
   note "updated $path"
 }
 
@@ -1424,14 +1475,13 @@ EOF
         next
       }
       { print }
-    ' "$target" >"$rewrite" || ! run_root cp "$rewrite" "$target.omapi-tmp"; then
+    ' "$target" >"$rewrite"; then
       # A failure inside `awk && cat && rm` is exempt from set -e, so this
       # used to fail silently: harden_ssh returned 0, printed "sshd accepts
       # the new config", and left two active Port lines plus a stray temp file
       # with no warning anywhere. Verified with an injected failing awk. Treat
       # it as the config-write failure it is.
       warn "could not rewrite the Port lines in ${conf}"
-      run_root rm -f "$target.omapi-tmp"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
@@ -1446,49 +1496,7 @@ EOF
     # config that the restart below either rejects or comes up without. rename
     # is atomic within a filesystem, so capture the metadata first and put it
     # back afterwards.
-    local tmode="" towner="" tgroup=""
-    if [[ -e $target ]]; then
-      tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
-      towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
-      tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
-    fi
-    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
-      warn "could not read the mode/owner of ${conf}; leaving it untouched"
-      run_root rm -f "$target.omapi-tmp"
-      if [[ -n $backup && -f $backup ]]; then
-        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
-      fi
-      rm -f "$rewrite" "$block"
-      return 1
-    fi
-    if [[ -s $rewrite ]]; then
-      # Same reasoning as the drop-in: set the metadata on the STAGING file
-      # before the rename, so sshd never sees the live config with the wrong
-      # mode or owner. `chown` needs privilege, so on failure leave the target
-      # alone rather than install a config owned by the invoking user.
-      if ! run_root chmod "$tmode" "$target.omapi-tmp" 2>/dev/null ||
-         ! run_root chown "$towner:$tgroup" "$target.omapi-tmp" 2>/dev/null; then
-        run_root rm -f "$target.omapi-tmp"
-        warn "could not set the mode/owner on the staged ${conf}; leaving it untouched"
-        if [[ -n $backup && -f $backup ]]; then
-          run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
-        fi
-        rm -f "$rewrite" "$block"
-        return 1
-      fi
-      if run_root mv -f "$target.omapi-tmp" "$target"; then
-        :
-      else
-        run_root rm -f "$target.omapi-tmp"
-        warn "could not install ${conf}; it has NOT been changed"
-        if [[ -n $backup && -f $backup ]]; then
-          run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
-        fi
-        rm -f "$rewrite" "$block"
-        return 1
-      fi
-    else
-      run_root rm -f "$target.omapi-tmp"
+    if [[ ! -s $rewrite ]]; then
       warn "refusing to install an empty ${conf}; leaving it untouched"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
@@ -1496,6 +1504,14 @@ EOF
       rm -f "$rewrite" "$block"
       return 1
     fi
+    if ! install_staged "$rewrite" "$target" "${conf}"; then
+      if [[ -n $backup && -f $backup ]]; then
+        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+      fi
+      rm -f "$rewrite" "$block"
+      return 1
+    fi
+    rm -f "$rewrite"
 
     # The same pass over /etc/ssh/sshd_config.d drop-ins. sshd reads those, and
     # current_ssh_port reads them, but the main-file pass cannot see them - so
