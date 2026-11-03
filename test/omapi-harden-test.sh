@@ -3110,6 +3110,45 @@ test_sshd_password_ssh_flag() {
   return $rc
 }
 
+test_sshd_flag_choices_revert() {
+  # The Merge Danger claim: both flag values are always written, and the
+  # choice lives in globals that are recomputed on every run, so a re-run
+  # without the flags reverts the block. Demonstrated as two consecutive
+  # DRY_RUN=1 captures over one sshd state. A real second run cannot be used
+  # on a runner that cannot chown: install_staged refuses to install when it
+  # cannot restore ownership, which is its own guardrail, tested elsewhere.
+  setup_destdir
+  local rc=0 on off
+  stub_ssh_context
+  DRY_RUN=1
+  AGENT_FORWARDING=1
+  PASSWORD_SSH=1
+  on="$(harden_ssh 2>&1 || true)"
+  AGENT_FORWARDING=0
+  PASSWORD_SSH=0
+  off="$(harden_ssh 2>&1 || true)"
+  DRY_RUN=0
+
+  [[ $on == *"PasswordAuthentication yes"* && $on == *"KbdInteractiveAuthentication yes"* ]] || {
+    printf '        the opted-in run did not write yes on both directives\n'
+    rc=1
+  }
+  if [[ $on == *"PasswordAuthentication no"* || $on == *"KbdInteractiveAuthentication no"* ]]; then
+    printf '        the opted-in run wrote a no alongside a yes\n'
+    rc=1
+  fi
+  [[ $off == *"PasswordAuthentication no"* && $off == *"KbdInteractiveAuthentication no"* ]] || {
+    printf '        the re-run without the flags did not revert both directives to no\n'
+    rc=1
+  }
+  if [[ $off == *"PasswordAuthentication yes"* || $off == *"KbdInteractiveAuthentication yes"* ]]; then
+    printf '        the re-run kept a stale yes\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 # ---------------------------------------------------------------------------
 printf '\nrunning\n'
 
@@ -3120,6 +3159,7 @@ t 'sshd config is created when absent'                  test_sshd_creates_missin
 t 'sshd block includes depth directives'                test_sshd_block_includes_depth_directives
 t 'sshd --agent-forwarding opts in'                     test_sshd_agent_forwarding_flag
 t 'sshd --password-ssh keeps passwords on'              test_sshd_password_ssh_flag
+t 'sshd flag choices revert on re-run'                  test_sshd_flag_choices_revert
 t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
 t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
