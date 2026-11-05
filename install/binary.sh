@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install/update helpers for the binaries managed by the Oma-Pi installer.
+# Install/update helpers for the binaries managed by the Shippi installer.
 #
 # Managed binaries fall into two groups:
 #

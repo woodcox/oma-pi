@@ -1,7 +1,0 @@
-#!/bin/bash
-
-# Reinstalls Oma-pi with missing packages and default configs.
-
-if gum confirm "Refresh Oma-Pi (including overwriting configs)?"; then
-  curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | bash
-fi

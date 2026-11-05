@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Common functions for Omaterm installation
+# Common functions for Shippi installation
 show_banner() {
   clear
   echo
@@ -10,15 +10,12 @@ show_banner() {
   RESET="\e[0m"
 
   echo -e "${RED}   
- ▄██████▄    ▄▄▄▄███▄▄▄▄      ▄████████    ▄████████ ▄██
-███    ███ ▄██▀▀▀███▀▀▀██▄   ███    ███   ███    ███ █▀
-███    ███ ███   ███   ███   ███    ███   ███    ███   ▄
-███    ███ ███   ███   ███   ███    ███   ███    ███ ▄██
-███    ███ ███   ███   ███ ▀███████████ ▀█████████▀  ███
-███    ███ ███   ███   ███   ███    ███   ███        ███
-███    ███ ███   ███   ███   ███    ███   ███        ███
- ▀██████▀   ▀█   ███   █▀    ███    █▀    ███        ███
-                                          █▀         █▀
+███████╗██╗  ██╗██╗██████╗ ██████╗ ██╗
+██╔════╝██║  ██║██║██╔══██╗██╔══██╗██║
+███████╗███████║██║██████╔╝██████╔╝██║
+╚════██║██╔══██║██║██╔═══╝ ██╔═══╝ ██║
+███████║██║  ██║██║██║     ██║     ██║
+╚══════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝     ╚═╝
   ${RESET}"
 }
 
@@ -150,7 +147,7 @@ run_installation() {
   # managed file and future ones have somewhere durable to live.
   ensure_git_config
 
-  # Omadots
+  # Shippi dots
   install_dots
 
   # MS Edit binary: the default $EDITOR
@@ -194,7 +191,7 @@ run_installation() {
 
 # Getting started
 show_banner
-section "Installing Oma-Pi..."
+section "Installing Shippi..."
 
 # Ensure git is installed
 if ! command -v git &>/dev/null; then
@@ -203,7 +200,7 @@ if ! command -v git &>/dev/null; then
   fi
 fi
 
-REPO="https://github.com/woodcox/oma-pi.git"
+REPO="https://github.com/woodcox/shippi-server.git"
 INSTALLER_DIR="$(mktemp -d)"
 trap 'rm -rf "$INSTALLER_DIR"' EXIT
 
@@ -214,7 +211,7 @@ if [ -f /etc/debian_version ]; then
   source "$INSTALLER_DIR/install/debian.sh"
 else
   echo "Error: Unsupported operating system"
-  echo "Oma-Pi only supports Debian based OS such as Raspberry Pi OS, Debian and Ubuntu"
+  echo "Shippi only supports Debian based OS such as Raspberry Pi OS, Debian and Ubuntu"
   exit 1
 fi
 

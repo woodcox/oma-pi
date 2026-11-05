@@ -1,4 +1,4 @@
-# Oma-Pi
+# Shippi
 
 A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in the spirit of Omarchy/[Omaterm](https://github.com/omacom-io/omaterm). This has only been tested on a Raspberry Pi 5 with 8GB ram and SSD storage.
 
@@ -8,7 +8,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
   - Tested on Raspberry Pi OS Lite / Debian 12 (bookworm).
   - **Ubuntu 24.04 (noble) or newer.** Ubuntu moved sshd to systemd socket
     activation in 22.10. On 24.04 and later a `Port` change in
-    `sshd_config` is read by a systemd generator, so `omapi-harden` can move
+    `sshd_config` is read by a systemd generator, so `shippi-harden` can move
     the port by reloading and restarting `ssh.socket`. On 22.10 through
     23.10 there is no such generator: `ssh.socket` uses a fixed
     `ListenStream=22`, the `Port` directive is ignored, and the script would
@@ -18,7 +18,7 @@ A minimal setup for debian based systems like Raspberry Pi OS Lite and Ubuntu in
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/woodcox/oma-pi/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/woodcox/shippi-server/main/install.sh | bash
 
 ```
 
@@ -59,15 +59,15 @@ And you'll be offered to setup:
 > Security note: the installer adds the user to the `docker` group which grants root-level privileges to the user. For details on how this impacts security in your system, see [Docker Daemon Attack Surface](https://docs.docker.com/engine/security/#docker-daemon-attack-surface). If you decline, use `sudo docker ...`.
 
 ## Commands
-See `omapi-help` for the command list and Herdr key bindings, and the
+See `shippi-help` for the command list and Herdr key bindings, and the
 [Herdr docs](https://herdr.dev/docs/) for the full manual. Herdr replaces tmux:
 tabs are tmux windows, workspaces are tmux sessions, and `h` attaches to the
-persistent `Work` session. Oma-Pi provides:
+persistent `Work` session. Shippi provides:
 
- - `omapi-setup`: Git name and email and github cli
- - `omapi-refresh`: Reinstall Oma-pi with initial configs
- - `omapi-ssh`: Add SSH key for remote access
- - `omapi-harden`: One-time security hardening — run `omapi-harden --dry-run` first. See security hardening section for further details
+ - `shippi-setup`: Git name and email and github cli
+ - `shippi-refresh`: Reinstall Shippi with initial configs
+ - `shippi-ssh`: Add SSH key for remote access
+ - `shippi-harden`: One-time security hardening — run `shippi-harden --dry-run` first. See security hardening section for further details
 
  - [opencode](https://opencode.ai/): alias `oc`
  - Claude: alias `cc=printf "\033[2J\033[3J\033[H" && claude --permission-mode bypassPermissions`
@@ -125,7 +125,7 @@ for further info.
 
 ## Security hardening
 
-After installing you can run `omapi-harden` which applies the following hardening: 
+After installing you can run `shippi-harden` which applies the following hardening: 
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
 security updates, AppArmor, and kernel and network sysctls. 
 
@@ -138,10 +138,10 @@ root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the
 
 ```bash
 
-sudo $HOME/.local/bin/omapi-harden --list       # available tasks
-sudo $HOME/.local/bin/omapi-harden ssh firewall  # just these two
-sudo $HOME/.local/bin/omapi-harden --yes         # take the recommended defaults
-./test/omapi-harden-test.sh              # test suite does not need root access
+sudo $HOME/.local/bin/shippi-harden --list       # available tasks
+sudo $HOME/.local/bin/shippi-harden ssh firewall  # just these two
+sudo $HOME/.local/bin/shippi-harden --yes         # take the recommended defaults
+./test/shippi-harden-test.sh              # test suite does not need root access
 ```
 
 If you would rather do it by hand, please see the three hardening guides below:

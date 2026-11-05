@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# oma-pi security hardening
+# shippi security hardening
 #
 # Sources, all three linked from the README "Requirements" section:
 #   https://chrisapproved.com/blog/raspberry-pi-hardening.html
@@ -46,7 +46,7 @@ RUN_AUDIT=1
 NO_RESTART=0
 # Test-only override so the config writers can be exercised against a
 # throwaway tree instead of the live system. Unset in normal use.
-CONF_DEST="${OMAPI_SECURITY_DESTDIR:-}"
+CONF_DEST="${SHIPPI_SECURITY_DESTDIR:-}"
 SELECTED=()
 
 # Prepended, not appended: sshd honours the FIRST value it reads, so a
@@ -57,8 +57,8 @@ SELECTED=()
 # managed block in sshd_config unmatched: the new run writes a second block
 # and never removes the first, leaving two conflicting copies of every
 # directive in the file.
-MANAGED_BEGIN="# BEGIN oma-pi hardening - do not edit between these lines"
-MANAGED_END="# END oma-pi hardening"
+MANAGED_BEGIN="# BEGIN shippi hardening - do not edit between these lines"
+MANAGED_END="# END shippi hardening"
 
 # aideinit builds a file database over the whole filesystem. On an SD card
 # that is minutes of 100% CPU, so it is opt-in rather than part of the
@@ -87,10 +87,10 @@ skip() { printf '  %s-%s %s\n' "$C_DIM" "$C_OFF" "$1"; }
 
 usage() {
   cat <<'EOF'
-oma-pi security hardening
+shippi security hardening
 
 Usage:
-  omapi-harden [options] [task ...]
+  shippi-harden [options] [task ...]
 
 Supported: Raspberry Pi OS Lite / Debian 12 (bookworm), or Ubuntu 24.04
 (noble) and newer. Ubuntu 22.10-23.10 are not supported: sshd there is
@@ -120,9 +120,9 @@ Options:
   -h, --help        this text
 
 Examples:
-  omapi-harden --dry-run
-  sudo omapi-harden ssh firewall fail2ban
-  sudo omapi-harden --yes --report
+  shippi-harden --dry-run
+  sudo shippi-harden ssh firewall fail2ban
+  sudo shippi-harden --yes --report
 EOF
 }
 
@@ -210,7 +210,7 @@ ask() {
   # loops, where the loop list occupies fd 0. Gating this on `[[ -t 0 ]]` was
   # wrong twice over: it skipped gum entirely inside those loops, and it also
   # reported "no tty" on a perfectly good terminal. </dev/tty is the same
-  # pattern install.sh and bin/omapi-* already use.
+  # pattern install.sh and bin/shippi-* already use.
   if have gum && [[ -e /dev/tty ]] && [[ -r /dev/tty ]]; then
     if [[ $default == y ]]; then
       gum confirm "$question" </dev/tty
@@ -263,7 +263,7 @@ write_conf() {
   # target is left empty or partial and set -e then aborts the run. rename(2)
   # within one filesystem is atomic, so the target is either the old file or
   # the complete new one - never a half-written one.
-  local tmp="${target}.omapi-tmp.$$"
+  local tmp="${target}.shippi-tmp.$$"
   if ! cat >"$tmp"; then
     rm -f "$tmp"
     warn "could not write $path; it has NOT been changed"
@@ -486,7 +486,7 @@ replace_managed_block() {
   # Not `cp -p`: that carries the mktemp body's 0600 and the invoking user's
   # ownership onto a 0640 root:root file. A plain cp onto a NEW file also has no
   # metadata of its own, so the create branch sets it explicitly.
-  local stage="${target}.omapi-stage.$$"
+  local stage="${target}.shippi-stage.$$"
   if ! run_root cp "$body" "$stage"; then
     run_root rm -f "$stage" 2>/dev/null || true
     rm -f "$body"
@@ -1002,7 +1002,7 @@ harden_ssh() {
     warn "no non-root account with a usable authorized_keys entry was found"
     # Default no, and deliberately not overridable by --yes/--force. Those
     # flags take *defaults*, and defaulting this one to yes means every
-    # `sudo omapi-harden --yes` run turns passwords off on a box with no
+    # `sudo shippi-harden --yes` run turns passwords off on a box with no
     # verified way back in, which is the exact failure this whole check
     # exists to prevent. Continuing requires a deliberate interactive yes.
     if ! ask "switch SSH to key-only anyway (make sure you can reach this box another way)?" n; then
@@ -1015,13 +1015,13 @@ harden_ssh() {
 
   local new_port="$port" change_port=0
   if ((LOCKDOWN_SSH)); then
-    # Under `sudo omapi-harden`, id -un is root. AllowUsers root alongside
+    # Under `sudo shippi-harden`, id -un is root. AllowUsers root alongside
     # PermitRootLogin no is a config sshd accepts and that locks out every
     # account, so the real invoking user has to be resolved, and root has to
     # be refused outright.
     local target_user="${SUDO_USER:-$(id -un)}"
     if [[ -z $target_user || $target_user == root ]]; then
-      warn "--lockdown-ssh needs a real non-root user; run it as 'sudo -u \$USER -E omapi-harden --lockdown-ssh' or from a root shell with SUDO_USER set"
+      warn "--lockdown-ssh needs a real non-root user; run it as 'sudo -u \$USER -E shippi-harden --lockdown-ssh' or from a root shell with SUDO_USER set"
       warn "refusing to write AllowUsers root: it would lock out every account"
       LOCKDOWN_SSH=0
     elif ! have_usable_key "$(key_files_for_user "$target_user")"; then
@@ -1101,7 +1101,7 @@ harden_ssh() {
     cat <<EOF
 # Prepended because sshd takes the first value it reads, so the same
 # directive further down the file (or in an Include drop-in above this)
-# would silently override it. Re-run omapi-harden to change these; edits
+# would silently override it. Re-run shippi-harden to change these; edits
 # inside the block are lost on the next run.
 PermitRootLogin no
 PubkeyAuthentication yes
@@ -1136,7 +1136,7 @@ EOF
   # block, because the rollback is outside it and would otherwise see nothing.
   local dropin_backups=""
   if ((!DRY_RUN)) && [[ -f $target ]]; then
-    backup="${target}.omapi-backup"
+    backup="${target}.shippi-backup"
     if ! run_root cp -p "$target" "$backup"; then
       warn "could not back up ${conf}; leaving it untouched"
       rm -f "$block"
@@ -1185,14 +1185,14 @@ EOF
         next
       }
       { print }
-    ' "$target" >"$rewrite" || ! run_root cp "$rewrite" "$target.omapi-tmp"; then
+    ' "$target" >"$rewrite" || ! run_root cp "$rewrite" "$target.shippi-tmp"; then
       # A failure inside `awk && cat && rm` is exempt from set -e, so this
       # used to fail silently: harden_ssh returned 0, printed "sshd accepts
       # the new config", and left two active Port lines plus a stray temp file
       # with no warning anywhere. Verified with an injected failing awk. Treat
       # it as the config-write failure it is.
       warn "could not rewrite the Port lines in ${conf}"
-      run_root rm -f "$target.omapi-tmp"
+      run_root rm -f "$target.shippi-tmp"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
@@ -1215,7 +1215,7 @@ EOF
     fi
     if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
       warn "could not read the mode/owner of ${conf}; leaving it untouched"
-      run_root rm -f "$target.omapi-tmp"
+      run_root rm -f "$target.shippi-tmp"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
@@ -1227,9 +1227,9 @@ EOF
       # before the rename, so sshd never sees the live config with the wrong
       # mode or owner. `chown` needs privilege, so on failure leave the target
       # alone rather than install a config owned by the invoking user.
-      if ! run_root chmod "$tmode" "$target.omapi-tmp" 2>/dev/null ||
-         ! run_root chown "$towner:$tgroup" "$target.omapi-tmp" 2>/dev/null; then
-        run_root rm -f "$target.omapi-tmp"
+      if ! run_root chmod "$tmode" "$target.shippi-tmp" 2>/dev/null ||
+         ! run_root chown "$towner:$tgroup" "$target.shippi-tmp" 2>/dev/null; then
+        run_root rm -f "$target.shippi-tmp"
         warn "could not set the mode/owner on the staged ${conf}; leaving it untouched"
         if [[ -n $backup && -f $backup ]]; then
           run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
@@ -1237,10 +1237,10 @@ EOF
         rm -f "$rewrite" "$block"
         return 1
       fi
-      if run_root mv -f "$target.omapi-tmp" "$target"; then
+      if run_root mv -f "$target.shippi-tmp" "$target"; then
         :
       else
-        run_root rm -f "$target.omapi-tmp"
+        run_root rm -f "$target.shippi-tmp"
         warn "could not install ${conf}; it has NOT been changed"
         if [[ -n $backup && -f $backup ]]; then
           run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
@@ -1249,7 +1249,7 @@ EOF
         return 1
       fi
     else
-      run_root rm -f "$target.omapi-tmp"
+      run_root rm -f "$target.shippi-tmp"
       warn "refusing to install an empty ${conf}; leaving it untouched"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
@@ -1271,7 +1271,7 @@ EOF
       # drop-ins modified - a config inconsistency that would only bite on the
       # next sshd start, which is exactly the kind of thing that surfaces hours
       # later as "ssh won't come back".
-      local dbak="${dropin}.omapi-backup"
+      local dbak="${dropin}.shippi-backup"
       # Do not rewrite a file we could not back up. The sshd -t rollback
       # restores from these backups, so rewriting without one leaves an
       # unrestorable change on a file sshd reads.
@@ -1289,7 +1289,7 @@ EOF
           next
         }
         { print }
-      ' "$dropin" >"$rewrite" && run_root cp "$rewrite" "$dropin.omapi-tmp"; then
+      ' "$dropin" >"$rewrite" && run_root cp "$rewrite" "$dropin.shippi-tmp"; then
         # Same reasoning as the main file: rename rather than truncate-and-copy,
         # so a failed write cannot leave a half-written drop-in for sshd to read
         # on the next start.
@@ -1310,27 +1310,27 @@ EOF
           if [[ -z $dmode ]]; then
             # Do not guess a mode. Renaming without knowing it could widen a
             # root-owned drop-in, which is worse than leaving it alone.
-            run_root rm -f "$dropin.omapi-tmp"
+            run_root rm -f "$dropin.shippi-tmp"
             warn "could not read the mode of ${dropin}; leaving it untouched"
-          elif ! run_root chmod "$dmode" "$dropin.omapi-tmp" 2>/dev/null ||
-               ! run_root chown --reference="$dropin" "$dropin.omapi-tmp" 2>/dev/null; then
-            run_root rm -f "$dropin.omapi-tmp"
+          elif ! run_root chmod "$dmode" "$dropin.shippi-tmp" 2>/dev/null ||
+               ! run_root chown --reference="$dropin" "$dropin.shippi-tmp" 2>/dev/null; then
+            run_root rm -f "$dropin.shippi-tmp"
             warn "could not set the mode/owner on the staged drop-in; leaving it untouched"
-          elif run_root mv -f "$dropin.omapi-tmp" "$dropin"; then
+          elif run_root mv -f "$dropin.shippi-tmp" "$dropin"; then
             :
           else
-            run_root rm -f "$dropin.omapi-tmp"
+            run_root rm -f "$dropin.shippi-tmp"
             warn "could not install ${dropin}; it has NOT been changed"
           fi
         else
-          run_root rm -f "$dropin.omapi-tmp"
+          run_root rm -f "$dropin.shippi-tmp"
           warn "refusing to install an empty drop-in; leaving it untouched"
         fi
       else
         # Never rewrite a file we cannot read back correctly: a half-written
         # drop-in is a box that may not come back.
         warn "could not rewrite Port lines in ${dropin}; leaving it untouched"
-        run_root rm -f "$dropin.omapi-tmp"
+        run_root rm -f "$dropin.shippi-tmp"
       fi
     done
     rm -f "$rewrite"
@@ -1361,7 +1361,7 @@ EOF
     local dbak
     while read -r dbak; do
       [[ -n $dbak && -f $dbak ]] || continue
-      run_root cp -p "$dbak" "${dbak%.omapi-backup}" || warn "could not restore ${dbak%.omapi-backup}"
+      run_root cp -p "$dbak" "${dbak%.shippi-backup}" || warn "could not restore ${dbak%.shippi-backup}"
     done <<<"${dropin_backups:-}"
     if [[ -n $backup ]]; then
       warn "sshd rejected the new config, rolling ${conf} back"
@@ -1792,7 +1792,7 @@ install_docker_ufw_rules() {
   {
     printf '%s\n' "$DOCKER_UFW_BEGIN"
     cat <<'EOF'
-# Managed by omapi-harden. Rules from chaifeng/ufw-docker.
+# Managed by shippi-harden. Rules from chaifeng/ufw-docker.
 #
 # Without these, Docker's own DNAT/ACCEPT rules sit ahead of ufw's and a
 # published port is reachable from the internet regardless of ufw.
@@ -1889,7 +1889,7 @@ install_docker_ufw6_rules() {
   {
     printf '%s\n' "$DOCKER_UFW_BEGIN"
     cat <<'EOF'
-# Managed by omapi-harden. IPv6 twin of the after.rules block.
+# Managed by shippi-harden. IPv6 twin of the after.rules block.
 *filter
 :ufw6-user-forward - [0:0]
 :ufw6-docker-logging-deny - [0:0]
@@ -2002,7 +2002,7 @@ configure_firewall() {
     if ((DRY_RUN)); then
       printf '  %s•%s would allow: ufw allow in on tailscale0\n' "$C_DIM" "$C_OFF"
     elif ask "allow traffic arriving on the tailscale0 interface?" y; then
-      run_root ufw allow in on tailscale0 comment "omapi: tailscale"
+      run_root ufw allow in on tailscale0 comment "shippi: tailscale"
       tailscale_allowed=1
       ok "tailscale0 allowed"
     else
@@ -2049,7 +2049,7 @@ configure_firewall() {
       if ((DRY_RUN)); then
         printf '  %s•%s would allow: ufw allow %s/%s\n' "$C_DIM" "$C_OFF" "$port" "$proto"
       else
-        run_root ufw allow "$port/$proto" comment "omapi: $(listening_process "$proto" "$port" || true)"
+        run_root ufw allow "$port/$proto" comment "shippi: $(listening_process "$proto" "$port" || true)"
         ok "allowed ${proto}/${port}"
       fi
     else
@@ -2083,7 +2083,7 @@ configure_firewall() {
       # predates this script is handled too.
       run_root ufw delete limit "$ssh_port/tcp" || true
       run_root ufw delete allow "$ssh_port/tcp" || true
-      run_root ufw deny "$ssh_port/tcp" comment "omapi: ssh over tailscale only"
+      run_root ufw deny "$ssh_port/tcp" comment "shippi: ssh over tailscale only"
       warn "port ${ssh_port} is now denied - make sure a tailscale session works"
     fi
   fi
@@ -2178,7 +2178,7 @@ docker_offer_published_ports() {
         # kept set -e off the failure but not the report, so a rejected rule
         # printed a warning AND a success line, and the user trusted the second.
         if run_root ufw route allow proto "$proto" from any to any port "$cport" \
-             comment "omapi: ${name}"; then
+             comment "shippi: ${name}"; then
           ok "${name}: container port ${cport}/${proto} reachable from the network"
         else
           warn "could not add a route rule for ${name}:${cport}/${proto} - it is NOT reachable"
@@ -2265,7 +2265,7 @@ configure_docker_ufw() {
   }
 
   # Checked through CONF_DEST so this works against a temporary tree, and so
-  # OMAPI_SECURITY_DESTDIR cannot make the script inspect the real /etc.
+  # SHIPPI_SECURITY_DESTDIR cannot make the script inspect the real /etc.
   if docker_ufw_installed; then
     ok "DOCKER-USER rules already present in ${CONF_DEST}/etc/ufw/after.rules"
     # The v6 half is installed separately and independently. Skipping it just
@@ -2286,9 +2286,9 @@ configure_docker_ufw() {
     # Three outcomes, not two: verified, malformed, and - when not running as
     # root - unverified, because iptables-restore needs privilege even for
     # --test. Only a malformed fragment blocks the reload. An unverified one
-    # is the normal case for `omapi-harden` run as a normal user, and refusing
+    # is the normal case for `shippi-harden` run as a normal user, and refusing
     # to configure Docker at all there would be worse than proceeding with a
-    # loud warning; a real run of this script is `sudo omapi-harden`.
+    # loud warning; a real run of this script is `sudo shippi-harden`.
     local vrc=0 rrc=0
     validate_docker_ufw_rules "${CONF_DEST}/etc/ufw/after.rules" || vrc=$?
     case $vrc in
@@ -2393,7 +2393,7 @@ configure_fail2ban() {
     banaction="ufw"
   fi
 
-  local jail="/etc/fail2ban/jail.d/omapi-hardening.local"
+  local jail="/etc/fail2ban/jail.d/shippi-hardening.local"
   # Snapshot the real file BEFORE write_conf truncates it, so a rejected jail
   # can be rolled back. Claiming "leaving the previous config in place" while
   # the overwrite has already happened is how a broken file ends up breaking
@@ -2405,7 +2405,7 @@ configure_fail2ban() {
   fi
 
   write_conf "$jail" <<EOF
-# Managed by omapi-harden. Re-run the script to change these.
+# Managed by shippi-harden. Re-run the script to change these.
 [DEFAULT]
 usedns = no
 banaction = ${banaction}
@@ -2648,7 +2648,7 @@ configure_updates() {
     # `|| rpi_combo=""` matters: without root, and with stdin not a tty, peek
     # cannot run, the inner substitution returns non-zero, and under set -e
     # this line aborts the whole task. Reproduced as
-    # `omapi-harden --dry-run updates` exiting 1 on the section header.
+    # `shippi-harden --dry-run updates` exiting 1 on the section header.
     rpi_combo="$(apt_release_origin_combo "$(apt_release_line_for archive.raspberrypi.com)" || true)" || rpi_combo=""
     if [[ -n $rpi_combo ]]; then
       origins+=("\"${rpi_combo}\"")
@@ -2675,15 +2675,15 @@ configure_updates() {
   # hardening script, because it is silent. So: the Periodic keys go here, and
   # the policy goes in the script's own file.
   write_conf /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-// Managed by omapi-harden. Re-run the script to change these.
+// Managed by shippi-harden. Re-run the script to change these.
 // These two keys are what actually enable unattended-upgrades. Without them
 // apt.systemd.daily defaults to 0 and no security patch is ever applied.
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-  write_conf /etc/apt/apt.conf.d/51omapi-origins <<EOF
-// Managed by omapi-harden. Re-run the script to change these.
+  write_conf /etc/apt/apt.conf.d/51shippi-origins <<EOF
+// Managed by shippi-harden. Re-run the script to change these.
 Unattended-Upgrade::Allowed-Origins {
 ${origin_block}};
 
@@ -2697,8 +2697,8 @@ Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Acquire::Retries "3";
 EOF
 
-  write_conf /etc/apt/apt.conf.d/52omapi-unattended-upgrades <<'EOF'
-// Managed by omapi-harden. Re-run the script to change these.
+  write_conf /etc/apt/apt.conf.d/52shippi-unattended-upgrades <<'EOF'
+// Managed by shippi-harden. Re-run the script to change these.
 // No Automatic-Reboot: this box runs containers and serves a tailnet, and an
 // unattended reboot in the middle of a task is a worse outcome than a patch
 // that waits for the next maintenance window. Set it to "true" here if the
@@ -2808,8 +2808,8 @@ configure_sysctl() {
     docker_note=$'\nnet.ipv4.ip_forward = 0'
   fi
 
-  write_conf /etc/sysctl.d/99-omapi-hardening.conf <<EOF
-# Managed by oma-pi omapi-harden. Re-run the script to change these.
+  write_conf /etc/sysctl.d/99-shippi-hardening.conf <<EOF
+# Managed by shippi-harden. Re-run the script to change these.
 # Network redirects and source routes are off: a Pi is normally a plain
 # endpoint on one LAN, and none of these have a use here.
 net.ipv4.conf.all.send_redirects = 0
@@ -2850,8 +2850,8 @@ EOF
 
   # An SD card fills up, and then the box stops logging, stops patching and
   # starts failing in ways that look like hardware faults.
-  write_conf /etc/systemd/journald.conf.d/omapi-hardening.conf <<'EOF'
-# Managed by oma-pi omapi-harden. Re-run the script to change these.
+  write_conf /etc/systemd/journald.conf.d/shippi-hardening.conf <<'EOF'
+# Managed by shippi-harden. Re-run the script to change these.
 [Journal]
 SystemMaxUse=200M
 RuntimeMaxUse=50M
@@ -2913,7 +2913,7 @@ configure_aide() {
   if [[ ! -e /etc/cron.daily/aide-check ]]; then
     write_conf /etc/cron.daily/aide-check <<'EOF'
 #!/bin/sh
-# Managed by omapi-harden.
+# Managed by shippi-harden.
 # A non-zero exit is expected on any change, so cron mails the diff.
 exec /usr/bin/aide.wrapper --stdout
 EOF
@@ -2955,7 +2955,7 @@ audit() {
   fi
 
   {
-    printf 'oma-pi security audit - %s\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
+    printf 'shippi security audit - %s\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
     printf 'host: %s   os: %s\n' "$(hostname)" "$pretty"
 
     printf '\n-- listening ports --\n'
@@ -3034,7 +3034,7 @@ audit() {
     peek aa-status 2>/dev/null | head -6 | sed 's/^/  /' || printf '  not installed\n'
 
     printf '\n-- sysctl --\n'
-    printf '  file: %s\n' "$([[ -f ${CONF_DEST}/etc/sysctl.d/99-omapi-hardening.conf ]] &&
+    printf '  file: %s\n' "$([[ -f ${CONF_DEST}/etc/sysctl.d/99-shippi-hardening.conf ]] &&
       echo present || echo absent)"
     peek sysctl net.ipv4.conf.all.rp_filter net.ipv4.tcp_syncookies 2>/dev/null |
       sed 's/^/  /' || true
@@ -3163,7 +3163,7 @@ main() {
     fi
   done
 
-  printf '%s   oma-pi  security hardening%s\n' "$C_RED" "$C_OFF"
+  printf '%s   shippi  security hardening%s\n' "$C_RED" "$C_OFF"
   if ((DRY_RUN)); then
     printf '%s   dry run: nothing is changed, no service is restarted%s\n' "$C_DIM" "$C_OFF"
   fi

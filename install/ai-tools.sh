@@ -150,7 +150,7 @@ have_hermes() {
 # per-agent entry itself.
 #
 # Ownership is one rule: an entry is ours when a marker file
-# (.oma-pi-skill-source) names the source that installed it, or when it is a
+# (.shippi-skill-source) names the source that installed it, or when it is a
 # link resolving to a marked canonical copy. Anything else is foreign and is
 # never deleted without being backed up first.
 #
@@ -159,7 +159,7 @@ have_hermes() {
 #   rename     install as <skill>-<github-user>-<repo>; foreign entries stay
 #   skip       do not touch the colliding entries
 #   overwrite  back the foreign entries up, then install over them
-# The choice is remembered in ~/.agents/.oma-pi-skill-choices until that file
+# The choice is remembered in ~/.agents/.shippi-skill-choices until that file
 # is deleted.
 # ---------------------------------------------------------------------------
 
@@ -188,7 +188,7 @@ hermes_skills_dir() {
 # Backups live beside each agent's config, outside its skills tree, so no
 # agent indexes them.
 skill_backup_root() {
-  printf '%s/.oma-pi-backups\n' "$(dirname "$1")"
+  printf '%s/.shippi-backups\n' "$(dirname "$1")"
 }
 
 # True when the entry at $1 belongs to this installer: it carries a marker
@@ -198,16 +198,16 @@ skill_entry_is_ours() {
   local target="$1" source="$3" canonical resolved
 
   [[ -e $target || -L $target ]] || return 1
-  if [[ -f $target/.oma-pi-skill-source ]] &&
-    [[ "$(cat "$target/.oma-pi-skill-source")" == "$source" ]]; then
+  if [[ -f $target/.shippi-skill-source ]] &&
+    [[ "$(cat "$target/.shippi-skill-source")" == "$source" ]]; then
     return 0
   fi
   [[ -L $target ]] || return 1
   resolved="$(readlink -f "$target" 2>/dev/null)" || return 1
   canonical="$(readlink -f "$(canonical_skills_dir)" 2>/dev/null)" || return 1
   [[ -n $resolved && -n $canonical && $resolved == "$canonical"/* ]] || return 1
-  [[ -f $resolved/.oma-pi-skill-source ]] &&
-    [[ "$(cat "$resolved/.oma-pi-skill-source")" == "$source" ]]
+  [[ -f $resolved/.shippi-skill-source ]] &&
+    [[ "$(cat "$resolved/.shippi-skill-source")" == "$source" ]]
 }
 
 # True when installing <skill> from <source> into the skills dir at $1 would
@@ -221,7 +221,7 @@ skill_collides() {
 # "<skill>\t<action>"; the rename target is regenerated, not stored, so a
 # malformed line can never redirect a path.
 skill_choices_file() {
-  printf '%s/.oma-pi-skill-choices\n' "$HOME/.agents"
+  printf '%s/.shippi-skill-choices\n' "$HOME/.agents"
 }
 
 # Move the Hermes-only choice file written by the previous installer, so a
@@ -232,7 +232,7 @@ migrate_hermes_skill_choices() {
   local shared legacy
 
   shared="$(skill_choices_file)"
-  legacy="${HERMES_HOME:-$HOME/.hermes}/.oma-pi-skill-choices"
+  legacy="${HERMES_HOME:-$HOME/.hermes}/.shippi-skill-choices"
   [[ -f $legacy && ! -f $shared ]] || return 0
   mkdir -p "$(dirname "$shared")" || return 1
   if mv "$legacy" "$shared"; then
@@ -330,12 +330,12 @@ prompt_skill_conflict() {
   done < <(skill_scopes)
 
   printf '\n' >&2
-  printf 'These skill entries already exist and are not managed by oma-pi:\n' >&2
+  printf 'These skill entries already exist and are not managed by shippi:\n' >&2
   printf '  %s\n' "${conflicts[@]}" >&2
   printf 'Installing %s would replace them.\n' "$skill" >&2
 
   choice="$(gum choose \
-    --header "How should oma-pi install $skill?" \
+    --header "How should shippi install $skill?" \
     "Rename to $target (recommended)" \
     "Skip $skill where it collides" \
     "Overwrite the conflicting entries" </dev/tty)" || choice=""
@@ -441,9 +441,9 @@ install_skill_entry() {
   # Build the replacement first. The live entry is only touched once the
   # copy, marker and frontmatter rewrite all succeed, so a failed staging
   # step cannot leave the destination missing.
-  tmp="$(mktemp -d "$dir/.oma-pi-${target}.XXXXXX")" || return 1
+  tmp="$(mktemp -d "$dir/.shippi-${target}.XXXXXX")" || return 1
   if ! cp -a "$src/." "$tmp/" ||
-    ! printf '%s\n' "$source" >"$tmp/.oma-pi-skill-source" ||
+    ! printf '%s\n' "$source" >"$tmp/.shippi-skill-source" ||
     ! rewrite_skill_name "$tmp/SKILL.md" "$target"; then
     echo "Error: could not stage $target for $label" >&2
     rm -rf -- "$tmp"
@@ -572,7 +572,7 @@ install_ai_skills() {
   # A fresh directory per run: two installs started at the same time cannot
   # delete each other's staged content.
   mkdir -p "$HOME/.agents" || return 1
-  stage="$(mktemp -d "$HOME/.agents/.oma-pi-staging.XXXXXX")" || {
+  stage="$(mktemp -d "$HOME/.agents/.shippi-staging.XXXXXX")" || {
     echo "Error: could not create a staging directory" >&2
     return 1
   }
@@ -630,8 +630,8 @@ install_ai_skills() {
       if bunx skills@latest add "$source" -g -y --skill "${fresh[@]}" -a opencode; then
         for skill in "${fresh[@]}"; do
           dir="$canonical/$skill"
-          if [[ -d $dir ]] && [[ ! -f $dir/.oma-pi-skill-source ]]; then
-            printf '%s\n' "$source" >"$dir/.oma-pi-skill-source" 2>/dev/null ||
+          if [[ -d $dir ]] && [[ ! -f $dir/.shippi-skill-source ]]; then
+            printf '%s\n' "$source" >"$dir/.shippi-skill-source" 2>/dev/null ||
               echo "Warning: could not mark $dir as ours; it may prompt as a conflict later" >&2
           fi
         done
