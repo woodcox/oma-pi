@@ -127,10 +127,44 @@ for further info.
 
 After installing you can run `omapi-harden` which applies the following hardening: 
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
-security updates, AppArmor, and kernel and network sysctls. 
+security updates, AppArmor, kernel and network sysctls, password quality
+checks, and service minimisation (it offers to disable things a headless server
+does not need, such as cups, Bluetooth and triggerhappy). 
+
+Passwords do not expire on a timer. Forced rotation mostly produces predictable
+increments, and on a headless key-only box an expired password can lock out the
+next login; set a maximum yourself with `chage -M <days> <user>` if your policy
+requires one. Password changes are checked by `pam_pwquality` (enabled through
+`pam-auth-update`) instead: 15 characters minimum, at least three character
+classes, no username or dictionary matches, and no trivial repeats or sequences,
+so a replacement cannot be the old password plus a digit. Undo the PAM profile
+with `sudo pam-auth-update --disable pwquality`.
+The users task also reads `/etc/sudoers` and `/etc/sudoers.d` and warns — it
+never edits those files — when a `NOPASSWD` rule or `!authenticate` makes root
+reachable from a shell without a password; if it cannot read them it says the
+check was not performed rather than reporting a clean result. It also reports
+console autologin from getty or LightDM (`--autologin`, `autologin-user=`),
+because a Pi left at a logged-in console hands a shell to anyone with physical
+access; it never disables one, since kiosk setups rely on it.
+`UMASK` is deliberately left alone: a group-restricted umask saves
+nothing on a single-admin box and breaks anything the box writes for others to
+read.
+
+Service minimisation only touches units that are installed and asks for every
+one it can disable. Units systemd cannot disable (static, indirect, masked) are
+skipped, but a running one is reported with the `systemctl stop` command rather
+than left running silently. It deliberately never touches avahi (`.local`
+discovery), rpcbind (NFS), or the apport/whoopsie crash-report pair.
+`ModemManager.service` is in the list but warns first: stopping it can drop a
+cellular uplink, including the session you are using. Each disable prints the
+exact `systemctl enable --now` command to undo it.
 
 File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
+The final audit also reports failed systemd units, whether a reboot is pending
+(with the packages that requested it), and whether the running kernel is the
+newest one installed — the three checks that matter most on a headless box
+after an update.
 
 Run it under `sudo`, with the full path as the validator also needs
 root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the
@@ -151,13 +185,25 @@ If you would rather do it by hand, please see the three hardening guides below:
 
 Some deliberate choices worth knowing before you run it:
 
-- **It will not lock you out.** Before disabling SSH passwords it looks for a
-  non-root account with an `authorized_keys` entry that `ssh-keygen` actually
-  accepts. An empty file, a truncated paste or a private key pasted in all look
-  like a key to a naive check, and the result is a headless Pi you cannot reach.
-  With no usable key it stops and asks — and that question defaults to *no*, so
-  neither `--yes` nor `--force` can talk its way past it. Every config is
-  validated before its service restarts, and rolled back if it fails.
+- **It will not lock you out.** The sshd block is key-only by default, and that
+  default is flagged: before writing it the ssh task looks for a non-root
+  account with an `authorized_keys` entry that `ssh-keygen` actually accepts.
+  An empty file, a truncated paste or a private key pasted in all look like a
+  key to a naive check, and the result is a headless Pi you cannot reach. With
+  no usable key it stops and asks — and that question defaults to *no*, so
+  `--yes` cannot talk its way past it. **If you genuinely
+  log in with an ssh password, run with `--password-ssh`** — that keeps
+  `PasswordAuthentication yes` in the block, skips the key-backdoor check
+  (passwords staying on is the way back in), and relies on fail2ban and ufw for
+  the brute force. It also checks that a non-root account actually has a usable
+  password before writing, and asks first (default no) if none does, because
+  `PermitRootLogin no` is still in the block. Every config is validated before
+  its service restarts, and rolled back if it fails.
+- **UseDNS stays on for hostname-restricted keys.** The block normally writes
+  `UseDNS no`. If the verified admin key uses a hostname-based `from=`
+  restriction, sshd would match it against the IP only and reject the key, so
+  the task warns and writes `UseDNS yes` instead. IP/CIDR `from=` rules are not
+  affected.
 - **Prompts use `gum`**, reading `/dev/tty` directly, so they still appear when
   the script is iterating over ports or accounts. Without a terminal at all it
   says so and takes the documented default rather than silently guessing.
@@ -193,8 +239,9 @@ Some deliberate choices worth knowing before you run it:
   those unattended is how a working stack dies at 3am, and they are not where
   this box's kernel-level exposure lives. Anything `apt upgrade` defers because
   it needs a new dependency is named out loud, because that class of hold is
-  silent by nature. `--report` also flags a kernel image in `/boot` that no
-  package owns — the signature of `rpi-update`, which installs a kernel outside
+  silent by nature. The audit that runs by default also flags a kernel image
+  in `/boot` that no package owns — the signature of `rpi-update`, which
+  installs a kernel outside
   apt's management so it quietly stops receiving patches. That check is scoped
   to kernel images: a Pi's `initrd.img-*`, `cmdline.txt` and `overlays` are
   untracked by design, and a check that fires on every machine is one nobody
@@ -204,7 +251,14 @@ Some deliberate choices worth knowing before you run it:
   you run the script, forwarding is turned off; start Docker and re-run if that
   matters. There is a test that fails if this ever regresses.
 - **`AllowTcpForwarding` stays on**, because `config/shell/fns/ssh-port-forwarding`
-  depends on it.
-- **Wi-Fi and Bluetooth are not disabled.** That needs a `sudo nano /boot/config.txt`
+  depends on it. Agent forwarding is a different feature and is off by default:
+  `AllowAgentForwarding no` stops a compromised remote host from using every key
+  loaded in your local agent. If a workflow genuinely needs `ssh -A` into this
+  box, add `--agent-forwarding` to the omapi run. Both values are always written
+  into the managed block, so the setting sticks: the block is prepended and sshd
+  takes the first value it reads, which is also why a drop-in cannot override it.
+- **Wi-Fi and Bluetooth radios are not disabled.** That needs a `sudo nano /boot/config.txt`
   dtoverlay and a reboot, and getting it wrong drops the box off the network you
-  are managing it over. The exact lines are printed at the end of a run.
+  are managing it over. The exact lines are printed at the end of a run. The
+  service minimisation task can stop `bluetooth.service` and `hciuart.service`,
+  but that is not the same as switching the radio off.

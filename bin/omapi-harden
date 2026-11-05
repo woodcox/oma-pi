@@ -29,10 +29,11 @@
 #     depends on it.
 #   * net.ipv4.ip_forward is not forced to 0 when Docker is installed; the
 #     installer puts Docker on every box and its bridge needs forwarding.
-#   * Wi-Fi and Bluetooth are not disabled. That needs a /boot/config.txt
+#   * Wi-Fi and Bluetooth radios are not disabled. That needs a /boot/config.txt
 #     dtoverlay and a reboot, and getting it wrong drops this box off the
 #     network you are reading this over. The exact lines are printed at the
-#     end of the run instead.
+#     end of the run instead. The services task can stop bluetooth.service and
+#     hciuart.service, but that is not the same as turning the radio off.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,12 @@ set -euo pipefail
 ASSUME_YES=0
 DRY_RUN=0
 LOCKDOWN_SSH=0
+# Keep `AllowAgentForwarding no` in the sshd block. A workflow that genuinely
+# needs `ssh -A` into this box can opt back in with --agent-forwarding.
+AGENT_FORWARDING=0
+# Keep password SSH on. Default is key-only; a user who actually logs in with
+# an ssh password opts out of the default with --password-ssh.
+PASSWORD_SSH=0
 WANT_REPORT=0
 RUN_AUDIT=1
 NO_RESTART=0
@@ -63,8 +70,8 @@ MANAGED_END="# END oma-pi hardening"
 # aideinit builds a file database over the whole filesystem. On an SD card
 # that is minutes of 100% CPU, so it is opt-in rather than part of the
 # default run.
-TASKS=(packages users ssh firewall fail2ban updates apparmor sysctl aide audit)
-DEFAULT_TASKS=(packages users ssh firewall fail2ban updates apparmor sysctl audit)
+TASKS=(packages users accounts services ssh firewall fail2ban updates apparmor sysctl aide audit)
+DEFAULT_TASKS=(packages users accounts services ssh firewall fail2ban updates apparmor sysctl audit)
 
 # ---------------------------------------------------------------------------
 # Output
@@ -100,19 +107,30 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
-  ssh         sshd hardening: no root login, no passwords, key-only, limits
+              and flag passwordless sudo / console autologin
+  accounts    password quality checks (pam_pwquality)
+  services    stop and disable services a headless server does not need
+              (ModemManager warns first: it may be a cellular uplink)
+  ssh         sshd hardening: no root login, key-only by default
+              (--password-ssh keeps passwords), limits
   firewall    ufw: deny incoming by default, allow only what is listening
   fail2ban    ban repeat SSH/auth failures, banaction matched to ufw
   updates     unattended-upgrades for security patches, no surprise reboots
   apparmor    enable AppArmor and report complain counts
   sysctl      network + kernel sysctls, journal size cap
   aide        opt-in file integrity monitoring (slow, first run is minutes)
-  audit       report the resulting state, change nothing
+  audit       report state, failed units and pending reboot, change nothing
 
 Options:
   -y, --yes         accept recommended defaults, do not prompt
   -n, --dry-run     print the plan, run only read-only commands
       --lockdown-ssh additionally set `AllowUsers <you>` in sshd_config
+      --agent-forwarding
+                        allow SSH agent forwarding in the sshd block
+                        (default is off: AllowAgentForwarding no)
+      --password-ssh    keep password login over SSH (PasswordAuthentication
+                        yes; default is key-only). Needs a non-root account
+                        with a usable password, and asks first if none exists.
       --report       also save the audit report to ~/security-audit/
       --no-audit     skip the final report
       --no-restart   write configs but do not restart any service
@@ -246,6 +264,79 @@ ask() {
   [[ $default == y ]]
 }
 
+# The shared tail of a staged config write: give the staging file the target's
+# own mode and owner, then rename it over the target. rename(2) within one
+# filesystem is atomic, so the target is either the old file or the complete
+# new one, and is never observable half-written or carrying the wrong mode:
+# all metadata is applied to the STAGING file before the rename.
+#
+#   install_staged <body> <target> <what> [<mode> [<owner>]]
+#
+# <what> is the file's display name in warnings ("/etc/login.defs"). With no
+# <mode>/<owner> given, mode/uid/gid are read from <target> and all three must
+# resolve: a failed stat is refused, never guessed, because renaming an
+# unknown mode onto a root-owned file can widen it, and that is worse than
+# leaving the file alone. With BOTH given, nothing is read - that is the
+# brand-new-target case, which has no metadata of its own to preserve.
+#
+# On failure the target is untouched and the staging file is removed; <body>
+# is removed on every path. Returns 1 after warning with <what>; callers that
+# need more on their way out (backup restoration, their own temp files) do it
+# after the call.
+#
+# Not used by the sshd_config.d drop-in rewrite: its failures warn and move on
+# to the next drop-in rather than failing the run, and its ownership comes
+# back through chown --reference=<target>.
+install_staged() {
+  local body="$1" target="$2" what="$3"
+  local want_mode="${4:-}" want_owner="${5:-}"
+  local stage="${target}.omapi-stage.$$"
+  local tmode owner_spec towner tgroup
+
+  if [[ -n $want_mode || -n $want_owner ]]; then
+    # Explicit metadata must be complete: owner without mode (or the reverse)
+    # would install half the intent.
+    if [[ -z $want_mode || -z $want_owner ]]; then
+      rm -f "$body"
+      warn "refusing to stage ${what}: mode and owner must be given together"
+      return 1
+    fi
+    tmode="$want_mode"
+    owner_spec="$want_owner"
+  else
+    tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
+    towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
+    tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
+    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
+      rm -f "$body"
+      warn "could not read the mode/owner of ${what}; it has NOT been changed"
+      return 1
+    fi
+    owner_spec="${towner}:${tgroup}"
+  fi
+
+  if ! run_root cp "$body" "$stage"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not stage ${what}; it has NOT been changed"
+    return 1
+  fi
+  if ! run_root chmod "$tmode" "$stage" 2>/dev/null ||
+    ! run_root chown "$owner_spec" "$stage" 2>/dev/null; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not set the mode/owner on the staged ${what}; it has NOT been changed"
+    return 1
+  fi
+  if ! run_root mv -f "$stage" "$target"; then
+    run_root rm -f "$stage" 2>/dev/null || true
+    rm -f "$body"
+    warn "could not install ${what}; it has NOT been changed"
+    return 1
+  fi
+  rm -f "$body"
+}
+
 # Write a managed config file. `install -d` for the parent, plain truncate for
 # the file itself so an existing file keeps its mode and owner.
 write_conf() {
@@ -263,34 +354,37 @@ write_conf() {
   # target is left empty or partial and set -e then aborts the run. rename(2)
   # within one filesystem is atomic, so the target is either the old file or
   # the complete new one - never a half-written one.
-  local tmp="${target}.omapi-tmp.$$"
-  if ! cat >"$tmp"; then
-    rm -f "$tmp"
+  local body
+  if ! body="$(mktemp)"; then
+    warn "could not create a staging file for $path; it has NOT been changed"
+    return 1
+  fi
+  if ! cat >"$body"; then
+    rm -f "$body"
     warn "could not write $path; it has NOT been changed"
     return 1
   fi
   # Refuse to install a config that came out empty. An empty sshd_config or
   # after.rules is never what was intended, and replacing a working one with it
   # is the worst outcome available.
-  if [[ ! -s $tmp ]]; then
-    rm -f "$tmp"
+  if [[ ! -s $body ]]; then
+    rm -f "$body"
     warn "$path came out empty; refusing to install it over the existing file"
     return 1
   fi
-  # Preserve the target's own mode: mv replaces the inode, so the new file
-  # would otherwise carry this script's umask. Applied to the STAGING file so
-  # the target is never observable with the wrong mode.
-  local tmode=644
-  [[ -e $target ]] && tmode="$(stat -c %a "$target" 2>/dev/null || printf 644)"
-  if ! chmod "$tmode" "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    warn "could not set the mode on the staged $path; it has NOT been changed"
-    return 1
-  fi
-  if ! mv -f "$tmp" "$target"; then
-    rm -f "$tmp"
-    warn "could not install $path; it has NOT been changed"
-    return 1
+  # 0640 root:root is what ufw ships for after.rules/after6.rules; 0644 is
+  # right for sshd_config. Defaulting to 0644 would make a hardening script
+  # create a world-readable rules file. An existing target's metadata is read
+  # back and preserved by install_staged instead of being set here.
+  local new_mode
+  case $target in
+    */ufw/after.rules|*/ufw/after6.rules) new_mode=640 ;;
+    *) new_mode=644 ;;
+  esac
+  if [[ -e $target ]]; then
+    install_staged "$body" "$target" "$path" || return 1
+  else
+    install_staged "$body" "$target" "$path" "$new_mode" "0:0" || return 1
   fi
   note "wrote $path"
 }
@@ -722,6 +816,43 @@ key_files_for_user() {
   fi
 }
 
+# True when an authorized_keys entry restricts the key with a hostname-based
+# `from=` option. sshd resolves those names with reverse DNS; under `UseDNS no`
+# it compares the pattern against the client's IP address instead, so the key
+# can never match. IP and CIDR patterns are unaffected by UseDNS and do not
+# need this check.
+key_from_requires_dns() {
+  local f line from pattern
+  local -a patterns=()
+  for f in "$@"; do
+    [[ -r $f ]] || continue
+    # `read` returns non-zero at EOF even when it filled `line` from a final
+    # line with no trailing newline. Without the `|| [[ -n $line ]]`, that
+    # last entry is skipped - and if it is the only hostname-restricted key,
+    # UseDNS no would be written and reject it.
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+      if [[ $line =~ from=\"([^\"]*)\" ]]; then
+        from="${BASH_REMATCH[1]}"
+      elif [[ $line =~ from=([^,[:space:]]+) ]]; then
+        from="${BASH_REMATCH[1]}"
+      else
+        continue
+      fi
+      IFS=',' read -r -a patterns <<<"$from"
+      for pattern in "${patterns[@]}"; do
+        pattern="${pattern#!}"
+        # A colon means IPv6. IPv4/CIDR is digits, dots and an optional slash.
+        [[ $pattern == *:* ]] && continue
+        [[ $pattern =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] && continue
+        # Anything else is a hostname or wildcard, and needs DNS.
+        return 0
+      done
+    done <"$f"
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # packages
 # ---------------------------------------------------------------------------
@@ -735,6 +866,7 @@ install_hardening_packages() {
     apparmor-utils
     unattended-upgrades
     ca-certificates
+    libpam-pwquality
   )
 
   if ((DRY_RUN)); then
@@ -778,6 +910,170 @@ install_hardening_packages() {
 # ---------------------------------------------------------------------------
 # users
 # ---------------------------------------------------------------------------
+# Read-only audit of sudoers for rules that make root reachable without a
+# password. Never edits the files: a broken sudoers is a box where even the
+# recovery command needs the sudo it just broke, and visudo is the only safe
+# editor. OMAPI_SUDOERS / OMAPI_SUDOERS_DIR exist so the tests can point this
+# at a fixture instead of the host.
+check_passwordless_sudo() {
+  local main="${OMAPI_SUDOERS:-/etc/sudoers}"
+  local dir="${OMAPI_SUDOERS_DIR:-/etc/sudoers.d}"
+
+  # Say "not checked" rather than "clean" when the files cannot be read.
+  # /etc/sudoers is 0440 root:root, so an unprivileged run cannot see it.
+  if ! peek test -r "$main"; then
+    warn "could not read ${main}; passwordless sudo was NOT checked"
+    note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${main} ${dir}"
+    return 0
+  fi
+  local -a files=("$main")
+  local f dir_checked=1
+  if [[ -d $dir ]]; then
+    if ! peek test -r "$dir"; then
+      warn "could not list ${dir}; passwordless sudo there was NOT checked"
+      note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${dir}"
+      dir_checked=0
+    else
+      # Enumerate through peek. A "$dir"/* glob runs in the invoking shell, so
+      # a root-only 0750 directory expands to no files and the audit then
+      # reports a clean result it never checked. find -L keeps symlinked
+      # drop-ins, which the old -f test also accepted.
+      local listing
+      if ! listing="$(peek find -L "$dir" -maxdepth 1 -type f -print 2>/dev/null)"; then
+        warn "could not list ${dir}; passwordless sudo there was NOT checked"
+        note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${dir}"
+        dir_checked=0
+      else
+        while IFS= read -r f; do
+          [[ -n $f ]] && files+=("$f")
+        done <<<"$listing"
+      fi
+    fi
+  fi
+
+  # One awk over every file. If any of them is unreadable it exits non-zero,
+  # and an empty result must not be mistaken for an all-clear.
+  local findings
+  if ! findings="$(peek awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      line = tolower($0)
+      if (line ~ /(^|[^[:alnum:]_])nopasswd[[:space:]]*:/ || line ~ /!authenticate/) {
+        print FILENAME ":" FNR ": " $0
+      }
+    }
+  ' "${files[@]}" 2>/dev/null)"; then
+    warn "could not read the sudoers files; passwordless sudo was NOT checked"
+    note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${main} ${dir}"
+    return 0
+  fi
+
+  if [[ -z $findings ]]; then
+    # A failed drop-in listing already warned; do not print an all-clear for
+    # the files that could not be enumerated.
+    ((dir_checked)) && ok "sudo requires a password"
+    return 0
+  fi
+
+  warn "passwordless sudo is configured:"
+  while IFS= read -r f; do
+    printf '      %s\n' "$f"
+  done <<<"$findings"
+  note "anyone who gets a shell can become root without knowing a password"
+  note "review with 'sudo visudo' (or 'sudo visudo -f <file>') and remove NOPASSWD / !authenticate"
+}
+
+# Console autologin bypasses everything SSH does: whoever touches the keyboard
+# gets a shell as the configured user without a password. Report, never change
+# it - a kiosk or photo frame may rely on autologin, and guessing wrong means
+# the box no longer does its job. OMAPI_GETTY_DIR / OMAPI_LIGHTDM_DIR exist so
+# the tests can point this at fixtures.
+check_console_autologin() {
+  local system_dir="${OMAPI_GETTY_DIR:-/etc/systemd/system}"
+  local lightdm_dir="${OMAPI_LIGHTDM_DIR:-/etc/lightdm}"
+  local -a getty_files=() lightdm_files=() unreadable=()
+  local d f incomplete=0
+
+  if [[ -d $system_dir ]]; then
+    if [[ ! -r $system_dir ]]; then
+      incomplete=1
+    fi
+    for d in "$system_dir"/getty@*.service.d "$system_dir"/serial-getty@*.service.d; do
+      [[ -d $d ]] || continue
+      if [[ ! -r $d ]]; then
+        incomplete=1
+        continue
+      fi
+      for f in "$d"/*.conf; do
+        [[ -f $f ]] || continue
+        if [[ -r $f ]]; then
+          getty_files+=("$f")
+        else
+          unreadable+=("$f")
+          incomplete=1
+        fi
+      done
+    done
+  fi
+
+  if [[ -d $lightdm_dir ]]; then
+    for f in "$lightdm_dir"/lightdm.conf "$lightdm_dir"/lightdm.conf.d/*.conf; do
+      [[ -f $f ]] || continue
+      if [[ -r $f ]]; then
+        lightdm_files+=("$f")
+      else
+        unreadable+=("$f")
+        incomplete=1
+      fi
+    done
+  fi
+
+  local -a findings=()
+  local line who
+  for f in "${getty_files[@]}"; do
+    while IFS= read -r line; do
+      [[ $line =~ ^[[:space:]]*# ]] && continue
+      if [[ $line =~ --autologin[[:space:]=]+([^[:space:]]+) ]]; then
+        who="${BASH_REMATCH[1]}"
+        findings+=("${f}: autologin user '${who}' -- ${line}")
+      fi
+    done <"$f"
+  done
+  for f in "${lightdm_files[@]}"; do
+    while IFS= read -r line; do
+      [[ $line =~ ^[[:space:]]*# ]] && continue
+      if [[ $line =~ ^[[:space:]]*autologin-user[[:space:]]*=[[:space:]]*([^[:space:]]+) ]]; then
+        who="${BASH_REMATCH[1]}"
+        findings+=("${f}: autologin user '${who}' -- ${line}")
+      fi
+    done <"$f"
+  done
+
+  if ((${#findings[@]})); then
+    warn "console autologin is enabled:"
+    for line in "${findings[@]}"; do
+      printf '      %s\n' "$line"
+    done
+    note "anyone with physical access gets a shell without a password"
+    note "turn it off with 'sudo raspi-config' (System Options > Auto Login), or remove the --autologin / autologin-user line"
+  fi
+
+  if ((${#unreadable[@]})); then
+    for f in "${unreadable[@]}"; do
+      warn "could not read ${f}; autologin was NOT checked there"
+    done
+  fi
+  if ((incomplete)); then
+    warn "some autologin drop-ins could not be read; autologin was NOT fully checked"
+    return 0
+  fi
+
+  if ((${#findings[@]} == 0)); then
+    ok "console autologin is off"
+  fi
+}
+
 check_users() {
   section "Users and accounts"
 
@@ -878,6 +1174,9 @@ check_users() {
     fi
   fi
 
+  check_passwordless_sudo
+  check_console_autologin
+
   # Report, do not touch: accounts that have never logged in are the ones
   # most likely to still carry a default or reused password.
   local never
@@ -885,6 +1184,187 @@ check_users() {
   if [[ -n $never ]]; then
     note "never logged in: $never"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# accounts (password quality)
+# ---------------------------------------------------------------------------
+# Interactive human accounts with a real password hash and no account
+# expiry. Used by the --password-ssh guard: if none exists, a password-ssh
+# block with PermitRootLogin no would leave no password login path. Optional
+# arguments exist for the test suite; production calls use the real files.
+password_login_accounts() {
+  local passwd="${1:-/etc/passwd}" shadow="${2:-/etc/shadow}"
+  # Shadow account-expiry days are days since the Unix epoch. Compare against
+  # the current UTC day so an account that PAM will reject is not counted as a
+  # password path. Empty (and -1, which chage uses for "no expiry") means no
+  # account expiry.
+  local today=$(( $(date -u +%s) / 86400 ))
+  peek awk -F: -v today="$today" '
+    NR == FNR {
+      if ($3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/) shell_ok[$1] = 1
+      next
+    }
+    ($1 in shell_ok) &&
+      $2 ~ /^\$[0-9a-z]/ &&
+      ($8 == "" || $8 == "-1" || $8 + 0 > today) { print $1 }
+  ' "$passwd" "$shadow" 2>/dev/null || true
+}
+
+# Password quality, not rotation: every password set after this run has to be
+# long and varied enough that "the old password plus a digit" is not a valid
+# replacement. pam_pwquality is enabled through pam-auth-update rather than by
+# editing /etc/pam.d/common-password by hand - a local edit there is exactly
+# what pam-auth-update refuses to overwrite later.
+have_pwquality() {
+  dpkg-query -W -f='${Status}' libpam-pwquality 2>/dev/null | grep -q 'ok installed'
+}
+
+configure_password_quality() {
+  section "Password quality (pam_pwquality)"
+  note "passwords are checked when they are set; they do not expire on a timer"
+
+  if ! ((DRY_RUN)) && ! have_pwquality; then
+    warn "libpam-pwquality is not installed, skipping (packages task installs it)"
+    return 0
+  fi
+
+  local common_password="${OMAPI_COMMON_PASSWORD:-/etc/pam.d/common-password}"
+
+  # A drop-in, not the packaged /etc/security/pwquality.conf: package updates
+  # own that file. libpwquality reads pwquality.conf.d/*.conf after it.
+  if ! write_conf /etc/security/pwquality.conf.d/omapi-hardening.conf <<'EOF'
+# Managed by oma-pi omapi-harden. Re-run the script to change these.
+# Enforced by pam_pwquality at passwd time, including the PAM
+# password-change prompt over SSH.
+minlen = 15
+minclass = 3
+difok = 3
+maxrepeat = 3
+maxclassrepeat = 4
+maxsequence = 3
+dictcheck = 1
+usercheck = 1
+enforcing = 1
+EOF
+  then
+    warn "password quality policy was not written"
+    return 0
+  fi
+
+  if ((DRY_RUN)); then
+    note "would run: pam-auth-update --enable pwquality"
+    return 0
+  fi
+
+  if grep -qE '^[^#]*pam_pwquality\.so' "$common_password" 2>/dev/null; then
+    ok "pam_pwquality is enabled"
+    return 0
+  fi
+
+  if ! have pam-auth-update; then
+    warn "pam-auth-update is not available; enable pam_pwquality in /etc/pam.d/common-password by hand"
+    return 0
+  fi
+
+  if run_root env DEBIAN_FRONTEND=noninteractive pam-auth-update --enable pwquality; then
+    if grep -qE '^[^#]*pam_pwquality\.so' "$common_password" 2>/dev/null; then
+      ok "pam_pwquality enabled (undo: sudo pam-auth-update --disable pwquality)"
+    else
+      warn "pam-auth-update returned success but common-password does not mention pam_pwquality"
+    fi
+  else
+    warn "could not enable pam_pwquality; password changes are NOT being checked"
+    note "if pam-auth-update reported local changes, merge /etc/pam.d/common-password by hand"
+    note "the policy is in /etc/security/pwquality.conf.d/omapi-hardening.conf"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# services
+# ---------------------------------------------------------------------------
+# Units a headless server does not need. An absent unit is skipped rather than
+# reported as a missing hardening step.
+#
+# Deliberately NOT in this list: apport and whoopsie (Ubuntu crash reporting -
+# opinionated to disable and worth nothing on a server); avahi (`hostname.local`
+# discovery) and rpcbind (how NFS works), which are features some users rely
+# on, not noise to remove.
+SERVICES_SAFE_OFF=(
+  cups.service
+  cups.socket
+  cups-browsed.service
+  bluetooth.service
+  bluetooth.socket
+  hciuart.service
+  triggerhappy.service
+  ModemManager.service
+)
+
+configure_services() {
+  section "Service minimisation"
+
+  if ! have systemctl; then
+    warn "systemctl is not available, skipping service minimisation"
+    return 0
+  fi
+
+  local unit state active
+  for unit in "${SERVICES_SAFE_OFF[@]}"; do
+    # is-enabled and is-active are read-only queries that work unprivileged.
+    # Deliberately not `peek`: peek gives up when there is no sudo prompt, and
+    # a non-interactive run then saw every unit as absent and disabled nothing
+    # while reporting success. Knowing a unit exists must never depend on
+    # privilege.
+    state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    case $state in
+      '')
+        # An absent unit prints not-found; no answer at all means the query
+        # failed. Treating that as "absent" would skip a unit and still report
+        # a clean run, so say the check could not be made.
+        warn "could not determine whether ${unit} is installed; it was NOT disabled"
+        note "systemctl is-enabled returned no answer (a transient manager or bus error?)"
+        continue
+        ;;
+      not-found)
+        continue
+        ;;
+      masked | masked-runtime | static | indirect)
+        # These cannot be disabled: `systemctl disable` refuses static and
+        # indirect units, and masking only prevents a future start. It does
+        # not stop a running instance, so report one rather than leaving it
+        # running silently.
+        if [[ $active == active ]]; then
+          warn "${unit} is ${state} but still running"
+          note "stop it with: sudo systemctl stop ${unit}"
+        fi
+        continue
+        ;;
+    esac
+    if [[ $state == disabled && $active != active ]]; then
+      ok "${unit} already disabled"
+      continue
+    fi
+
+    if [[ $unit == ModemManager.service ]]; then
+      warn "ModemManager may be carrying this box's uplink"
+      note "stopping it can drop a cellular connection, including this session; answer no if you are connected over a modem"
+      note "with --yes, or no terminal, the default is still to disable it; run the services task interactively if unsure"
+    fi
+
+    if ask "disable and stop ${unit}? (not needed on a headless server)" "y"; then
+      if ((DRY_RUN)); then
+        run_root systemctl disable --now "$unit"
+      elif run_root systemctl disable --now "$unit"; then
+        ok "${unit} disabled (undo: sudo systemctl enable --now ${unit})"
+      else
+        warn "could not disable ${unit}; it is still running"
+      fi
+    else
+      skip "left ${unit} alone"
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -990,9 +1470,30 @@ harden_ssh() {
   fi
 
   # Lockout check, before anything is written. A key for a sudoer account is
-  # the way back in once passwords are off.
-  local backdoor_user=""
-  if ! backdoor_user="$(non_root_sudoer_with_key)"; then
+  # the way back in once passwords are off. The whole check is moot when the
+  # user has asked to keep password SSH: --password-ssh means "I log in with a
+  # password", which is its own way back in, and fail2ban handles the brute
+  # force that unlocking the door invites.
+  local backdoor_user="" use_dns="no"
+  if ((PASSWORD_SSH)); then
+    local password_accounts
+    password_accounts="$(password_login_accounts)"
+    if [[ -z $password_accounts ]]; then
+      # PermitRootLogin no is written regardless of this flag, so password
+      # authentication with no non-root password account is not a way back in
+      # at all - it is a block with no login path. Ask rather than let --yes
+      # take the unsafe answer.
+      warn "no non-root account with a usable password was found"
+      note "PermitRootLogin no stays in the block, so --password-ssh would leave no password login"
+      note "set a password on a human account first, or use key-based access without --password-ssh"
+      if ! ask "write the password-ssh config anyway?" n; then
+        skip "leaving PasswordAuthentication as it is"
+        return 0
+      fi
+    else
+      note "--password-ssh: password login stays on ($(printf '%s' "$password_accounts" | tr '\n' ' ' | sed 's/[[:space:]]*$//'))"
+    fi
+  elif ! backdoor_user="$(non_root_sudoer_with_key)"; then
     if have tailscale && tailscale status &>/dev/null; then
       # Single quotes, not double: backticks inside a double-quoted string
       # are a command substitution, and this one really did try to run
@@ -1038,6 +1539,32 @@ harden_ssh() {
       note "--lockdown-ssh: AllowUsers will be set to ${target_user}"
     fi
   fi
+
+  # UseDNS no is safe for IP/CIDR from= rules, but sshd matches a hostname
+  # pattern against the IP when reverse DNS is off, so the key would be
+  # rejected. Check both accounts that the block may rely on: the verified
+  # backdoor user and, when --lockdown-ssh is still in force, the named user.
+  local -a dns_users=()
+  [[ -n $backdoor_user ]] && dns_users+=("$backdoor_user")
+  if ((LOCKDOWN_SSH)); then
+    dns_users+=("${SUDO_USER:-$(id -un)}")
+  fi
+  local dns_user kf
+  local -a dns_keys=()
+  for dns_user in "${dns_users[@]}"; do
+    [[ -n $dns_user && $dns_user != root ]] || continue
+    dns_keys=()
+    while IFS= read -r kf; do
+      [[ -n $kf ]] && dns_keys+=("$kf")
+    done <<<"$(key_files_for_user "$dns_user")"
+    if key_from_requires_dns "${dns_keys[@]}"; then
+      use_dns="yes"
+      warn "${dns_user}'s authorized_keys has a hostname-based from= restriction"
+      note "UseDNS no would match it against the IP only and reject the key"
+      note "writing UseDNS yes so the key keeps working; IP/CIDR from= rules are unaffected"
+      break
+    fi
+  done
 
   # Moving the port only removes noise from the logs; it is not a control.
   # Offered because it is in the guides and because it is harmless, but
@@ -1093,6 +1620,23 @@ harden_ssh() {
     fi
   fi
 
+  # The one sshd directive the block writes is selectable. Always written,
+  # never omitted: sshd takes the first value it reads, so leaving the line
+  # out would let a drop-in below decide instead of the script.
+  local agent_forwarding="no"
+  ((AGENT_FORWARDING)) && agent_forwarding="yes"
+
+  local password_authentication="no"
+  ((PASSWORD_SSH)) && password_authentication="yes"
+
+  # Same shape for password access: key-only is the default, and the user who
+  # actually logs in with an ssh password opts out with --password-ssh. Both
+  # directives follow the flag: on Debian the keyboard-interactive method is
+  # the PAM password prompt, so switching PasswordAuthentication on while
+  # leaving KbdInteractiveAuthentication off would still lock out some
+  # clients. PermitRootLogin no stays regardless of the flag - root never
+  # logs in with a password either way.
+
   local block
   block="$(mktemp)"
 
@@ -1105,15 +1649,31 @@ harden_ssh() {
 # inside the block are lost on the next run.
 PermitRootLogin no
 PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
+# PasswordAuthentication follows --password-ssh. Key-only is the default, and
+# the value chosen is always written (first value wins, as with the block
+# above), so a re-run keeps the choice instead of letting a drop-in decide.
+PasswordAuthentication ${password_authentication}
+KbdInteractiveAuthentication ${password_authentication}
 PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 3
 MaxSessions 5
+MaxStartups 10:30:60
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
+LogLevel VERBOSE
+# UseDNS follows a hostname-based from= restriction in the verified admin
+# key: with it set to no, sshd matches from= against the IP only and that key
+# would be rejected. It stays "no" otherwise.
+UseDNS ${use_dns}
+PermitUserEnvironment no
+GatewayPorts no
+# Agent forwarding follows --agent-forwarding. Off by default: a compromised
+# remote host could otherwise use every key loaded in your local agent. The
+# line is always written so the choice sticks - sshd takes the first value it
+# reads, so omitting it would let a drop-in below decide instead.
+AllowAgentForwarding ${agent_forwarding}
 # AllowTcpForwarding is intentionally untouched: config/shell/fns/ssh-port-forwarding
 # relies on it.
 EOF
@@ -1185,14 +1745,13 @@ EOF
         next
       }
       { print }
-    ' "$target" >"$rewrite" || ! run_root cp "$rewrite" "$target.omapi-tmp"; then
+    ' "$target" >"$rewrite"; then
       # A failure inside `awk && cat && rm` is exempt from set -e, so this
       # used to fail silently: harden_ssh returned 0, printed "sshd accepts
       # the new config", and left two active Port lines plus a stray temp file
       # with no warning anywhere. Verified with an injected failing awk. Treat
       # it as the config-write failure it is.
       warn "could not rewrite the Port lines in ${conf}"
-      run_root rm -f "$target.omapi-tmp"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
       fi
@@ -1207,49 +1766,7 @@ EOF
     # config that the restart below either rejects or comes up without. rename
     # is atomic within a filesystem, so capture the metadata first and put it
     # back afterwards.
-    local tmode="" towner="" tgroup=""
-    if [[ -e $target ]]; then
-      tmode="$(run_root stat -c %a "$target" 2>/dev/null || true)"
-      towner="$(run_root stat -c %u "$target" 2>/dev/null || true)"
-      tgroup="$(run_root stat -c %g "$target" 2>/dev/null || true)"
-    fi
-    if [[ -z $tmode || -z $towner || -z $tgroup ]]; then
-      warn "could not read the mode/owner of ${conf}; leaving it untouched"
-      run_root rm -f "$target.omapi-tmp"
-      if [[ -n $backup && -f $backup ]]; then
-        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
-      fi
-      rm -f "$rewrite" "$block"
-      return 1
-    fi
-    if [[ -s $rewrite ]]; then
-      # Same reasoning as the drop-in: set the metadata on the STAGING file
-      # before the rename, so sshd never sees the live config with the wrong
-      # mode or owner. `chown` needs privilege, so on failure leave the target
-      # alone rather than install a config owned by the invoking user.
-      if ! run_root chmod "$tmode" "$target.omapi-tmp" 2>/dev/null ||
-         ! run_root chown "$towner:$tgroup" "$target.omapi-tmp" 2>/dev/null; then
-        run_root rm -f "$target.omapi-tmp"
-        warn "could not set the mode/owner on the staged ${conf}; leaving it untouched"
-        if [[ -n $backup && -f $backup ]]; then
-          run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
-        fi
-        rm -f "$rewrite" "$block"
-        return 1
-      fi
-      if run_root mv -f "$target.omapi-tmp" "$target"; then
-        :
-      else
-        run_root rm -f "$target.omapi-tmp"
-        warn "could not install ${conf}; it has NOT been changed"
-        if [[ -n $backup && -f $backup ]]; then
-          run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
-        fi
-        rm -f "$rewrite" "$block"
-        return 1
-      fi
-    else
-      run_root rm -f "$target.omapi-tmp"
+    if [[ ! -s $rewrite ]]; then
       warn "refusing to install an empty ${conf}; leaving it untouched"
       if [[ -n $backup && -f $backup ]]; then
         run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
@@ -1257,6 +1774,14 @@ EOF
       rm -f "$rewrite" "$block"
       return 1
     fi
+    if ! install_staged "$rewrite" "$target" "${conf}"; then
+      if [[ -n $backup && -f $backup ]]; then
+        run_root cp -p "$backup" "$target" || warn "could not restore ${conf} from the backup"
+      fi
+      rm -f "$rewrite" "$block"
+      return 1
+    fi
+    rm -f "$rewrite"
 
     # The same pass over /etc/ssh/sshd_config.d drop-ins. sshd reads those, and
     # current_ssh_port reads them, but the main-file pass cannot see them - so
@@ -2926,6 +3451,122 @@ EOF
 # ---------------------------------------------------------------------------
 # audit
 # ---------------------------------------------------------------------------
+# Failed units and a pending reboot are the two signals that a headless box
+# needs attention even when every config still looks right. Read-only: the
+# audit reports them, it never restarts or reboots anything.
+failed_systemd_units() {
+  local out
+  if ! out="$(systemctl --failed --no-legend --plain 2>/dev/null)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | awk 'NF { print $1 }'
+}
+
+pending_reboot_summary() {
+  local marker="${OMAPI_REBOOT_REQUIRED:-/var/run/reboot-required}"
+  local pkgs="${OMAPI_REBOOT_PKGS:-/var/run/reboot-required.pkgs}"
+  local list=""
+  [[ -e $marker ]] || { printf 'no'; return 0; }
+  if [[ -r $pkgs ]]; then
+    list="$(awk 'NF' "$pkgs" 2>/dev/null | sort -u | tr '\n' ' ' || true)"
+    list="${list% }"
+  fi
+  if [[ -n $list ]]; then
+    printf 'yes (%s)' "$list"
+  else
+    printf 'yes'
+  fi
+}
+
+# Flavour part of a kernel release, with the Debian/Ubuntu ABI revision
+# removed. 6.1.0-25-amd64 -> amd64, 6.8.0-45-generic -> generic,
+# 6.1.0-25-rt-amd64 -> rt-amd64, 6.12.109+rpt-rpi-2712 -> rpt-rpi-2712.
+# Keeping rt-amd64 distinct from amd64 matters: an RT image is not a pending
+# boot for a standard kernel.
+kernel_flavor() {
+  local rel="$1" rest=""
+  if [[ $rel =~ ^[0-9]+\.[0-9]+\.[0-9]+(.*)$ ]]; then
+    rest="${BASH_REMATCH[1]}"
+    rest="${rest#[+-]}"
+    if [[ $rest =~ ^[0-9]+-(.+)$ ]]; then
+      rest="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\n' "$rest"
+    return 0
+  fi
+  if [[ $rel == *+* ]]; then
+    printf '%s\n' "${rel##*+}"
+  else
+    printf '%s\n' "${rel##*-}"
+  fi
+}
+
+# Newest kernel image in /boot for the running release's flavour, or nothing
+# when there is no boot directory or no comparable image. A Pi can carry both
+# the Pi 4 (v8) and Pi 5 (2712) images in /boot at once; the other flavour is
+# not a kernel this box would boot, so comparing against it produces a
+# permanent false "reboot to switch".
+newest_installed_kernel() {
+  local rel="${1:-$(uname -r)}"
+  local boot="${OMAPI_BOOT_DIR:-/boot}"
+  [[ -d $boot ]] || return 1
+
+  local flavor
+  flavor="$(kernel_flavor "$rel")"
+
+  local -a candidates=()
+  local release
+  while IFS= read -r release; do
+    [[ -n $release ]] || continue
+    # Compare the parsed flavour, not a suffix pattern: *-amd64 would also
+    # match *-rt-amd64, which is a different kernel.
+    [[ $(kernel_flavor "$release") == "$flavor" ]] || continue
+    candidates+=("$release")
+  done < <(find "$boot" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' 2>/dev/null |
+    sed 's/^vmlinuz-//')
+
+  ((${#candidates[@]})) || return 1
+  printf '%s\n' "${candidates[@]}" | sort -V | tail -1
+}
+
+audit_system_health() {
+  local failed newest krel
+  krel="$(uname -r 2>/dev/null || printf '?')"
+
+  if failed="$(failed_systemd_units)"; then
+    if [[ -n $failed ]]; then
+      printf '  failed units: %s\n' "$(printf '%s' "$failed" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    else
+      printf '  failed units: none\n'
+    fi
+  else
+    printf '  failed units: unknown (systemctl unavailable)\n'
+  fi
+
+  printf '  reboot pending: %s\n' "$(pending_reboot_summary)"
+
+  if newest="$(newest_installed_kernel "$krel")"; then
+    if [[ $newest != "$krel" ]]; then
+      printf '  newest installed kernel: %s (running %s; reboot to switch)\n' "$newest" "$krel"
+    else
+      printf '  newest installed kernel: %s (same as running)\n' "$newest"
+    fi
+  else
+    printf '  newest installed kernel: unknown\n'
+  fi
+}
+
+# Enabled/active state for every unit the services task may touch. Read-only,
+# and deliberately unprivileged for the same reason the service task is.
+service_state_summary() {
+  local unit state active
+  for unit in "${SERVICES_SAFE_OFF[@]}"; do
+    state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    printf '  %-26s %-10s %s\n' "$unit" "${state:-unknown}" "${active:-unknown}"
+  done
+}
+
 audit() {
   section "Audit"
 
@@ -3030,6 +3671,8 @@ audit() {
     else
       printf '  every kernel image in /boot is owned by a package\n'
     fi
+    printf '\n-- system health --\n'
+    audit_system_health
     printf '\n-- apparmor --\n'
     peek aa-status 2>/dev/null | head -6 | sed 's/^/  /' || printf '  not installed\n'
 
@@ -3047,6 +3690,13 @@ audit() {
     printf '  default pi account: %s\n' "$(id pi &>/dev/null && echo PRESENT || echo absent)"
     printf '  sudoers: %s\n' \
       "$(peek getent group sudo 2>/dev/null | cut -d: -f4 || echo '?')"
+
+    printf '\n-- service minimisation --\n'
+    if have systemctl; then
+      service_state_summary
+    else
+      printf '  systemctl unavailable\n'
+    fi
 
     printf '\n-- recent auth failures --\n'
     peek journalctl -u ssh --since '-24 hours' --no-pager 2>/dev/null |
@@ -3138,6 +3788,8 @@ main() {
       -y | --yes) ASSUME_YES=1 ;;
       -n | --dry-run) DRY_RUN=1 ;;
       --lockdown-ssh) LOCKDOWN_SSH=1 ;;
+      --agent-forwarding) AGENT_FORWARDING=1 ;;
+      --password-ssh) PASSWORD_SSH=1 ;;
       --report) WANT_REPORT=1 ;;
       --no-audit) RUN_AUDIT=0 ;;
       --no-restart) NO_RESTART=1 ;;
@@ -3187,6 +3839,8 @@ main() {
 
   want_task packages && install_hardening_packages
   want_task users && check_users
+  want_task accounts && configure_password_quality
+  want_task services && configure_services
   want_task ssh && harden_ssh
   want_task firewall && configure_firewall
   want_task fail2ban && configure_fail2ban

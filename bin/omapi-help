@@ -56,6 +56,7 @@ page_commands() {
   cmd "omapi-refresh" "Reinstall Oma-Pi with initial configs"
   cmd "omapi-setup"   "Set git name, email and GitHub CLI auth"
   cmd "omapi-ssh"     "Add SSH key for remote access"
+  cmd "omapi-harden"  "Run the security hardening tool (try --dry-run first)"
 
   section "AI Tools"
   cmd "oc"  "opencode"
@@ -192,6 +193,50 @@ page_herdr() {
   cmd "hsl <count> <command>"  "Swarm layout: N panes running same command"
 }
 
+page_hardening() {
+  clear
+  echo ""
+  header "Security Hardening (omapi-harden)"
+  echo -e "  ${DIM}Run under sudo. Read the full detail in the repo README.${RESET}"
+
+  section "Try it before it changes anything"
+  cmd '$HOME/.local/bin/omapi-harden --list'       "List tasks and exit"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --dry-run' "Print the plan, change nothing"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --yes'     "Take recommended defaults, no prompts"
+  cmd 'sudo $HOME/.local/bin/omapi-harden ssh firewall' "Just named tasks"
+
+  section "Tasks (default: all but aide)"
+  cmd "packages"   "hardening tooling: ufw, fail2ban, apparmor, ..."
+  cmd "users"      "empty passwords, stock pi, passwordless sudo, autologin"
+  cmd "accounts"   "password quality checks (pam_pwquality)"
+  cmd "services"   "disable cups / Bluetooth / triggerhappy / ModemManager (warns on cellular)"
+  cmd "ssh"        "sshd block: no root login, ports, limits, flag-driven access"
+  cmd "firewall"   "ufw: deny incoming by default, allow only listening ports"
+  cmd "fail2ban"   "ban repeat SSH/auth failures"
+  cmd "updates"    "unattended-upgrades for security patches, no reboots"
+  cmd "apparmor"   "enable AppArmor, report complain counts"
+  cmd "sysctl"     "network + kernel sysctls, journal size cap"
+  cmd "aide"       "opt-in file integrity monitoring (slow first run)"
+  cmd "audit"      "state + failed units, pending reboot, kernel mismatch"
+
+  section "Login: how do you reach this box?"
+  cmd "--password-ssh"     "keep password login over SSH (default is key-only)"
+  cmd "--agent-forwarding" "allow ssh -A (AllowAgentForwarding yes)"
+  cmd "--lockdown-ssh"     "also set AllowUsers <you> (needs a key for <you>)"
+  echo -e "  ${DIM}  key-only is the default; --yes cannot force it past the key check.${RESET}"
+
+  section "Other options"
+  cmd "--report"     "also save the audit report to ~/security-audit/"
+  cmd "--no-audit"   "skip the final report"
+  cmd "--no-restart" "write configs but restart no service"
+  cmd "-l, --list"   "list tasks and exit"
+
+  section "LAN-only box with password login"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --password-ssh --dry-run' "then, if it looks right:"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --password-ssh --yes'     "prompts default sensibly"
+  echo -e "  ${DIM}  Passwords are quality-checked but do not expire on a timer.${RESET}"
+}
+
 page_functions() {
   clear
   echo ""
@@ -238,6 +283,7 @@ while true; do
     --header "  What would you like to view?" \
     --header.foreground="240" \
     "Commands & Aliases" \
+    "Security Hardening" \
     "OpenCode Quota" \
     "Functions" \
     "Herdr Reference" \
@@ -245,6 +291,7 @@ while true; do
 
   case "$CHOICE" in
     "Commands & Aliases") page_commands ;;
+    "Security Hardening") page_hardening ;;
     "OpenCode Quota")     page_quota    ;;
     "Functions")          page_functions ;;
     "Herdr Reference")    page_herdr    ;;
