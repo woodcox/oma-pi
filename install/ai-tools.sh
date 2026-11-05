@@ -191,17 +191,6 @@ skill_backup_root() {
   printf '%s/.oma-pi-backups\n' "$(dirname "$1")"
 }
 
-# The skills CLI writes a lock here recording which copy came from which
-# source; it is used once, below, to claim copies the CLI installed before
-# this installer started marking them.
-skill_lock_file() {
-  if [[ -n ${XDG_STATE_HOME:-} ]]; then
-    printf '%s/skills/.skill-lock.json\n' "$XDG_STATE_HOME"
-  else
-    printf '%s/.skill-lock.json\n' "$HOME/.agents"
-  fi
-}
-
 # True when the entry at $1 belongs to this installer: it carries a marker
 # naming $3 as the installing source, or it is a link into the canonical tree
 # whose target does.
@@ -225,34 +214,6 @@ skill_entry_is_ours() {
 # replace a foreign entry.
 skill_collides() {
   { [[ -e $1/$2 || -L $1/$2 ]]; } && ! skill_entry_is_ours "$1/$2" "$2" "$3"
-}
-
-# Claim canonical copies the CLI installed before the installer marked them.
-# Once, best-effort: if the lock is missing or jq is unavailable the worst
-# case is one collision prompt per affected skill, not a failed install.
-backfill_skill_markers() {
-  local entry skill source dir recorded
-  local lock canonical
-
-  lock="$(skill_lock_file)"
-  canonical="$(canonical_skills_dir)"
-  [[ -f $lock ]] || return 0
-  if ! command -v jq &>/dev/null; then
-    echo "Warning: jq not found; pre-existing skills cannot be claimed, so some may prompt as conflicts" >&2
-    return 0
-  fi
-
-  for entry in "${AI_SKILLS[@]}"; do
-    source="${entry%%|*}"
-    skill="${entry#*|}"
-    dir="$canonical/$skill"
-    [[ -d $dir && ! -f $dir/.oma-pi-skill-source ]] || continue
-    recorded="$(jq -r --arg s "$skill" '.skills[$s].source // empty' "$lock" 2>/dev/null)" || continue
-    [[ $recorded == "$source" ]] || continue
-    if printf '%s\n' "$source" >"$dir/.oma-pi-skill-source" 2>/dev/null; then
-      echo "✓ claimed $skill (installed by a previous run)"
-    fi
-  done
 }
 
 # Choices are private to this installer but shared across the agents it
@@ -281,17 +242,20 @@ migrate_hermes_skill_choices() {
   fi
 }
 
-# Print the stored action for a skill, or fail when there is none.
+# Print the stored action for a skill, or fail when there is none. Older
+# choice files wrote a third (rename-target) field; only the first two are
+# read now, because rename targets are regenerated.
 skill_choice_get() {
-  local skill="$1" line
+  local skill="$1" name action _
   local file
 
   file="$(skill_choices_file)"
   [[ -f $file ]] || return 1
-  while read -r line || [[ -n $line ]]; do
-    case "$line" in
-      "$skill"$'\t'rename | "$skill"$'\t'skip | "$skill"$'\t'overwrite)
-        printf '%s\n' "${line#*$'\t'}"
+  while IFS=$'\t' read -r name action _ || [[ -n $name ]]; do
+    [[ $name == "$skill" ]] || continue
+    case "$action" in
+      rename | skip | overwrite)
+        printf '%s\n' "$action"
         return 0
         ;;
     esac
@@ -474,17 +438,9 @@ install_skill_entry() {
   fi
   mkdir -p "$dir" || return 1
 
-  if [[ -e $dest || -L $dest ]]; then
-    if ! skill_entry_is_ours "$dest" "$skill" "$source"; then
-      if ! backup="$(skill_backup_entry "$dest" "$label")"; then
-        return 1
-      fi
-      echo "Backed up $label entry $dest to $backup" >&2
-    else
-      rm -rf -- "$dest" || return 1
-    fi
-  fi
-
+  # Build the replacement first. The live entry is only touched once the
+  # copy, marker and frontmatter rewrite all succeed, so a failed staging
+  # step cannot leave the destination missing.
   tmp="$(mktemp -d "$dir/.oma-pi-${target}.XXXXXX")" || return 1
   if ! cp -a "$src/." "$tmp/" ||
     ! printf '%s\n' "$source" >"$tmp/.oma-pi-skill-source" ||
@@ -494,6 +450,21 @@ install_skill_entry() {
     return 1
   fi
   chmod --reference="$src" "$tmp" 2>/dev/null || true
+
+  if [[ -e $dest || -L $dest ]]; then
+    if ! skill_entry_is_ours "$dest" "$skill" "$source"; then
+      if ! backup="$(skill_backup_entry "$dest" "$label")"; then
+        rm -rf -- "$tmp"
+        return 1
+      fi
+      echo "Backed up $label entry $dest to $backup" >&2
+    else
+      if ! rm -rf -- "$dest"; then
+        rm -rf -- "$tmp"
+        return 1
+      fi
+    fi
+  fi
 
   if ! mv -- "$tmp" "$dest"; then
     echo "Error: could not move $tmp to $dest" >&2
@@ -520,7 +491,13 @@ link_agent_skill() {
   if [[ -n $rel ]] && mkdir -p "$dir" && ln -s "$rel" "$dest" 2>/dev/null; then
     return 0
   fi
-  install_skill_entry "$dir" "agent" "$src" "$skill" "$source" "$target"
+  if install_skill_entry "$dir" "agent" "$src" "$skill" "$source" "$target"; then
+    return 0
+  fi
+  if [[ -n ${backup:-} ]] && ! mv -- "$backup/entry" "$dest"; then
+    echo "Error: could not restore $dest from $backup" >&2
+  fi
+  return 1
 }
 
 # True when the skill needs its content fetched through the CLI into an
@@ -584,19 +561,19 @@ skill_needs_batch() {
 # ground, an isolated HOME for anything that would touch a foreign entry), and
 # a final reconciliation pass creates the per-agent entries.
 install_ai_skills() {
-  local entry source skill action src cname dir label
+  local entry source skill action src cname dir label needs_write
   local stage tmp_home canonical failed=0
   local -a sources=() fresh=() staged=()
   local -A SKILL_ACTION=()
 
   migrate_hermes_skill_choices || failed=1
-  backfill_skill_markers
 
   canonical="$(canonical_skills_dir)"
-  stage="$HOME/.agents/.oma-pi-staging"
-  rm -rf -- "$stage" 2>/dev/null || true
-  mkdir -p "$stage" || {
-    echo "Error: could not create $stage" >&2
+  # A fresh directory per run: two installs started at the same time cannot
+  # delete each other's staged content.
+  mkdir -p "$HOME/.agents" || return 1
+  stage="$(mktemp -d "$HOME/.agents/.oma-pi-staging.XXXXXX")" || {
+    echo "Error: could not create a staging directory" >&2
     return 1
   }
 
@@ -720,6 +697,31 @@ install_ai_skills() {
     cname="$skill"
     [[ $action == rename ]] && cname="$(skill_rename_target "$skill" "$source")"
 
+    # Decide whether any scope needs a write before demanding a source: a
+    # skip with a foreign canonical entry has nowhere to read content from
+    # once every agent scope already holds an owned copy.
+    needs_write=0
+    while IFS=$'\t' read -r label dir; do
+      [[ $dir != "$canonical" ]] || continue
+      if skill_entry_is_ours "$dir/$cname" "$skill" "$source"; then
+        # Hermes copies content, so it is compared against the canonical copy
+        # below. A canonical copy that is not ours (a skip) has no valid
+        # baseline, so the existing copy is left alone.
+        if [[ $label == "Hermes Agent" ]] &&
+          skill_entry_is_ours "$canonical/$cname" "$skill" "$source"; then
+          needs_write=1
+          break
+        fi
+        continue
+      fi
+      if [[ $action == skip ]] && skill_collides "$dir" "$skill" "$source"; then
+        continue   # skip means leave the colliding entries alone
+      fi
+      needs_write=1
+      break
+    done < <(skill_scopes)
+    [[ $needs_write -eq 1 ]] || continue
+
     # Content for the agent entries: the canonical copy (under the final
     # name), a staged copy for a canonical skip, or the plain canonical copy
     # for a rename the shared tree never needed.
@@ -740,7 +742,11 @@ install_ai_skills() {
       [[ $dir != "$canonical" ]] || continue
 
       if skill_entry_is_ours "$dir/$cname" "$skill" "$source"; then
-        continue   # already in place
+        if [[ $label != "Hermes Agent" ]] ||
+          ! skill_entry_is_ours "$canonical/$cname" "$skill" "$source" ||
+          diff -rq -- "$src" "$dir/$cname" >/dev/null 2>&1; then
+          continue   # already in place (and, for Hermes, up to date)
+        fi
       fi
       if [[ $action == skip ]] && skill_collides "$dir" "$skill" "$source"; then
         continue   # skip means leave the colliding entries alone
