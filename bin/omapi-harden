@@ -107,6 +107,7 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
+              and flag passwordless sudo
   accounts    30-day password expiry + PAM quality checks
   services    stop and disable services a headless server does not need
   ssh         sshd hardening: no root login, key-only by default
@@ -870,6 +871,67 @@ install_hardening_packages() {
 # ---------------------------------------------------------------------------
 # users
 # ---------------------------------------------------------------------------
+# Read-only audit of sudoers for rules that make root reachable without a
+# password. Never edits the files: a broken sudoers is a box where even the
+# recovery command needs the sudo it just broke, and visudo is the only safe
+# editor. OMAPI_SUDOERS / OMAPI_SUDOERS_DIR exist so the tests can point this
+# at a fixture instead of the host.
+check_passwordless_sudo() {
+  local main="${OMAPI_SUDOERS:-/etc/sudoers}"
+  local dir="${OMAPI_SUDOERS_DIR:-/etc/sudoers.d}"
+
+  # Say "not checked" rather than "clean" when the files cannot be read.
+  # /etc/sudoers is 0440 root:root, so an unprivileged run cannot see it.
+  if ! peek test -r "$main"; then
+    warn "could not read ${main}; passwordless sudo was NOT checked"
+    note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${main} ${dir}"
+    return 0
+  fi
+  if [[ -d $dir ]] && ! peek test -r "$dir"; then
+    warn "could not list ${dir}; passwordless sudo there was NOT checked"
+    note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${dir}"
+    return 0
+  fi
+
+  local -a files=("$main")
+  local f
+  if [[ -d $dir ]]; then
+    for f in "$dir"/*; do
+      [[ -f $f ]] && files+=("$f")
+    done
+  fi
+
+  # One awk over every file. If any of them is unreadable it exits non-zero,
+  # and an empty result must not be mistaken for an all-clear.
+  local findings
+  if ! findings="$(peek awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      line = tolower($0)
+      if (line ~ /(^|[^[:alnum:]_])nopasswd[[:space:]]*:/ || line ~ /!authenticate/) {
+        print FILENAME ":" FNR ": " $0
+      }
+    }
+  ' "${files[@]}" 2>/dev/null)"; then
+    warn "could not read the sudoers files; passwordless sudo was NOT checked"
+    note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${main} ${dir}"
+    return 0
+  fi
+
+  if [[ -z $findings ]]; then
+    ok "sudo requires a password"
+    return 0
+  fi
+
+  warn "passwordless sudo is configured:"
+  while IFS= read -r f; do
+    printf '      %s\n' "$f"
+  done <<<"$findings"
+  note "anyone who gets a shell can become root without knowing a password"
+  note "review with 'sudo visudo' (or 'sudo visudo -f <file>') and remove NOPASSWD / !authenticate"
+}
+
 check_users() {
   section "Users and accounts"
 
@@ -969,6 +1031,8 @@ check_users() {
       ok "root is the only UID 0 account"
     fi
   fi
+
+  check_passwordless_sudo
 
   # Report, do not touch: accounts that have never logged in are the ones
   # most likely to still carry a default or reused password.

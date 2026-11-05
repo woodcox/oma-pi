@@ -207,7 +207,7 @@ page_hardening() {
 
   section "Tasks (default: all but aide)"
   cmd "packages"   "hardening tooling: ufw, fail2ban, apparmor, ..."
-  cmd "users"      "no empty passwords, lock the stock pi account"
+  cmd "users"      "no empty passwords, lock stock pi, flag passwordless sudo"
   cmd "accounts"   "30-day password expiry + PAM quality checks"
   cmd "services"   "disable cups / Bluetooth / triggerhappy / ModemManager if installed"
   cmd "ssh"        "sshd block: no root login, ports, limits, flag-driven access"

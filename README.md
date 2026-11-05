@@ -143,6 +143,10 @@ Password changes are checked by `pam_pwquality` (enabled through
 username or dictionary matches, and no trivial repeats or sequences, so 30-day
 rotation cannot be satisfied with an incrementing weak password. Undo the PAM
 profile with `sudo pam-auth-update --disable pwquality`.
+The users task also reads `/etc/sudoers` and `/etc/sudoers.d` and warns — it
+never edits those files — when a `NOPASSWD` rule or `!authenticate` makes root
+reachable from a shell without a password; if it cannot read them it says the
+check was not performed rather than reporting a clean result.
 `UMASK` is deliberately left alone: a group-restricted umask saves
 nothing on a single-admin box and breaks anything the box writes for others to
 read.

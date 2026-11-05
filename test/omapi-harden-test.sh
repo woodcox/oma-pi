@@ -1367,6 +1367,103 @@ test_pi_is_locked_when_another_account_can_log_in() {
   return $rc
 }
 
+test_passwordless_sudo_is_reported() {
+  # NOPASSWD and !authenticate turn a stolen shell into root. The check has to
+  # find both in /etc/sudoers and in drop-ins, has to ignore commented rules,
+  # and must never edit the files.
+  setup_destdir
+  local rc=0 t out
+  t="$(mktemp -d)"
+  mkdir -p "$t/sudoers.d"
+  printf 'Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n# alice ALL=(ALL) NOPASSWD: ALL\n' >"$t/sudoers"
+  printf 'bob ALL=(ALL) NOPASSWD: ALL\n' >"$t/sudoers.d/bob"
+  printf 'carol ALL=(ALL) !authenticate\n' >"$t/sudoers.d/carol"
+  export OMAPI_SUDOERS="$t/sudoers"
+  export OMAPI_SUDOERS_DIR="$t/sudoers.d"
+
+  stub peek
+  peek() { "$@"; }
+
+  out="$(check_passwordless_sudo 2>&1)"
+
+  [[ $out == *"bob ALL=(ALL) NOPASSWD: ALL"* ]] || {
+    printf '        NOPASSWD in a drop-in was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"carol ALL=(ALL) !authenticate"* ]] || {
+    printf '        !authenticate was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"passwordless sudo is configured"* ]] || rc=1
+  # The commented rule must not be reported: a warning you cannot act on is
+  # noise, and this one would point at a line visudo says is a comment.
+  [[ $out != *"# alice ALL=(ALL) NOPASSWD"* ]] || {
+    printf '        a commented rule was reported as active\n'
+    rc=1
+  }
+  unset OMAPI_SUDOERS OMAPI_SUDOERS_DIR
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_passwordless_sudo_clean_is_not_a_warning() {
+  setup_destdir
+  local rc=0 t out
+  t="$(mktemp -d)"
+  mkdir -p "$t/sudoers.d"
+  printf 'Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n%%sudo ALL=(ALL:ALL) ALL\n' >"$t/sudoers"
+  printf '# bob ALL=(ALL) NOPASSWD: ALL\n' >"$t/sudoers.d/old"
+  export OMAPI_SUDOERS="$t/sudoers"
+  export OMAPI_SUDOERS_DIR="$t/sudoers.d"
+
+  stub peek
+  peek() { "$@"; }
+
+  out="$(check_passwordless_sudo 2>&1)"
+
+  [[ $out == *"sudo requires a password"* ]] || {
+    printf '        the clean path was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out != *"passwordless sudo is configured"* ]] || {
+    printf '        a commented-out rule was treated as a finding\n'
+    rc=1
+  }
+  unset OMAPI_SUDOERS OMAPI_SUDOERS_DIR
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_passwordless_sudo_unreadable_is_not_called_clean() {
+  # An unreadable sudoers must say so. Reporting "sudo requires a password"
+  # here would be a false all-clear on the default unprivileged run.
+  setup_destdir
+  local rc=0 t out
+  t="$(mktemp -d)"
+  export OMAPI_SUDOERS="$t/does-not-exist"
+  export OMAPI_SUDOERS_DIR="$t/sudoers.d"
+
+  stub peek
+  peek() { "$@"; }
+
+  out="$(check_passwordless_sudo 2>&1)"
+
+  [[ $out == *"NOT checked"* ]] || {
+    printf '        an unreadable sudoers was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out != *"sudo requires a password"* ]] || {
+    printf '        an unreadable sudoers was reported clean\n'
+    rc=1
+  }
+  unset OMAPI_SUDOERS OMAPI_SUDOERS_DIR
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
 test_ask_never_passes_a_flag_gum_will_reject() {
   # gum v2.0.2 has no --default-no (added in 2.1) and exits 80 on it, so every
   # prompt whose default is "no" died. The v2.0.x spelling is --default=false,
@@ -3356,6 +3453,9 @@ t 'loopback test is per protocol'                      test_docker_port_is_loopb
 t 'bottom normaliser keeps distant blank lines'        test_bottom_normaliser_preserves_distant_blank_lines
 t '--force is not accepted'                             test_force_flag_is_not_accepted
 t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when_it_is_the_only_password_account
+t 'passwordless sudo rules are reported'              test_passwordless_sudo_is_reported
+t 'absent passwordless sudo is reported clean'        test_passwordless_sudo_clean_is_not_a_warning
+t 'unreadable sudoers is not called clean'            test_passwordless_sudo_unreadable_is_not_called_clean
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
 t 'SSH writes and rollback use privilege' test_harden_ssh_privileged_transaction
 t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode
