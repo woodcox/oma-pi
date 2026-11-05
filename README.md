@@ -127,15 +127,18 @@ for further info.
 
 After installing you can run `omapi-harden` which applies the following hardening: 
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
-security updates, AppArmor, kernel and network sysctls, password-ageing
-defaults, and service minimisation (it offers to disable things a headless server
+security updates, AppArmor, kernel and network sysctls, 30-day password
+ageing, and service minimisation (it offers to disable things a headless server
 does not need, such as cups, Bluetooth and triggerhappy). 
 
-Password ageing is written to `/etc/login.defs` and applies to new
-passwords and logins. Existing accounts keep the ageing already recorded in
-`/etc/shadow` on purpose: applying a maximum age to an account whose password is
-older than that maximum marks it expired immediately, which on a headless box is
-a lockout. `UMASK` is deliberately left alone: a group-restricted umask saves
+Password ageing is written to `/etc/login.defs` as a 30-day maximum and applied
+to every interactive human account with `chage -M 30 -W 7`; root and
+system/service accounts are left alone. An existing password already older than
+30 days expires at that account's next login — the current SSH session
+survives, and password SSH goes through PAM's password-change prompt, but a
+key-only or automation login can be refused until the password is changed from
+a console. Keep a tested console or key recovery route before the first run.
+`UMASK` is deliberately left alone: a group-restricted umask saves
 nothing on a single-admin box and breaks anything the box writes for others to
 read.
 

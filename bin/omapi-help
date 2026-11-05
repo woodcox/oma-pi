@@ -208,7 +208,7 @@ page_hardening() {
   section "Tasks (default: all but aide)"
   cmd "packages"   "hardening tooling: ufw, fail2ban, apparmor, ..."
   cmd "users"      "no empty passwords, lock the stock pi account"
-  cmd "accounts"   "password ageing defaults in /etc/login.defs"
+  cmd "accounts"   "30-day password expiry for every human login account"
   cmd "services"   "disable cups / Bluetooth / triggerhappy / ModemManager if installed"
   cmd "ssh"        "sshd block: no root login, ports, limits, flag-driven access"
   cmd "firewall"   "ufw: deny incoming by default, allow only listening ports"
@@ -234,6 +234,7 @@ page_hardening() {
   section "LAN-only box with password login"
   cmd "sudo omapi-harden --password-ssh --dry-run"  "then, if it looks right:"
   cmd "sudo omapi-harden --password-ssh --yes"      "prompts default sensibly"
+  echo -e "  ${DIM}  Human login passwords expire after 30 days (chage -M 30).${RESET}"
 }
 
 page_functions() {

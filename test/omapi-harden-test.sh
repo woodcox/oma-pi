@@ -2851,9 +2851,9 @@ test_account_policy_replaces_values_in_place() {
 
   configure_account_policy >/dev/null 2>&1
 
-  grep -qE '^PASS_MAX_DAYS[[:space:]]+365$' "$f" || rc=1
+  grep -qE '^PASS_MAX_DAYS[[:space:]]+30$' "$f" || rc=1
   grep -qE '^PASS_MIN_DAYS[[:space:]]+1$' "$f" || rc=1
-  grep -qE '^PASS_WARN_AGE[[:space:]]+14$' "$f" || rc=1
+  grep -qE '^PASS_WARN_AGE[[:space:]]+7$' "$f" || rc=1
   # UMASK is deliberately not in LOGIN_DEFS_POLICY: the distro value survives
   # untouched, and the run must not append a second copy of it either.
   grep -qE '^UMASK[[:space:]]+022$' "$f" || rc=1
@@ -2881,6 +2881,74 @@ test_account_policy_dry_run_touches_nothing() {
   configure_account_policy >/dev/null 2>&1
   DRY_RUN=0
   [[ $(cat "$f") == "$before" ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_password_login_accounts_filter() {
+  # Only interactive human accounts with a real crypt hash: no root, no
+  # system/service users (UID below 1000), no nologin/false shells, and no
+  # locked/blank hash. A false positive here would expire an account that
+  # exists to run a service.
+  setup_destdir
+  local d rc=0 pw sh out
+  d="$(mktemp -d)"
+  pw="$d/passwd"
+  sh="$d/shadow"
+  cat >"$pw" <<'EOF'
+root:x:0:0:root:/root:/bin/bash
+svc:x:999:999:service:/srv/svc:/usr/sbin/nologin
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+locked:x:1001:1001:Locked:/home/locked:/bin/bash
+nologin:x:1002:1002:No Login:/home/nologin:/usr/sbin/nologin
+bob:x:1003:1003:Bob:/home/bob:/bin/zsh
+EOF
+  cat >"$sh" <<'EOF'
+root:$6$root$hash:19000:0:99999:7:::
+svc:$6$svc$hash:19000:0:99999:7:::
+alice:$y$j9T$alice$hash:19000:0:99999:7:::
+locked:!:19000:0:99999:7:::
+nologin:$6$nologin$hash:19000:0:99999:7:::
+bob:$6$bob$hash:19000:0:99999:7:::
+EOF
+  stub peek
+  peek() { "$@"; }
+  out="$(password_login_accounts "$pw" "$sh")"
+  [[ $out == $'alice\nbob' ]] || {
+    printf '        filter selected the wrong accounts: [%s]\n' "$out"
+    rc=1
+  }
+  rm -rf "$d"
+  teardown_destdir
+  return $rc
+}
+
+test_account_policy_applies_expiry_to_existing_accounts() {
+  setup_destdir
+  mkdir -p "$CONF_DEST/etc"
+  local f="$CONF_DEST/etc/login.defs" rc=0 out
+  printf 'PASS_MAX_DAYS\t365\nPASS_MIN_DAYS\t0\nPASS_WARN_AGE\t14\n' >"$f"
+  chmod 644 "$f"
+  stub password_login_accounts
+  password_login_accounts() { printf 'alice\nbob\n'; }
+
+  out="$(configure_account_policy 2>&1)"
+
+  [[ $out == *"chage -M 30 -W 7 alice"* ]] || {
+    printf '        chage was not applied to alice: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"chage -M 30 -W 7 bob"* ]] || {
+    printf '        chage was not applied to bob: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"alice: password expires every 30 days"* ]] || rc=1
+  # The warning about accounts already past the limit has to be present: this
+  # is the lockout risk the 30-day policy creates.
+  [[ $out == *"already older than 30 days expires"* ]] || {
+    printf '        the immediate-expiry warning is missing\n'
+    rc=1
+  }
   teardown_destdir
   return $rc
 }
@@ -3182,6 +3250,8 @@ t 'sshd --password-ssh keeps passwords on'              test_sshd_password_ssh_f
 t 'sshd flag choices revert on re-run'                  test_sshd_flag_choices_revert
 t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
 t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
+t 'account policy filters login accounts'               test_password_login_accounts_filter
+t 'account policy expiry reaches existing accounts'     test_account_policy_applies_expiry_to_existing_accounts
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
 t 'service minimisation skips absent units'             test_services_skips_units_that_are_not_installed
 t 'service minimisation disables safe units'            test_services_disables_a_safe_unit_by_default

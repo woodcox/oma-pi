@@ -107,7 +107,7 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
-  accounts    password ageing defaults in /etc/login.defs
+  accounts    30-day password expiry for human accounts
   services    stop and disable services a headless server does not need
   ssh         sshd hardening: no root login, key-only by default
               (--password-ssh keeps passwords), limits
@@ -1050,25 +1050,48 @@ replace_conf_values() {
   note "updated $path"
 }
 
-# Password ageing lives in login.defs. These are defaults for NEW passwords and
-# sessions: existing accounts keep the ageing already recorded in /etc/shadow.
-# That is deliberate. `chage -M 365` on an account whose password is older than
-# a year expires it immediately, which on a headless box is a lockout dressed
-# up as a policy.
+# Password ageing has two halves: login.defs supplies the defaults for NEW
+# passwords, but an existing account's own expiry lives in /etc/shadow. The
+# policy here is a 30-day maximum, so both halves are applied - the login.defs
+# default and `chage -M 30` for accounts that already have a password.
+#
+# Applied to interactive human accounts only: UID 1000-59999, a real shell,
+# and a real password hash. Root cannot log in over SSH and expiring it can
+# break console recovery; service accounts do not log in, and expiring their
+# password only breaks whatever consumes it.
+#
+# The lockout hazard is deliberate. An account whose password is already older
+# than 30 days expires at its next login. The current SSH session survives,
+# and password SSH goes through PAM's password-change prompt, but a key-only
+# or automation login can be refused until the password is changed from a
+# console. Say so rather than let it surprise someone.
 #
 # UMASK is deliberately NOT touched. It was 027; on a single-admin box a
 # group-restricted umask saves nothing and quietly breaks anything the box
 # writes for others to read, so the whole key is left as the distro set it.
 LOGIN_DEFS_POLICY=(
-  PASS_MAX_DAYS=365
+  PASS_MAX_DAYS=30
   PASS_MIN_DAYS=1
-  PASS_WARN_AGE=14
+  PASS_WARN_AGE=7
 )
 
-configure_account_policy() {
-  section "Account policy (login.defs)"
+# Interactive accounts `chage` will be applied to. Optional arguments exist
+# for the test suite; production calls use the real files.
+password_login_accounts() {
+  local passwd="${1:-/etc/passwd}" shadow="${2:-/etc/shadow}"
+  peek awk -F: '
+    NR == FNR {
+      if ($3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/) shell_ok[$1] = 1
+      next
+    }
+    ($1 in shell_ok) && $2 ~ /^\$[0-9a-z]/ { print $1 }
+  ' "$passwd" "$shadow" 2>/dev/null || true
+}
 
-  note "defaults for new passwords; existing accounts keep their /etc/shadow ageing"
+configure_account_policy() {
+  section "Account policy (30-day password age)"
+
+  note "30-day maximum for new passwords and every human login account"
 
   if ! replace_conf_values /etc/login.defs "${LOGIN_DEFS_POLICY[@]}"; then
     warn "password ageing defaults were not applied"
@@ -1082,8 +1105,36 @@ configure_account_policy() {
       v="$(awk -v k="$k" '$1 == k { v = $2 } END { if (v != "") print v }' "$f" 2>/dev/null || true)"
       [[ -n $v ]] && ok "${k} ${v}"
     done
-    note "existing accounts are unchanged: inspect one with 'sudo chage -l <user>'"
   fi
+
+  local users user
+  users="$(password_login_accounts)"
+  if [[ -z $users ]]; then
+    if ((DRY_RUN)); then
+      note "would apply chage -M 30 -W 7 to every password-bearing login account"
+    else
+      warn "could not enumerate login accounts from /etc/passwd and /etc/shadow"
+      note "login.defs applies to new passwords; existing accounts were NOT changed"
+    fi
+    return 0
+  fi
+
+  if ((DRY_RUN)); then
+    for user in $users; do
+      printf '  %s•%s would run: chage -M 30 -W 7 %s\n' "$C_DIM" "$C_OFF" "$user"
+    done
+    return 0
+  fi
+
+  note "a password already older than 30 days expires at that account's next login"
+  for user in $users; do
+    if run_root chage -M 30 -W 7 "$user"; then
+      ok "${user}: password expires every 30 days"
+    else
+      warn "could not set the password age for ${user}"
+    fi
+  done
+  note "check one with 'sudo chage -l <user>'"
 }
 
 # ---------------------------------------------------------------------------
