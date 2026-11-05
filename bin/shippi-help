@@ -49,13 +49,13 @@ hotkey() {
 page_commands() {
   clear
   echo ""
-  header "Oma-Pi Commands"
+  header "Shippi Commands"
 
   section "Scripts"
-  cmd "omapi-help"    "Show this help"
-  cmd "omapi-refresh" "Reinstall Oma-Pi with initial configs"
-  cmd "omapi-setup"   "Set git name, email and GitHub CLI auth"
-  cmd "omapi-ssh"     "Add SSH key for remote access"
+  cmd "shippi-help"    "Show this help"
+  cmd "shippi-refresh" "Reinstall Shippi with initial configs"
+  cmd "shippi-setup"   "Set git name, email and GitHub CLI auth"
+  cmd "shippi-ssh"     "Add SSH key for remote access"
 
   section "AI Tools"
   cmd "oc"  "opencode"
@@ -185,7 +185,7 @@ page_herdr() {
   hotkey "Prefix b"            "Toggle sidebar"
   hotkey "Mouse"               "Click, drag, and right-click to manage panes"
 
-  section "Oma-Pi layouts"
+  section "Shippi layouts"
   cmd "hdl [ai] [ai2]"         "Dev layout: editor + AI pane(s) + terminal"
   cmd "hdlm [ai] [ai2]"        "One hdl tab per subdirectory"
   cmd "hds"                    "Dev square: editor + diff watch + opencode"

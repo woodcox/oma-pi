@@ -1,15 +1,15 @@
-# Herdr configuration for Oma-Pi
+# Herdr configuration for Shippi
 # Place this file at ~/.config/herdr/config.toml
 
-# Skip first-run onboarding; Oma-Pi installs a working config.
+# Skip first-run onboarding; Shippi installs a working config.
 onboarding = false
 
 [theme]
 name = "catppuccin"
 
-# Keybindings intentionally use Herdr's defaults. The Oma-Pi layout helpers
+# Keybindings intentionally use Herdr's defaults. The Shippi layout helpers
 # (hdl, hds, hdlm, hsl) are shell functions, not Herdr keybindings; run them
-# from a pane and see `omapi-help` for their usage.
+# from a pane and see `shippi-help` for their usage.
 
 [ui]
 mouse_capture = true
