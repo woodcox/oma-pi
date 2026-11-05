@@ -118,7 +118,7 @@ Tasks (default: all but aide):
   apparmor    enable AppArmor and report complain counts
   sysctl      network + kernel sysctls, journal size cap
   aide        opt-in file integrity monitoring (slow, first run is minutes)
-  audit       report the resulting state, change nothing
+  audit       report state, failed units and pending reboot, change nothing
 
 Options:
   -y, --yes         accept recommended defaults, do not prompt
@@ -3464,6 +3464,100 @@ EOF
 # ---------------------------------------------------------------------------
 # audit
 # ---------------------------------------------------------------------------
+# Failed units and a pending reboot are the two signals that a headless box
+# needs attention even when every config still looks right. Read-only: the
+# audit reports them, it never restarts or reboots anything.
+failed_systemd_units() {
+  local out
+  if ! out="$(systemctl --failed --no-legend --plain 2>/dev/null)"; then
+    return 1
+  fi
+  printf '%s\n' "$out" | awk 'NF { print $1 }'
+}
+
+pending_reboot_summary() {
+  local marker="${OMAPI_REBOOT_REQUIRED:-/var/run/reboot-required}"
+  local pkgs="${OMAPI_REBOOT_PKGS:-/var/run/reboot-required.pkgs}"
+  local list=""
+  [[ -e $marker ]] || { printf 'no'; return 0; }
+  if [[ -r $pkgs ]]; then
+    list="$(awk 'NF' "$pkgs" 2>/dev/null | sort -u | tr '\n' ' ' || true)"
+    list="${list% }"
+  fi
+  if [[ -n $list ]]; then
+    printf 'yes (%s)' "$list"
+  else
+    printf 'yes'
+  fi
+}
+
+# Newest kernel image in /boot for the running release's flavour, or nothing
+# when there is no boot directory or no comparable image. A Pi can carry both
+# the Pi 4 (v8) and Pi 5 (2712) images in /boot at once; the other flavour is
+# not a kernel this box would boot, so comparing against it produces a
+# permanent false "reboot to switch".
+newest_installed_kernel() {
+  local rel="${1:-$(uname -r)}"
+  local boot="${OMAPI_BOOT_DIR:-/boot}"
+  [[ -d $boot ]] || return 1
+
+  # Debian: 6.1.0-25-amd64 -> 25-amd64. Pi: 6.12.109+rpt-rpi-2712 ->
+  # rpt-rpi-2712. Keeping the revision and flavour together means an RT kernel
+  # is not compared against the standard one, and the two Pi flavours stay
+  # separate.
+  local flavor=""
+  if [[ $rel =~ ^[0-9]+\.[0-9]+\.[0-9]+(.*)$ ]]; then
+    flavor="${BASH_REMATCH[1]}"
+    flavor="${flavor#[+-]}"
+  fi
+  if [[ -z $flavor ]]; then
+    if [[ $rel == *+* ]]; then
+      flavor="${rel##*+}"
+    else
+      flavor="${rel##*-}"
+    fi
+  fi
+
+  local -a candidates=()
+  local release
+  while IFS= read -r release; do
+    [[ -n $release ]] || continue
+    [[ $release == *[+-]"$flavor" ]] || continue
+    candidates+=("$release")
+  done < <(find "$boot" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' 2>/dev/null |
+    sed 's/^vmlinuz-//')
+
+  ((${#candidates[@]})) || return 1
+  printf '%s\n' "${candidates[@]}" | sort -V | tail -1
+}
+
+audit_system_health() {
+  local failed newest krel
+  krel="$(uname -r 2>/dev/null || printf '?')"
+
+  if failed="$(failed_systemd_units)"; then
+    if [[ -n $failed ]]; then
+      printf '  failed units: %s\n' "$(printf '%s' "$failed" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    else
+      printf '  failed units: none\n'
+    fi
+  else
+    printf '  failed units: unknown (systemctl unavailable)\n'
+  fi
+
+  printf '  reboot pending: %s\n' "$(pending_reboot_summary)"
+
+  if newest="$(newest_installed_kernel "$krel")"; then
+    if [[ $newest != "$krel" ]]; then
+      printf '  newest installed kernel: %s (running %s; reboot to switch)\n' "$newest" "$krel"
+    else
+      printf '  newest installed kernel: %s (same as running)\n' "$newest"
+    fi
+  else
+    printf '  newest installed kernel: unknown\n'
+  fi
+}
+
 audit() {
   section "Audit"
 
@@ -3568,6 +3662,8 @@ audit() {
     else
       printf '  every kernel image in /boot is owned by a package\n'
     fi
+    printf '\n-- system health --\n'
+    audit_system_health
     printf '\n-- apparmor --\n'
     peek aa-status 2>/dev/null | head -6 | sed 's/^/  /' || printf '  not installed\n'
 

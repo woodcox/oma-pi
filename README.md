@@ -162,6 +162,10 @@ or the apport/whoopsie crash-report pair. Each disable prints the exact
 
 File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
+The final audit also reports failed systemd units, whether a reboot is pending
+(with the packages that requested it), and whether the running kernel is the
+newest one installed — the three checks that matter most on a headless box
+after an update.
 
 Run it under `sudo`, with the full path as the validator also needs
 root to read `/etc/ufw/after.rules` (`0640 root:root`); without it the

@@ -217,7 +217,7 @@ page_hardening() {
   cmd "apparmor"   "enable AppArmor, report complain counts"
   cmd "sysctl"     "network + kernel sysctls, journal size cap"
   cmd "aide"       "opt-in file integrity monitoring (slow first run)"
-  cmd "audit"      "report resulting state, change nothing"
+  cmd "audit"      "state + failed units, pending reboot, kernel mismatch"
 
   section "Login: how do you reach this box?"
   cmd "--password-ssh"     "keep password login over SSH (default is key-only)"

@@ -2645,6 +2645,171 @@ test_apt_periodic_keys_are_preserved() {
   return $rc
 }
 
+test_audit_system_health_reports_failures() {
+  setup_destdir
+  local rc=0 out
+  stub failed_systemd_units
+  failed_systemd_units() { printf 'nginx.service\nfoo.service\n'; }
+  stub pending_reboot_summary
+  pending_reboot_summary() { printf 'yes (linux-image-6.12.1)\n'; }
+  stub newest_installed_kernel
+  newest_installed_kernel() { printf '6.12.2+rpt-rpi-v8\n'; }
+  stub uname
+  uname() { printf '6.12.1+rpt-rpi-v8\n'; }
+
+  out="$(audit_system_health 2>&1)"
+
+  [[ $out == *"failed units: nginx.service foo.service"* ]] || {
+    printf '        failed units were not listed: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"reboot pending: yes (linux-image-6.12.1)"* ]] || {
+    printf '        the pending reboot was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"newest installed kernel: 6.12.2+rpt-rpi-v8 (running 6.12.1+rpt-rpi-v8; reboot to switch)"* ]] || {
+    printf '        the kernel mismatch was not reported: %s\n' "$out"
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
+test_audit_system_health_reports_clean() {
+  setup_destdir
+  local rc=0 out
+  stub failed_systemd_units
+  failed_systemd_units() { return 0; }
+  stub pending_reboot_summary
+  pending_reboot_summary() { printf 'no\n'; }
+  stub newest_installed_kernel
+  newest_installed_kernel() { printf '6.12.1+rpt-rpi-v8\n'; }
+  stub uname
+  uname() { printf '6.12.1+rpt-rpi-v8\n'; }
+
+  out="$(audit_system_health 2>&1)"
+
+  [[ $out == *"failed units: none"* ]] || {
+    printf '        a healthy unit set was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"reboot pending: no"* ]] || rc=1
+  [[ $out == *"newest installed kernel: 6.12.1+rpt-rpi-v8 (same as running)"* ]] || {
+    printf '        the running kernel was not matched: %s\n' "$out"
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
+test_audit_system_health_says_unknown_not_healthy() {
+  # When systemd or /boot cannot answer, the audit must not print the same
+  # words it prints for a healthy box: "unknown" is the honest result.
+  setup_destdir
+  local rc=0 out
+  stub failed_systemd_units
+  failed_systemd_units() { return 1; }
+  stub pending_reboot_summary
+  pending_reboot_summary() { printf 'no\n'; }
+  stub newest_installed_kernel
+  newest_installed_kernel() { return 1; }
+  stub uname
+  uname() { printf '6.12.1+rpt-rpi-v8\n'; }
+
+  out="$(audit_system_health 2>&1)"
+
+  [[ $out == *"failed units: unknown (systemctl unavailable)"* ]] || {
+    printf '        an unavailable systemctl was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"newest installed kernel: unknown"* ]] || {
+    printf '        a missing boot directory was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out != *"failed units: none"* ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_pending_reboot_summary_reads_packages() {
+  local t rc=0
+  t="$(mktemp -d)"
+  : >"$t/reboot-required"
+  printf 'linux-image-6.12\nlibc6\nlinux-image-6.12\n' >"$t/pkgs"
+  export OMAPI_REBOOT_REQUIRED="$t/reboot-required"
+  export OMAPI_REBOOT_PKGS="$t/pkgs"
+
+  if [[ $(pending_reboot_summary) != 'yes (libc6 linux-image-6.12)' ]]; then
+    printf '        packages that requested the reboot were not listed\n'
+    rc=1
+  fi
+  rm -f "$t/reboot-required"
+  [[ $(pending_reboot_summary) == 'no' ]] || {
+    printf '        a missing marker was not reported as no reboot\n'
+    rc=1
+  }
+  unset OMAPI_REBOOT_REQUIRED OMAPI_REBOOT_PKGS
+  rm -rf "$t"
+  return $rc
+}
+
+test_newest_installed_kernel_sorts_versions() {
+  local t rc=0
+  t="$(mktemp -d)"
+  : >"$t/vmlinuz-6.1.0-amd64"
+  : >"$t/vmlinuz-6.2.0-amd64"
+  : >"$t/vmlinuz-6.12.0-amd64"
+  # Newer, but a different flavour: a Pi can have both its own and another
+  # board's kernel in /boot, and the other one is not a pending boot.
+  : >"$t/vmlinuz-7.0.0-arm64"
+  : >"$t/vmlinuz-6.12.109+rpt-rpi-2712"
+  : >"$t/vmlinuz-6.12.109+rpt-rpi-v8"
+  export OMAPI_BOOT_DIR="$t"
+
+  if [[ $(newest_installed_kernel '6.1.0-amd64') != '6.12.0-amd64' ]]; then
+    printf '        version sort did not pick the newest kernel\n'
+    rc=1
+  fi
+  if [[ $(newest_installed_kernel '6.12.109+rpt-rpi-2712') != '6.12.109+rpt-rpi-2712' ]]; then
+    printf '        the Pi 5 flavour was compared against the Pi 4 image\n'
+    rc=1
+  fi
+  if [[ $(newest_installed_kernel '6.12.109+rpt-rpi-v8') != '6.12.109+rpt-rpi-v8' ]]; then
+    printf '        the Pi 4 flavour was compared against the Pi 5 image\n'
+    rc=1
+  fi
+  rm -f "$t"/vmlinuz-*
+  if newest_installed_kernel '6.12.0-amd64' >/dev/null 2>&1; then
+    printf '        an empty boot directory returned a kernel\n'
+    rc=1
+  fi
+  unset OMAPI_BOOT_DIR
+  rm -rf "$t"
+  return $rc
+}
+
+test_failed_systemd_units_returns_unit_names() {
+  setup_destdir
+  local rc=0 out
+  stub systemctl
+  systemctl() {
+    printf 'nginx.service loaded failed failed nginx\nfoo.service loaded failed failed foo\n'
+  }
+
+  out="$(failed_systemd_units)"
+  [[ $out == $'nginx.service\nfoo.service' ]] || {
+    printf '        failed unit names were not extracted: [%s]\n' "$out"
+    rc=1
+  }
+  systemctl() { return 1; }
+  if failed_systemd_units >/dev/null 2>&1; then
+    printf '        an unavailable systemctl was reported as clean\n'
+    rc=1
+  fi
+  teardown_destdir
+  return $rc
+}
+
 test_audit_timeout_is_inside_peek() {
   # `timeout 60 peek find ...` cannot work: timeout execs an external program
   # and peek is a shell function, so it always exited 127 and the audit
@@ -3520,6 +3685,12 @@ t 'a dry run writes nothing'                            test_dry_run_touches_not
 t 'ask uses gum, not a tty check'                       test_ask_uses_gum_not_a_tty_check
 t 'the lockout prompt defaults to no'                   test_lockout_prompt_defaults_to_no
 t '--lockdown-ssh refuses to write AllowUsers root'      test_lockdown_ssh_never_writes_allowusers_root
+t 'audit reports failed units and pending reboot'       test_audit_system_health_reports_failures
+t 'audit reports a clean system health'                 test_audit_system_health_reports_clean
+t 'audit says unknown instead of healthy'               test_audit_system_health_says_unknown_not_healthy
+t 'pending reboot lists requesting packages'            test_pending_reboot_summary_reads_packages
+t 'newest installed kernel is version-sorted'           test_newest_installed_kernel_sorts_versions
+t 'failed units returns unit names only'                test_failed_systemd_units_returns_unit_names
 t 'audit timeout is inside peek'                        test_audit_timeout_is_inside_peek
 
 t 'the firewall loop visits every port'                 test_firewall_loop_visits_every_port
