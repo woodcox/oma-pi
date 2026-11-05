@@ -155,10 +155,13 @@ nothing on a single-admin box and breaks anything the box writes for others to
 read.
 
 Service minimisation only touches units that are installed and asks for every
-one it can disable (units systemd cannot disable — static, indirect, masked —
-are skipped outright). It deliberately never touches avahi (`.local` discovery), rpcbind (NFS),
-or the apport/whoopsie crash-report pair. Each disable prints the exact
-`systemctl enable --now` command to undo it.
+one it can disable. Units systemd cannot disable (static, indirect, masked) are
+skipped, but a running one is reported with the `systemctl stop` command rather
+than left running silently. It deliberately never touches avahi (`.local`
+discovery), rpcbind (NFS), or the apport/whoopsie crash-report pair.
+`ModemManager.service` is in the list but warns first: stopping it can drop a
+cellular uplink, including the session you are using. Each disable prints the
+exact `systemctl enable --now` command to undo it.
 
 File-integrity monitoring (aide) is opt-in — ask for it by name, since building the baseline reads the whole
 filesystem. Add `--report` to save the resulting audit to `~/security-audit/`.
@@ -196,8 +199,15 @@ Some deliberate choices worth knowing before you run it:
   log in with an ssh password, run with `--password-ssh`** — that keeps
   `PasswordAuthentication yes` in the block, skips the key-backdoor check
   (passwords staying on is the way back in), and relies on fail2ban and ufw for
-  the brute force. Every config is validated before its service restarts, and
-  rolled back if it fails.
+  the brute force. It also checks that a non-root account actually has a usable
+  password before writing, and asks first (default no) if none does, because
+  `PermitRootLogin no` is still in the block. Every config is validated before
+  its service restarts, and rolled back if it fails.
+- **UseDNS stays on for hostname-restricted keys.** The block normally writes
+  `UseDNS no`. If the verified admin key uses a hostname-based `from=`
+  restriction, sshd would match it against the IP only and reject the key, so
+  the task warns and writes `UseDNS yes` instead. IP/CIDR `from=` rules are not
+  affected.
 - **Prompts use `gum`**, reading `/dev/tty` directly, so they still appear when
   the script is iterating over ports or accounts. Without a terminal at all it
   says so and takes the documented default rather than silently guessing.

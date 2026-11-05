@@ -110,6 +110,7 @@ Tasks (default: all but aide):
               and flag passwordless sudo / console autologin
   accounts    30-day password expiry + PAM quality checks
   services    stop and disable services a headless server does not need
+              (ModemManager warns first: it may be a cellular uplink)
   ssh         sshd hardening: no root login, key-only by default
               (--password-ssh keeps passwords), limits
   firewall    ufw: deny incoming by default, allow only what is listening
@@ -128,7 +129,8 @@ Options:
                         allow SSH agent forwarding in the sshd block
                         (default is off: AllowAgentForwarding no)
       --password-ssh    keep password login over SSH (PasswordAuthentication
-                        yes; default is key-only)
+                        yes; default is key-only). Needs a non-root account
+                        with a usable password, and asks first if none exists.
       --report       also save the audit report to ~/security-audit/
       --no-audit     skip the final report
       --no-restart   write configs but do not restart any service
@@ -814,6 +816,39 @@ key_files_for_user() {
   fi
 }
 
+# True when an authorized_keys entry restricts the key with a hostname-based
+# `from=` option. sshd resolves those names with reverse DNS; under `UseDNS no`
+# it compares the pattern against the client's IP address instead, so the key
+# can never match. IP and CIDR patterns are unaffected by UseDNS and do not
+# need this check.
+key_from_requires_dns() {
+  local f line from pattern
+  local -a patterns=()
+  for f in "$@"; do
+    [[ -r $f ]] || continue
+    while IFS= read -r line; do
+      [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+      if [[ $line =~ from=\"([^\"]*)\" ]]; then
+        from="${BASH_REMATCH[1]}"
+      elif [[ $line =~ from=([^,[:space:]]+) ]]; then
+        from="${BASH_REMATCH[1]}"
+      else
+        continue
+      fi
+      IFS=',' read -r -a patterns <<<"$from"
+      for pattern in "${patterns[@]}"; do
+        pattern="${pattern#!}"
+        # A colon means IPv6. IPv4/CIDR is digits, dots and an optional slash.
+        [[ $pattern == *:* ]] && continue
+        [[ $pattern =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] && continue
+        # Anything else is a hostname or wildcard, and needs DNS.
+        return 0
+      done
+    done <"$f"
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # packages
 # ---------------------------------------------------------------------------
@@ -887,18 +922,29 @@ check_passwordless_sudo() {
     note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${main} ${dir}"
     return 0
   fi
-  if [[ -d $dir ]] && ! peek test -r "$dir"; then
-    warn "could not list ${dir}; passwordless sudo there was NOT checked"
-    note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${dir}"
-    return 0
-  fi
-
   local -a files=("$main")
-  local f
+  local f dir_checked=1
   if [[ -d $dir ]]; then
-    for f in "$dir"/*; do
-      [[ -f $f ]] && files+=("$f")
-    done
+    if ! peek test -r "$dir"; then
+      warn "could not list ${dir}; passwordless sudo there was NOT checked"
+      note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${dir}"
+      dir_checked=0
+    else
+      # Enumerate through peek. A "$dir"/* glob runs in the invoking shell, so
+      # a root-only 0750 directory expands to no files and the audit then
+      # reports a clean result it never checked. find -L keeps symlinked
+      # drop-ins, which the old -f test also accepted.
+      local listing
+      if ! listing="$(peek find -L "$dir" -maxdepth 1 -type f -print 2>/dev/null)"; then
+        warn "could not list ${dir}; passwordless sudo there was NOT checked"
+        note "check by hand: sudo grep -RnE 'NOPASSWD|!authenticate' ${dir}"
+        dir_checked=0
+      else
+        while IFS= read -r f; do
+          [[ -n $f ]] && files+=("$f")
+        done <<<"$listing"
+      fi
+    fi
   fi
 
   # One awk over every file. If any of them is unreadable it exits non-zero,
@@ -920,7 +966,9 @@ check_passwordless_sudo() {
   fi
 
   if [[ -z $findings ]]; then
-    ok "sudo requires a password"
+    # A failed drop-in listing already warned; do not print an all-clear for
+    # the files that could not be enumerated.
+    ((dir_checked)) && ok "sudo requires a password"
     return 0
   fi
 
@@ -1168,7 +1216,12 @@ replace_conf_values() {
     return 1
   fi
 
-  if ! awk -v pairs="$*" '
+  # One program for both reads. The direct read is enough for a world-readable
+  # file (and for the test destdir); a root-only login.defs needs peek, because
+  # the invoking user is not root even when every write goes through sudo.
+  # Judge the read by exit status: an empty result is a valid file, and an
+  # unreadable one must not be mistaken for it.
+  local rewrite='
     BEGIN {
       n = split(pairs, a, " ")
       for (i = 1; i <= n; i++) {
@@ -1184,7 +1237,11 @@ replace_conf_values() {
         sub(/^[[:space:]]*/, "", key)
         sub(/[[:space:]].*$/, "", key)
         if (key in want) {
-          print key " " want[key]
+          # Preserve everything after the old value, so an inline comment
+          # such as "PASS_MAX_DAYS 99999 # reviewed exception" survives.
+          rest = line
+          sub(/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]+[^[:space:]]+/, "", rest)
+          print key " " want[key] rest
           seen[key] = 1
           next
         }
@@ -1196,10 +1253,18 @@ replace_conf_values() {
         if (!(order[i] in seen)) print order[i] " " want[order[i]]
       }
     }
-  ' "$target" >"$body"; then
-    rm -f "$body"
-    warn "could not rewrite ${path}; it has NOT been changed"
-    return 1
+  '
+
+  local read_ok=0
+  if [[ -r $target ]]; then
+    awk -v pairs="$*" "$rewrite" "$target" >"$body" 2>/dev/null && read_ok=1
+  fi
+  if ((!read_ok)); then
+    if ! peek awk -v pairs="$*" "$rewrite" "$target" >"$body" 2>/dev/null; then
+      rm -f "$body"
+      warn "could not read ${path}; it has NOT been changed"
+      return 1
+    fi
   fi
 
   install_staged "$body" "$target" "$path" || return 1
@@ -1230,6 +1295,20 @@ LOGIN_DEFS_POLICY=(
   PASS_MIN_DAYS=1
   PASS_WARN_AGE=7
 )
+
+# Read one policy value back. Direct first, because login.defs is normally
+# world-readable and the test destdir belongs to the caller; peek for the
+# root-only case, where a non-root operator is running the writes through
+# sudo and cannot open the file directly.
+login_defs_value() {
+  local key="$1" file="${CONF_DEST}/etc/login.defs" value=""
+  if [[ -r $file ]]; then
+    value="$(awk -v k="$key" '$1 == k { v = $2 } END { if (v != "") print v }' "$file" 2>/dev/null || true)"
+  else
+    value="$(peek awk -v k="$key" '$1 == k { v = $2 } END { if (v != "") print v }' "$file" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$value"
+}
 
 # Interactive accounts `chage` will be applied to. Optional arguments exist
 # for the test suite; production calls use the real files.
@@ -1326,9 +1405,9 @@ configure_account_policy() {
 
   if ((!DRY_RUN)); then
     # Report what actually landed, not what was asked for.
-    local f="${CONF_DEST}/etc/login.defs" k v
+    local k v
     for k in "${LOGIN_DEFS_POLICY[@]%=*}"; do
-      v="$(awk -v k="$k" '$1 == k { v = $2 } END { if (v != "") print v }' "$f" 2>/dev/null || true)"
+      v="$(login_defs_value "$k")"
       [[ -n $v ]] && ok "${k} ${v}"
     done
   fi
@@ -1400,21 +1479,46 @@ configure_services() {
     # while reporting success. Knowing a unit exists must never depend on
     # privilege.
     state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
-    # A static (or indirect) unit cannot be disabled: `systemctl disable`
-    # refuses it outright, so offering it would be a prompt whose every
-    # answer ends in "could not disable". Not installed as far as this
-    # task is concerned.
-    case $state in
-      '' | not-found | masked | static | indirect) continue ;;
-    esac
     active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    case $state in
+      '')
+        # An absent unit prints not-found; no answer at all means the query
+        # failed. Treating that as "absent" would skip a unit and still report
+        # a clean run, so say the check could not be made.
+        warn "could not determine whether ${unit} is installed; it was NOT disabled"
+        note "systemctl is-enabled returned no answer (a transient manager or bus error?)"
+        continue
+        ;;
+      not-found)
+        continue
+        ;;
+      masked | masked-runtime | static | indirect)
+        # These cannot be disabled: `systemctl disable` refuses static and
+        # indirect units, and masking only prevents a future start. It does
+        # not stop a running instance, so report one rather than leaving it
+        # running silently.
+        if [[ $active == active ]]; then
+          warn "${unit} is ${state} but still running"
+          note "stop it with: sudo systemctl stop ${unit}"
+        fi
+        continue
+        ;;
+    esac
     if [[ $state == disabled && $active != active ]]; then
       ok "${unit} already disabled"
       continue
     fi
 
+    if [[ $unit == ModemManager.service ]]; then
+      warn "ModemManager may be carrying this box's uplink"
+      note "stopping it can drop a cellular connection, including this session; answer no if you are connected over a modem"
+      note "with --yes, or no terminal, the default is still to disable it; run the services task interactively if unsure"
+    fi
+
     if ask "disable and stop ${unit}? (not needed on a headless server)" "y"; then
-      if run_root systemctl disable --now "$unit"; then
+      if ((DRY_RUN)); then
+        run_root systemctl disable --now "$unit"
+      elif run_root systemctl disable --now "$unit"; then
         ok "${unit} disabled (undo: sudo systemctl enable --now ${unit})"
       else
         warn "could not disable ${unit}; it is still running"
@@ -1532,9 +1636,25 @@ harden_ssh() {
   # user has asked to keep password SSH: --password-ssh means "I log in with a
   # password", which is its own way back in, and fail2ban handles the brute
   # force that unlocking the door invites.
-  local backdoor_user=""
+  local backdoor_user="" use_dns="no"
   if ((PASSWORD_SSH)); then
-    note "--password-ssh: password login stays on, so no key backdoor is needed"
+    local password_accounts
+    password_accounts="$(password_login_accounts)"
+    if [[ -z $password_accounts ]]; then
+      # PermitRootLogin no is written regardless of this flag, so password
+      # authentication with no non-root password account is not a way back in
+      # at all - it is a block with no login path. Ask rather than let --yes
+      # take the unsafe answer.
+      warn "no non-root account with a usable password was found"
+      note "PermitRootLogin no stays in the block, so --password-ssh would leave no password login"
+      note "set a password on a human account first, or use key-based access without --password-ssh"
+      if ! ask "write the password-ssh config anyway?" n; then
+        skip "leaving PasswordAuthentication as it is"
+        return 0
+      fi
+    else
+      note "--password-ssh: password login stays on ($(printf '%s' "$password_accounts" | tr '\n' ' ' | sed 's/[[:space:]]*$//'))"
+    fi
   elif ! backdoor_user="$(non_root_sudoer_with_key)"; then
     if have tailscale && tailscale status &>/dev/null; then
       # Single quotes, not double: backticks inside a double-quoted string
@@ -1581,6 +1701,32 @@ harden_ssh() {
       note "--lockdown-ssh: AllowUsers will be set to ${target_user}"
     fi
   fi
+
+  # UseDNS no is safe for IP/CIDR from= rules, but sshd matches a hostname
+  # pattern against the IP when reverse DNS is off, so the key would be
+  # rejected. Check both accounts that the block may rely on: the verified
+  # backdoor user and, when --lockdown-ssh is still in force, the named user.
+  local -a dns_users=()
+  [[ -n $backdoor_user ]] && dns_users+=("$backdoor_user")
+  if ((LOCKDOWN_SSH)); then
+    dns_users+=("${SUDO_USER:-$(id -un)}")
+  fi
+  local dns_user kf
+  local -a dns_keys=()
+  for dns_user in "${dns_users[@]}"; do
+    [[ -n $dns_user && $dns_user != root ]] || continue
+    dns_keys=()
+    while IFS= read -r kf; do
+      [[ -n $kf ]] && dns_keys+=("$kf")
+    done <<<"$(key_files_for_user "$dns_user")"
+    if key_from_requires_dns "${dns_keys[@]}"; then
+      use_dns="yes"
+      warn "${dns_user}'s authorized_keys has a hostname-based from= restriction"
+      note "UseDNS no would match it against the IP only and reject the key"
+      note "writing UseDNS yes so the key keeps working; IP/CIDR from= rules are unaffected"
+      break
+    fi
+  done
 
   # Moving the port only removes noise from the logs; it is not a control.
   # Offered because it is in the guides and because it is harmless, but
@@ -1679,7 +1825,10 @@ LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
 LogLevel VERBOSE
-UseDNS no
+# UseDNS follows a hostname-based from= restriction in the verified admin
+# key: with it set to no, sshd matches from= against the IP only and that key
+# would be rejected. It stays "no" otherwise.
+UseDNS ${use_dns}
 PermitUserEnvironment no
 GatewayPorts no
 # Agent forwarding follows --agent-forwarding. Off by default: a compromised
@@ -3491,6 +3640,29 @@ pending_reboot_summary() {
   fi
 }
 
+# Flavour part of a kernel release, with the Debian/Ubuntu ABI revision
+# removed. 6.1.0-25-amd64 -> amd64, 6.8.0-45-generic -> generic,
+# 6.1.0-25-rt-amd64 -> rt-amd64, 6.12.109+rpt-rpi-2712 -> rpt-rpi-2712.
+# Keeping rt-amd64 distinct from amd64 matters: an RT image is not a pending
+# boot for a standard kernel.
+kernel_flavor() {
+  local rel="$1" rest=""
+  if [[ $rel =~ ^[0-9]+\.[0-9]+\.[0-9]+(.*)$ ]]; then
+    rest="${BASH_REMATCH[1]}"
+    rest="${rest#[+-]}"
+    if [[ $rest =~ ^[0-9]+-(.+)$ ]]; then
+      rest="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\n' "$rest"
+    return 0
+  fi
+  if [[ $rel == *+* ]]; then
+    printf '%s\n' "${rel##*+}"
+  else
+    printf '%s\n' "${rel##*-}"
+  fi
+}
+
 # Newest kernel image in /boot for the running release's flavour, or nothing
 # when there is no boot directory or no comparable image. A Pi can carry both
 # the Pi 4 (v8) and Pi 5 (2712) images in /boot at once; the other flavour is
@@ -3501,28 +3673,16 @@ newest_installed_kernel() {
   local boot="${OMAPI_BOOT_DIR:-/boot}"
   [[ -d $boot ]] || return 1
 
-  # Debian: 6.1.0-25-amd64 -> 25-amd64. Pi: 6.12.109+rpt-rpi-2712 ->
-  # rpt-rpi-2712. Keeping the revision and flavour together means an RT kernel
-  # is not compared against the standard one, and the two Pi flavours stay
-  # separate.
-  local flavor=""
-  if [[ $rel =~ ^[0-9]+\.[0-9]+\.[0-9]+(.*)$ ]]; then
-    flavor="${BASH_REMATCH[1]}"
-    flavor="${flavor#[+-]}"
-  fi
-  if [[ -z $flavor ]]; then
-    if [[ $rel == *+* ]]; then
-      flavor="${rel##*+}"
-    else
-      flavor="${rel##*-}"
-    fi
-  fi
+  local flavor
+  flavor="$(kernel_flavor "$rel")"
 
   local -a candidates=()
   local release
   while IFS= read -r release; do
     [[ -n $release ]] || continue
-    [[ $release == *[+-]"$flavor" ]] || continue
+    # Compare the parsed flavour, not a suffix pattern: *-amd64 would also
+    # match *-rt-amd64, which is a different kernel.
+    [[ $(kernel_flavor "$release") == "$flavor" ]] || continue
     candidates+=("$release")
   done < <(find "$boot" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' 2>/dev/null |
     sed 's/^vmlinuz-//')
@@ -3556,6 +3716,28 @@ audit_system_health() {
   else
     printf '  newest installed kernel: unknown\n'
   fi
+}
+
+# One line per policy value, so a saved --report shows what the accounts task
+# actually applied instead of only what it was asked to apply.
+account_policy_summary() {
+  local k v line=""
+  for k in "${LOGIN_DEFS_POLICY[@]%=*}"; do
+    v="$(login_defs_value "$k")"
+    line+="${k}=${v:-unknown} "
+  done
+  printf '%s\n' "${line% }"
+}
+
+# Enabled/active state for every unit the services task may touch. Read-only,
+# and deliberately unprivileged for the same reason the service task is.
+service_state_summary() {
+  local unit state active
+  for unit in "${SERVICES_SAFE_OFF[@]}"; do
+    state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    printf '  %-26s %-10s %s\n' "$unit" "${state:-unknown}" "${active:-unknown}"
+  done
 }
 
 audit() {
@@ -3674,6 +3856,7 @@ audit() {
       sed 's/^/  /' || true
 
     printf '\n-- accounts --\n'
+    printf '  login.defs policy: %s\n' "$(account_policy_summary)"
     printf '  passwordless: %s\n' \
       "$(peek awk -F: '($2 == "") {print $1}' /etc/shadow 2>/dev/null | tr '\n' ' ' || true)"
     printf '  uid 0: %s\n' \
@@ -3681,6 +3864,13 @@ audit() {
     printf '  default pi account: %s\n' "$(id pi &>/dev/null && echo PRESENT || echo absent)"
     printf '  sudoers: %s\n' \
       "$(peek getent group sudo 2>/dev/null | cut -d: -f4 || echo '?')"
+
+    printf '\n-- service minimisation --\n'
+    if have systemctl; then
+      service_state_summary
+    else
+      printf '  systemctl unavailable\n'
+    fi
 
     printf '\n-- recent auth failures --\n'
     peek journalctl -u ssh --since '-24 hours' --no-pager 2>/dev/null |

@@ -200,16 +200,16 @@ page_hardening() {
   echo -e "  ${DIM}Run under sudo. Read the full detail in the repo README.${RESET}"
 
   section "Try it before it changes anything"
-  cmd "omapi-harden --list"                "List tasks and exit"
-  cmd "sudo omapi-harden --dry-run"        "Print the plan, change nothing"
-  cmd "sudo omapi-harden --yes"            "Take recommended defaults, no prompts"
-  cmd "sudo omapi-harden ssh firewall"     "Just named tasks"
+  cmd '$HOME/.local/bin/omapi-harden --list'       "List tasks and exit"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --dry-run' "Print the plan, change nothing"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --yes'     "Take recommended defaults, no prompts"
+  cmd 'sudo $HOME/.local/bin/omapi-harden ssh firewall' "Just named tasks"
 
   section "Tasks (default: all but aide)"
   cmd "packages"   "hardening tooling: ufw, fail2ban, apparmor, ..."
   cmd "users"      "empty passwords, stock pi, passwordless sudo, autologin"
   cmd "accounts"   "30-day password expiry + PAM quality checks"
-  cmd "services"   "disable cups / Bluetooth / triggerhappy / ModemManager if installed"
+  cmd "services"   "disable cups / Bluetooth / triggerhappy / ModemManager (warns on cellular)"
   cmd "ssh"        "sshd block: no root login, ports, limits, flag-driven access"
   cmd "firewall"   "ufw: deny incoming by default, allow only listening ports"
   cmd "fail2ban"   "ban repeat SSH/auth failures"
@@ -232,8 +232,8 @@ page_hardening() {
   cmd "-l, --list"   "list tasks and exit"
 
   section "LAN-only box with password login"
-  cmd "sudo omapi-harden --password-ssh --dry-run"  "then, if it looks right:"
-  cmd "sudo omapi-harden --password-ssh --yes"      "prompts default sensibly"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --password-ssh --dry-run' "then, if it looks right:"
+  cmd 'sudo $HOME/.local/bin/omapi-harden --password-ssh --yes'     "prompts default sensibly"
   echo -e "  ${DIM}  Human login passwords expire after 30 days (chage -M 30).${RESET}"
 }
 

@@ -1464,6 +1464,43 @@ test_passwordless_sudo_unreadable_is_not_called_clean() {
   return $rc
 }
 
+test_passwordless_sudo_unlistable_dropins_is_not_called_clean() {
+  # A root-only sudoers.d (for example 0750 root:root) cannot be enumerated
+  # by the invoking shell's glob. The listing must go through peek, and a
+  # failed listing must say "NOT checked" rather than report a clean file.
+  setup_destdir
+  local rc=0 t out
+  t="$(mktemp -d)"
+  mkdir -p "$t/sudoers.d"
+  printf 'Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n' >"$t/sudoers"
+  export OMAPI_SUDOERS="$t/sudoers"
+  export OMAPI_SUDOERS_DIR="$t/sudoers.d"
+
+  stub peek
+  peek() {
+    case "$*" in
+      "find -L $t/sudoers.d "*) return 1 ;;
+      *) "$@" ;;
+    esac
+  }
+
+  out="$(check_passwordless_sudo 2>&1)"
+
+  [[ $out == *"could not list $t/sudoers.d"* ]] || {
+    printf '        an unlistable drop-in directory was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"NOT checked"* ]] || rc=1
+  [[ $out != *"sudo requires a password"* ]] || {
+    printf '        an unchecked drop-in directory was reported clean\n'
+    rc=1
+  }
+  unset OMAPI_SUDOERS OMAPI_SUDOERS_DIR
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
 test_console_autologin_is_reported() {
   # A getty drop-in or LightDM config with autologin gives physical access a
   # passwordless shell. Both must be found, and a commented-out line must not
@@ -1863,10 +1900,11 @@ test_harden_ssh_write_preserves_mode() {
   # widen or narrow it.
   setup_destdir
   local rc=0
-  local d="$CONF_DEST/etc/ssh"
-  mkdir -p "$d/sshd_config.d"
-  local main="$d/sshd_config"
-  local drop="$d/sshd_config.d/99-omapi.conf"
+  local ssh_dir="$CONF_DEST/etc/ssh"
+  local drop_dir="$ssh_dir/sshd_config.d"
+  mkdir -p "$drop_dir"
+  local main="$ssh_dir/sshd_config"
+  local drop="$drop_dir/99-omapi.conf"
   printf 'Port 22\nPermitRootLogin yes\n' >"$main"; chmod 600 "$main"
   # 0600 for the drop-in too, deliberately. At 0644 the staged file inherits the
   # same mode, so an unguarded rename is invisible - which is how the missing
@@ -1896,21 +1934,21 @@ test_harden_ssh_write_preserves_mode() {
   DRY_RUN=0
   harden_ssh >/dev/null 2>&1
 
-  local m d
-  m="$(stat -c %a "$main" 2>/dev/null || printf missing)"
-  d="$(stat -c %a "$drop" 2>/dev/null || printf missing)"
-  if [[ $m != 600 ]]; then
-    printf '        sshd_config mode is %s, expected 600\n' "$m"
+  local main_mode drop_mode
+  main_mode="$(stat -c %a "$main" 2>/dev/null || printf missing)"
+  drop_mode="$(stat -c %a "$drop" 2>/dev/null || printf missing)"
+  if [[ $main_mode != 600 ]]; then
+    printf '        sshd_config mode is %s, expected 600\n' "$main_mode"
     rc=1
   fi
-  if [[ $d != 600 ]]; then
-    printf '        drop-in mode is %s, expected 600\n' "$d"
+  if [[ $drop_mode != 600 ]]; then
+    printf '        drop-in mode is %s, expected 600\n' "$drop_mode"
     rc=1
   fi
   # And no staging file may survive a successful write. The main file's stage
   # is .omapi-stage.$$ (install_staged), the drop-ins' is .omapi-tmp.
   local leftovers
-  leftovers="$((compgen -G "$d/sshd_config.omapi-stage.*" >/dev/null 2>&1 && echo x; ls "$d"/*.omapi-tmp "$d"/sshd_config.d/*.omapi-tmp 2>/dev/null) | wc -l)"
+  leftovers="$((compgen -G "$ssh_dir/sshd_config.omapi-stage.*" >/dev/null 2>&1 && echo x; ls "$ssh_dir"/*.omapi-tmp "$drop_dir"/*.omapi-tmp 2>/dev/null) | wc -l)"
   if [[ $leftovers -ne 0 ]]; then
     printf '        %s staging file(s) left behind\n' "$leftovers"
     rc=1
@@ -2731,6 +2769,38 @@ test_audit_system_health_says_unknown_not_healthy() {
   return $rc
 }
 
+test_audit_reports_login_defs_and_service_state() {
+  # The saved --report has to show whether the accounts and services tasks
+  # actually applied, not just the units that happen to be failed.
+  setup_destdir
+  mkdir -p "$CONF_DEST/etc"
+  printf 'PASS_MAX_DAYS 30\nPASS_MIN_DAYS 1\nPASS_WARN_AGE 7\n' >"$CONF_DEST/etc/login.defs"
+  stub systemctl
+  systemctl() {
+    case "$*" in
+      *is-enabled*cups.service*) printf 'enabled\n'; return 0 ;;
+      *is-active*cups.service*) printf 'active\n'; return 0 ;;
+      *) printf 'not-found\n'; return 1 ;;
+    esac
+  }
+  local out rc=0
+  out="$(account_policy_summary; service_state_summary)"
+  [[ $out == *"PASS_MAX_DAYS=30"* ]] || {
+    printf '        login.defs values are missing from the audit: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"PASS_MIN_DAYS=1"* && $out == *"PASS_WARN_AGE=7"* ]] || {
+    printf '        not every login.defs value was reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"cups.service"*"enabled"*"active"* ]] || {
+    printf '        service states are missing from the audit: %s\n' "$out"
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
 test_pending_reboot_summary_reads_packages() {
   local t rc=0
   t="$(mktemp -d)"
@@ -2756,9 +2826,15 @@ test_pending_reboot_summary_reads_packages() {
 test_newest_installed_kernel_sorts_versions() {
   local t rc=0
   t="$(mktemp -d)"
-  : >"$t/vmlinuz-6.1.0-amd64"
-  : >"$t/vmlinuz-6.2.0-amd64"
-  : >"$t/vmlinuz-6.12.0-amd64"
+  # Debian/Ubuntu releases carry an ABI revision between the version and the
+  # flavour. The comparison has to ignore that revision, or a newer image is
+  # filtered out and the audit reports "same as running" when a reboot is due.
+  : >"$t/vmlinuz-6.1.0-25-amd64"
+  : >"$t/vmlinuz-6.2.0-28-amd64"
+  : >"$t/vmlinuz-6.12.0-30-amd64"
+  : >"$t/vmlinuz-6.1.0-28-rt-amd64"
+  : >"$t/vmlinuz-6.8.0-45-generic"
+  : >"$t/vmlinuz-6.8.0-50-generic"
   # Newer, but a different flavour: a Pi can have both its own and another
   # board's kernel in /boot, and the other one is not a pending boot.
   : >"$t/vmlinuz-7.0.0-arm64"
@@ -2766,8 +2842,18 @@ test_newest_installed_kernel_sorts_versions() {
   : >"$t/vmlinuz-6.12.109+rpt-rpi-v8"
   export OMAPI_BOOT_DIR="$t"
 
-  if [[ $(newest_installed_kernel '6.1.0-amd64') != '6.12.0-amd64' ]]; then
+  if [[ $(newest_installed_kernel '6.1.0-25-amd64') != '6.12.0-30-amd64' ]]; then
     printf '        version sort did not pick the newest kernel\n'
+    rc=1
+  fi
+  # An RT kernel is its own flavour: the standard image must not be offered
+  # as a pending boot for it, and vice versa.
+  if [[ $(newest_installed_kernel '6.1.0-25-rt-amd64') != '6.1.0-28-rt-amd64' ]]; then
+    printf '        an RT kernel was compared against the standard flavour\n'
+    rc=1
+  fi
+  if [[ $(newest_installed_kernel '6.8.0-45-generic') != '6.8.0-50-generic' ]]; then
+    printf '        a newer generic kernel was filtered out\n'
     rc=1
   fi
   if [[ $(newest_installed_kernel '6.12.109+rpt-rpi-2712') != '6.12.109+rpt-rpi-2712' ]]; then
@@ -3193,12 +3279,14 @@ test_account_policy_replaces_values_in_place() {
   setup_destdir
   mkdir -p "$CONF_DEST/etc"
   local f="$CONF_DEST/etc/login.defs" rc=0
-  printf '# stock comment\nUMASK\t\t022\nPASS_MAX_DAYS\t99999\nPASS_MIN_DAYS\t0\nPASS_WARN_AGE\t7\n' >"$f"
+  printf '# stock comment\nUMASK\t\t022\nPASS_MAX_DAYS\t99999 # reviewed exception\nPASS_MIN_DAYS\t0\nPASS_WARN_AGE\t7\n' >"$f"
   chmod 644 "$f"
 
   configure_account_policy >/dev/null 2>&1
 
-  grep -qE '^PASS_MAX_DAYS[[:space:]]+30$' "$f" || rc=1
+  # The inline comment after the old value survives the rewrite: this is an
+  # edit of one value, not a replacement of the line.
+  grep -qx 'PASS_MAX_DAYS 30 # reviewed exception' "$f" || rc=1
   grep -qE '^PASS_MIN_DAYS[[:space:]]+1$' "$f" || rc=1
   grep -qE '^PASS_WARN_AGE[[:space:]]+7$' "$f" || rc=1
   # UMASK is deliberately not in LOGIN_DEFS_POLICY: the distro value survives
@@ -3363,15 +3451,15 @@ test_services_dry_run_touches_nothing() {
   setup_destdir
   # `stub run_root` would log the dry-run "would run" line too, which says
   # nothing: under DRY_RUN run_root prints instead of executing. The assertion
-  # that matters is that the real `systemctl disable` call is never reached,
-  # so watch for that directly in the systemctl stub.
+  # that matters is that the real `systemctl disable` call is never reached.
+  # A variable set inside the systemctl stub would live in the command
+  # substitution's subshell, so report the call through the captured output.
   stub systemctl
-  local disable_ran=0
   systemctl() {
     case "$*" in
       *is-enabled*cups.service*) printf 'enabled\n'; return 0 ;;
       *is-active*cups.service*) printf 'active\n'; return 0 ;;
-      *disable*cups.service*) disable_ran=1; return 0 ;;
+      *disable*cups.service*) printf 'DISABLE-RAN\n'; return 0 ;;
       *) return 1 ;;
     esac
   }
@@ -3383,10 +3471,14 @@ test_services_dry_run_touches_nothing() {
     printf '        the dry run did not plan the cups disable: %s\n' "$out"
     rc=1
   }
-  if ((disable_ran)); then
+  [[ $out != *"DISABLE-RAN"* ]] || {
     printf '        the dry run executed systemctl disable\n'
     rc=1
-  fi
+  }
+  [[ $out != *"cups.service disabled (undo:"* ]] || {
+    printf '        the dry run reported a disable it did not perform\n'
+    rc=1
+  }
   teardown_destdir
   return $rc
 }
@@ -3394,13 +3486,63 @@ test_services_dry_run_touches_nothing() {
 test_services_skips_units_that_are_not_installed() {
   setup_destdir
   stub systemctl
-  systemctl() { return 1; }
+  systemctl() {
+    case "$*" in
+      *is-enabled*) printf 'not-found\n'; return 1 ;;
+      *) return 1 ;;
+    esac
+  }
   local out rc=0
   out="$(configure_services 2>&1)"
   if [[ $out == *"cups.service"* || $out == *"avahi-daemon.service"* ]]; then
     printf '        an absent unit was reported as a hardening target\n'
     rc=1
   fi
+  teardown_destdir
+  return $rc
+}
+
+test_services_warns_when_is_enabled_fails() {
+  # Only `not-found` means the unit is absent. An empty answer is a failed
+  # query, and treating it as absent would skip the unit and still report a
+  # clean run.
+  setup_destdir
+  stub systemctl
+  systemctl() { return 1; }
+  local out rc=0
+  out="$(configure_services 2>&1)"
+  [[ $out == *"could not determine whether cups.service is installed"* ]] || {
+    printf '        a failed is-enabled query was treated as absent: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"NOT disabled"* ]] || rc=1
+  teardown_destdir
+  return $rc
+}
+
+test_services_reports_a_running_masked_unit() {
+  # Masking prevents a future start; it does not stop a running instance.
+  # Skipping the unit silently leaves it running after the run.
+  setup_destdir
+  stub systemctl
+  systemctl() {
+    case "$*" in
+      *is-enabled*cups.service*) printf 'masked\n'; return 0 ;;
+      *is-active*cups.service*) printf 'active\n'; return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  local out rc=0
+  out="$(configure_services 2>&1)"
+  [[ $out == *"cups.service is masked but still running"* ]] || {
+    printf '        a running masked unit was skipped silently: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"sudo systemctl stop cups.service"* ]] || rc=1
+  [[ $out != *"disable and stop cups.service"* ]] || {
+    printf '        a masked unit was offered for disabling\n'
+    rc=1
+  }
   teardown_destdir
   return $rc
 }
@@ -3425,13 +3567,41 @@ test_services_disables_a_safe_unit_by_default() {
   return $rc
 }
 
+test_services_warns_before_stopping_modemmanager() {
+  # ModemManager can be the cellular uplink, so the default stop must come
+  # with a warning; --yes still takes the default, by design.
+  setup_destdir
+  stub systemctl
+  systemctl() {
+    case "$*" in
+      *is-enabled*ModemManager.service*) printf 'enabled\n'; return 0 ;;
+      *is-active*ModemManager.service*) printf 'active\n'; return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  local out rc=0
+  out="$(configure_services 2>&1)"
+  [[ $out == *"ModemManager may be carrying this box's uplink"* ]] || {
+    printf '        the ModemManager warning is missing: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"[stub] run_root systemctl disable --now ModemManager.service"* ]] || {
+    printf '        ModemManager was not disabled by default\n'
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
 test_services_never_touches_left_alone_units() {
   # These units are deliberately outside SERVICES_SAFE_OFF: avahi is how
   # hostname.local resolves, rpcbind is how NFS works, and apport/whoopsie are
   # opinionated crash reporting. Even enabled and active, they must not be
-  # offered for disabling (ASSUME_YES is set by setup_destdir). A static unit
-  # in the safe-off list is also skipped: systemctl disable refuses static
-  # units outright, so the offer would end in "could not disable".
+  # offered for disabling (ASSUME_YES is set by setup_destdir). ModemManager
+  # is in the safe-off list but warns first, because it may be carrying a
+  # cellular uplink. A static unit in the safe-off list is also skipped:
+  # systemctl disable refuses static units outright, so the offer would end
+  # in "could not disable", but a running one is reported.
   setup_destdir
   stub systemctl
   systemctl() {
@@ -3452,12 +3622,18 @@ test_services_never_touches_left_alone_units() {
     fi
   done
   # cups.service IS in the list, but its is-enabled state is static: it must
-  # not be offered, and cups.socket still must (it reports enabled here).
+  # not be offered, and a running one must still be reported. cups.socket must
+  # still be offered, and the assertion matches the prompt so a future change
+  # that routes it to an already-disabled or left-alone message fails here.
   if [[ $out == *"disable and stop cups.service"* ]]; then
     printf '        a static unit was offered for disabling\n'
     rc=1
   fi
-  if [[ $out != *"cups.socket"* ]]; then
+  [[ $out == *"cups.service is static but still running"* ]] || {
+    printf '        a running static unit was skipped silently: %s\n' "$out"
+    rc=1
+  }
+  if [[ $out != *"disable and stop cups.socket?"* ]]; then
     printf '        a functional sibling was not offered: %s\n' "$out"
     rc=1
   fi
@@ -3488,6 +3664,11 @@ stub_ssh_context() {
     no_key) non_root_sudoer_with_key() { return 1; } ;;
     *) non_root_sudoer_with_key() { printf 'admin\n'; } ;;
   esac
+  # --password-ssh now checks for a non-root password account. The default
+  # fixture has one, so the flag tests exercise the config rather than the
+  # lockout prompt; the prompt has its own test.
+  stub password_login_accounts
+  password_login_accounts() { printf 'admin\n'; }
   stub ask
   ask() { return 1; }
   stub have
@@ -3604,6 +3785,103 @@ test_sshd_password_ssh_flag() {
   return $rc
 }
 
+test_sshd_password_ssh_requires_a_password_account() {
+  # PermitRootLogin no is written either way. If no non-root account has a
+  # usable password, --password-ssh is not a way back in, so the question has
+  # to default to no rather than let --yes take the unsafe answer.
+  setup_destdir
+  local rc=0 out
+  stub_ssh_context no_key
+  stub password_login_accounts
+  password_login_accounts() { return 0; }
+  stub ask
+  ask() { return 1; }
+  DRY_RUN=1
+  PASSWORD_SSH=1
+  out="$(harden_ssh 2>&1 || true)"
+  PASSWORD_SSH=0
+  DRY_RUN=0
+
+  [[ $out == *"no non-root account with a usable password"* ]] || {
+    printf '        --password-ssh did not check for a password account: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"leaving PasswordAuthentication as it is"* ]] || {
+    printf '        the unsafe password configuration was written\n'
+    rc=1
+  }
+  [[ $out != *"PasswordAuthentication yes"* ]] || {
+    printf '        the block was written despite there being no password account\n'
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
+test_key_from_requires_dns_only_for_hostnames() {
+  local t rc=0
+  t="$(mktemp -d)"
+  printf 'from="192.0.2.0/24,2001:db8::/32" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n' >"$t/ip"
+  printf 'from="build.example.com" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n' >"$t/host"
+  if key_from_requires_dns "$t/ip"; then
+    printf '        an IP/CIDR from= rule was treated as a hostname\n'
+    rc=1
+  fi
+  if ! key_from_requires_dns "$t/host"; then
+    printf '        a hostname from= rule was not detected\n'
+    rc=1
+  fi
+  rm -rf "$t"
+  return $rc
+}
+
+test_sshd_hostname_from_key_keeps_dns() {
+  # UseDNS no would make sshd match a hostname from= pattern against the IP
+  # only, rejecting the verified admin key. Keep DNS resolution on in that
+  # case, and say why.
+  setup_destdir
+  local rc=0 out d
+  d="$(mktemp -d)"
+  printf 'from="build.example.com" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n' >"$d/authorized_keys"
+  stub_ssh_context
+  stub key_files_for_user
+  key_files_for_user() { printf '%s\n' "$d/authorized_keys"; }
+  DRY_RUN=1
+  out="$(harden_ssh 2>&1 || true)"
+  DRY_RUN=0
+
+  [[ $out == *"hostname-based from= restriction"* ]] || {
+    printf '        the hostname restriction was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *$'\n      UseDNS yes'* ]] || {
+    printf '        UseDNS was left off with a hostname-restricted key\n'
+    rc=1
+  }
+  [[ $out != *$'\n      UseDNS no'* ]] || {
+    printf '        both UseDNS values were written\n'
+    rc=1
+  }
+  rm -rf "$d"
+  teardown_destdir
+  return $rc
+}
+
+test_cli_agent_forwarding_flag_sets_variable() {
+  # harden_ssh's own flag test sets AGENT_FORWARDING directly, so it cannot
+  # catch a broken --agent-forwarding case in main. --list runs after argument
+  # parsing and before any task, so it exercises the case safely.
+  local rc=0
+  AGENT_FORWARDING=0
+  main --agent-forwarding --list >/dev/null 2>&1 || rc=1
+  if ((AGENT_FORWARDING != 1)); then
+    printf '        --agent-forwarding did not set AGENT_FORWARDING: %s\n' "$AGENT_FORWARDING"
+    rc=1
+  fi
+  AGENT_FORWARDING=0
+  return $rc
+}
+
 test_sshd_flag_choices_revert() {
   # The Merge Danger claim: both flag values are always written, and the
   # choice lives in globals that are recomputed on every run, so a re-run
@@ -3653,6 +3931,10 @@ t 'sshd config is created when absent'                  test_sshd_creates_missin
 t 'sshd block includes depth directives'                test_sshd_block_includes_depth_directives
 t 'sshd --agent-forwarding opts in'                     test_sshd_agent_forwarding_flag
 t 'sshd --password-ssh keeps passwords on'              test_sshd_password_ssh_flag
+t 'sshd --password-ssh needs a password account'        test_sshd_password_ssh_requires_a_password_account
+t 'hostname from= rules are detected'                   test_key_from_requires_dns_only_for_hostnames
+t 'sshd keeps UseDNS for hostname from= keys'           test_sshd_hostname_from_key_keeps_dns
+t '--agent-forwarding is parsed by main'                test_cli_agent_forwarding_flag_sets_variable
 t 'sshd flag choices revert on re-run'                  test_sshd_flag_choices_revert
 t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
 t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
@@ -3662,7 +3944,10 @@ t 'password quality dry run plans PAM enablement'       test_password_quality_dr
 t 'password quality writes policy and enables PAM'      test_password_quality_writes_policy_and_enables_pam
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
 t 'service minimisation skips absent units'             test_services_skips_units_that_are_not_installed
+t 'service minimisation warns when is-enabled fails'    test_services_warns_when_is_enabled_fails
+t 'service minimisation reports a running masked unit'  test_services_reports_a_running_masked_unit
 t 'service minimisation disables safe units'            test_services_disables_a_safe_unit_by_default
+t 'service minimisation warns before ModemManager'      test_services_warns_before_stopping_modemmanager
 t 'service minimisation never touches left-alones'      test_services_never_touches_left_alone_units
 
 t 'an empty authorized_keys blocks the lockout change'  test_no_lockout_without_key
@@ -3688,6 +3973,7 @@ t '--lockdown-ssh refuses to write AllowUsers root'      test_lockdown_ssh_never
 t 'audit reports failed units and pending reboot'       test_audit_system_health_reports_failures
 t 'audit reports a clean system health'                 test_audit_system_health_reports_clean
 t 'audit says unknown instead of healthy'               test_audit_system_health_says_unknown_not_healthy
+t 'audit reports login.defs and services'               test_audit_reports_login_defs_and_service_state
 t 'pending reboot lists requesting packages'            test_pending_reboot_summary_reads_packages
 t 'newest installed kernel is version-sorted'           test_newest_installed_kernel_sorts_versions
 t 'failed units returns unit names only'                test_failed_systemd_units_returns_unit_names
@@ -3712,6 +3998,7 @@ t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when
 t 'passwordless sudo rules are reported'              test_passwordless_sudo_is_reported
 t 'absent passwordless sudo is reported clean'        test_passwordless_sudo_clean_is_not_a_warning
 t 'unreadable sudoers is not called clean'            test_passwordless_sudo_unreadable_is_not_called_clean
+t 'unlistable sudoers drop-ins are not clean'         test_passwordless_sudo_unlistable_dropins_is_not_called_clean
 t 'console autologin is reported'                     test_console_autologin_is_reported
 t 'absent console autologin is not a warning'         test_console_autologin_clean_is_not_a_warning
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
