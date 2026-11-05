@@ -826,7 +826,11 @@ key_from_requires_dns() {
   local -a patterns=()
   for f in "$@"; do
     [[ -r $f ]] || continue
-    while IFS= read -r line; do
+    # `read` returns non-zero at EOF even when it filled `line` from a final
+    # line with no trailing newline. Without the `|| [[ -n $line ]]`, that
+    # last entry is skipped - and if it is the only hostname-restricted key,
+    # UseDNS no would be written and reject it.
+    while IFS= read -r line || [[ -n $line ]]; do
       [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
       if [[ $line =~ from=\"([^\"]*)\" ]]; then
         from="${BASH_REMATCH[1]}"
@@ -1185,18 +1189,25 @@ check_users() {
 # ---------------------------------------------------------------------------
 # accounts (password quality)
 # ---------------------------------------------------------------------------
-# Interactive human accounts with a real password hash. Used by the
-# --password-ssh guard: if none exists, a password-ssh block with
-# PermitRootLogin no would leave no password login path. Optional arguments
-# exist for the test suite; production calls use the real files.
+# Interactive human accounts with a real password hash and no account
+# expiry. Used by the --password-ssh guard: if none exists, a password-ssh
+# block with PermitRootLogin no would leave no password login path. Optional
+# arguments exist for the test suite; production calls use the real files.
 password_login_accounts() {
   local passwd="${1:-/etc/passwd}" shadow="${2:-/etc/shadow}"
-  peek awk -F: '
+  # Shadow account-expiry days are days since the Unix epoch. Compare against
+  # the current UTC day so an account that PAM will reject is not counted as a
+  # password path. Empty (and -1, which chage uses for "no expiry") means no
+  # account expiry.
+  local today=$(( $(date -u +%s) / 86400 ))
+  peek awk -F: -v today="$today" '
     NR == FNR {
       if ($3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/) shell_ok[$1] = 1
       next
     }
-    ($1 in shell_ok) && $2 ~ /^\$[0-9a-z]/ { print $1 }
+    ($1 in shell_ok) &&
+      $2 ~ /^\$[0-9a-z]/ &&
+      ($8 == "" || $8 == "-1" || $8 + 0 > today) { print $1 }
   ' "$passwd" "$shadow" 2>/dev/null || true
 }
 

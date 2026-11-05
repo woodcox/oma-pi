@@ -3267,9 +3267,9 @@ printf '\npassword quality and service minimisation\n'
 
 test_password_login_accounts_filter() {
   # Only interactive human accounts with a real crypt hash: no root, no
-  # system/service users (UID below 1000), no nologin/false shells, and no
-  # locked/blank hash. A false positive here would let --password-ssh believe
-  # a service account is a way back in.
+  # system/service users (UID below 1000), no nologin/false shells, no
+  # locked/blank hash, and no expired account. A false positive here would let
+  # --password-ssh believe an unusable account is a way back in.
   setup_destdir
   local d rc=0 pw sh out
   d="$(mktemp -d)"
@@ -3282,6 +3282,8 @@ alice:x:1000:1000:Alice:/home/alice:/bin/bash
 locked:x:1001:1001:Locked:/home/locked:/bin/bash
 nologin:x:1002:1002:No Login:/home/nologin:/usr/sbin/nologin
 bob:x:1003:1003:Bob:/home/bob:/bin/zsh
+expired:x:1004:1004:Expired:/home/expired:/bin/bash
+future:x:1005:1005:Future:/home/future:/bin/bash
 EOF
   cat >"$sh" <<'EOF'
 root:$6$root$hash:19000:0:99999:7:::
@@ -3290,11 +3292,13 @@ alice:$y$j9T$alice$hash:19000:0:99999:7:::
 locked:!:19000:0:99999:7:::
 nologin:$6$nologin$hash:19000:0:99999:7:::
 bob:$6$bob$hash:19000:0:99999:7:::
+expired:$6$expired$hash:19000:0:99999:7::1:
+future:$6$future$hash:19000:0:99999:7::99999:
 EOF
   stub peek
   peek() { "$@"; }
   out="$(password_login_accounts "$pw" "$sh")"
-  [[ $out == $'alice\nbob' ]] || {
+  [[ $out == $'alice\nbob\nfuture' ]] || {
     printf '        filter selected the wrong accounts: [%s]\n' "$out"
     rc=1
   }
@@ -3738,12 +3742,18 @@ test_key_from_requires_dns_only_for_hostnames() {
   t="$(mktemp -d)"
   printf 'from="192.0.2.0/24,2001:db8::/32" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n' >"$t/ip"
   printf 'from="build.example.com" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n' >"$t/host"
+  # No trailing newline: the last entry must still be inspected.
+  printf 'from="last.example.com" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample' >"$t/no-newline"
   if key_from_requires_dns "$t/ip"; then
     printf '        an IP/CIDR from= rule was treated as a hostname\n'
     rc=1
   fi
   if ! key_from_requires_dns "$t/host"; then
     printf '        a hostname from= rule was not detected\n'
+    rc=1
+  fi
+  if ! key_from_requires_dns "$t/no-newline"; then
+    printf '        a final line without a newline was skipped\n'
     rc=1
   fi
   rm -rf "$t"
