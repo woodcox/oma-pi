@@ -2953,6 +2953,65 @@ test_account_policy_applies_expiry_to_existing_accounts() {
   return $rc
 }
 
+test_password_quality_dry_run_plans_pam() {
+  setup_destdir
+  mkdir -p "$CONF_DEST/etc"
+  local rc=0 out
+  DRY_RUN=1
+  out="$(configure_password_quality 2>&1)"
+  DRY_RUN=0
+  [[ $out == *"would write /etc/security/pwquality.conf.d/omapi-hardening.conf"* ]] || {
+    printf '        the quality drop-in was not planned: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"pam-auth-update --enable pwquality"* ]] || {
+    printf '        enabling the PAM profile was not planned: %s\n' "$out"
+    rc=1
+  }
+  [[ ! -e $CONF_DEST/etc/security/pwquality.conf.d/omapi-hardening.conf ]] || {
+    printf '        the dry run wrote the pwquality drop-in\n'
+    rc=1
+  }
+  teardown_destdir
+  return $rc
+}
+
+test_password_quality_writes_policy_and_enables_pam() {
+  setup_destdir
+  mkdir -p "$CONF_DEST/etc"
+  local f="$CONF_DEST/etc/security/pwquality.conf.d/omapi-hardening.conf" rc=0 out pam
+  pam="$(mktemp)"
+  printf '# stock common-password\n' >"$pam"
+  export OMAPI_COMMON_PASSWORD="$pam"
+  stub have_pwquality
+  have_pwquality() { return 0; }
+
+  out="$(configure_password_quality 2>&1)"
+
+  [[ -f $f ]] || {
+    printf '        the pwquality drop-in was not written\n'
+    rc=1
+  }
+  if [[ -f $f ]]; then
+    local setting
+    for setting in 'minlen = 15' 'minclass = 3' 'difok = 3' \
+      'dictcheck = 1' 'usercheck = 1' 'enforcing = 1'; do
+      grep -qx "$setting" "$f" || {
+        printf '        missing pwquality setting: %s\n' "$setting"
+        rc=1
+      }
+    done
+  fi
+  [[ $out == *"pam-auth-update --enable pwquality"* ]] || {
+    printf '        pam-auth-update --enable was not run: %s\n' "$out"
+    rc=1
+  }
+  unset OMAPI_COMMON_PASSWORD
+  rm -f "$pam"
+  teardown_destdir
+  return $rc
+}
+
 test_services_dry_run_touches_nothing() {
   setup_destdir
   # `stub run_root` would log the dry-run "would run" line too, which says
@@ -3252,6 +3311,8 @@ t 'account policy edits login.defs in place'            test_account_policy_repl
 t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
 t 'account policy filters login accounts'               test_password_login_accounts_filter
 t 'account policy expiry reaches existing accounts'     test_account_policy_applies_expiry_to_existing_accounts
+t 'password quality dry run plans PAM enablement'       test_password_quality_dry_run_plans_pam
+t 'password quality writes policy and enables PAM'      test_password_quality_writes_policy_and_enables_pam
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
 t 'service minimisation skips absent units'             test_services_skips_units_that_are_not_installed
 t 'service minimisation disables safe units'            test_services_disables_a_safe_unit_by_default

@@ -107,7 +107,7 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
-  accounts    30-day password expiry for human accounts
+  accounts    30-day password expiry + PAM quality checks
   services    stop and disable services a headless server does not need
   ssh         sshd hardening: no root login, key-only by default
               (--password-ssh keeps passwords), limits
@@ -826,6 +826,7 @@ install_hardening_packages() {
     apparmor-utils
     unattended-upgrades
     ca-certificates
+    libpam-pwquality
   )
 
   if ((DRY_RUN)); then
@@ -1088,6 +1089,74 @@ password_login_accounts() {
   ' "$passwd" "$shadow" 2>/dev/null || true
 }
 
+# Password quality is the control that makes 30-day rotation worth doing:
+# otherwise every new password can be the old one plus a digit. pam_pwquality
+# is enabled through pam-auth-update rather than by editing
+# /etc/pam.d/common-password by hand - a local edit there is exactly what
+# pam-auth-update refuses to overwrite later.
+have_pwquality() {
+  dpkg-query -W -f='${Status}' libpam-pwquality 2>/dev/null | grep -q 'ok installed'
+}
+
+configure_password_quality() {
+  step "Password quality (pam_pwquality)"
+
+  if ! ((DRY_RUN)) && ! have_pwquality; then
+    warn "libpam-pwquality is not installed, skipping (packages task installs it)"
+    return 0
+  fi
+
+  local common_password="${OMAPI_COMMON_PASSWORD:-/etc/pam.d/common-password}"
+
+  # A drop-in, not the packaged /etc/security/pwquality.conf: package updates
+  # own that file. libpwquality reads pwquality.conf.d/*.conf after it.
+  if ! write_conf /etc/security/pwquality.conf.d/omapi-hardening.conf <<'EOF'
+# Managed by oma-pi omapi-harden. Re-run the script to change these.
+# Enforced by pam_pwquality at passwd/chage time, including the PAM
+# password-change prompt over SSH.
+minlen = 15
+minclass = 3
+difok = 3
+maxrepeat = 3
+maxclassrepeat = 4
+maxsequence = 3
+dictcheck = 1
+usercheck = 1
+enforcing = 1
+EOF
+  then
+    warn "password quality policy was not written"
+    return 0
+  fi
+
+  if ((DRY_RUN)); then
+    note "would run: pam-auth-update --enable pwquality"
+    return 0
+  fi
+
+  if grep -qE '^[^#]*pam_pwquality\.so' "$common_password" 2>/dev/null; then
+    ok "pam_pwquality is enabled"
+    return 0
+  fi
+
+  if ! have pam-auth-update; then
+    warn "pam-auth-update is not available; enable pam_pwquality in /etc/pam.d/common-password by hand"
+    return 0
+  fi
+
+  if run_root env DEBIAN_FRONTEND=noninteractive pam-auth-update --enable pwquality; then
+    if grep -qE '^[^#]*pam_pwquality\.so' "$common_password" 2>/dev/null; then
+      ok "pam_pwquality enabled (undo: sudo pam-auth-update --disable pwquality)"
+    else
+      warn "pam-auth-update returned success but common-password does not mention pam_pwquality"
+    fi
+  else
+    warn "could not enable pam_pwquality; password changes are NOT being checked"
+    note "if pam-auth-update reported local changes, merge /etc/pam.d/common-password by hand"
+    note "the policy is in /etc/security/pwquality.conf.d/omapi-hardening.conf"
+  fi
+}
+
 configure_account_policy() {
   section "Account policy (30-day password age)"
 
@@ -1097,6 +1166,8 @@ configure_account_policy() {
     warn "password ageing defaults were not applied"
     return 0
   fi
+
+  configure_password_quality
 
   if ((!DRY_RUN)); then
     # Report what actually landed, not what was asked for.

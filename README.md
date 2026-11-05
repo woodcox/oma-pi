@@ -138,6 +138,11 @@ system/service accounts are left alone. An existing password already older than
 survives, and password SSH goes through PAM's password-change prompt, but a
 key-only or automation login can be refused until the password is changed from
 a console. Keep a tested console or key recovery route before the first run.
+Password changes are checked by `pam_pwquality` (enabled through
+`pam-auth-update`): 15 characters minimum, at least three character classes, no
+username or dictionary matches, and no trivial repeats or sequences, so 30-day
+rotation cannot be satisfied with an incrementing weak password. Undo the PAM
+profile with `sudo pam-auth-update --disable pwquality`.
 `UMASK` is deliberately left alone: a group-restricted umask saves
 nothing on a single-admin box and breaks anything the box writes for others to
 read.
