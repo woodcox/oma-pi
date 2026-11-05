@@ -22,10 +22,6 @@ command -v script &>/dev/null || {
   echo "skip: needs \`script\` (bsdutils) to provide a pseudo-tty" >&2
   exit 77
 }
-command -v jq &>/dev/null || {
-  echo "skip: needs jq for the lock-file claiming test" >&2
-  exit 77
-}
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -33,6 +29,9 @@ BIN="$SANDBOX/bin"
 LOGS="$SANDBOX/logs"
 HOMES="$SANDBOX/homes"
 mkdir -p "$BIN" "$LOGS" "$HOMES"
+# Logged outside any fake HOME so the isolated-HOME run can append to it too.
+FAKE_BUNX_LOG="$LOGS/bunx-args.log"
+export FAKE_BUNX_LOG
 
 # ---------------------------------------------------------------- fake agents
 
@@ -42,6 +41,7 @@ mkdir -p "$BIN" "$LOGS" "$HOMES"
 cat >"$BIN/bunx" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_BUNX_LOG:?}"
 [[ ${1:-} == skills@latest ]] || { echo "fake-bunx: unexpected command: $*" >&2; exit 1; }
 shift
 [[ ${1:-} == add ]] || { echo "fake-bunx: expected add" >&2; exit 1; }
@@ -104,12 +104,16 @@ chmod +x "$BIN"/*
 # ------------------------------------------------------------------ plumbing
 
 # Run install_ai_skills in a named fake home, under a pseudo-tty so the fake
-# gum can receive its </dev/tty stdin.
+# gum can receive its </dev/tty stdin. The exit status is asserted too: the
+# checks alone cannot notice an installer that failed halfway.
+CASE_STATUS=0
 run_case() {
   local home="$1" choice="${2:-}"
+  CASE_STATUS=0
   OMA_TEST_CHOICE="$choice" script -qec \
     "set -euo pipefail; export PATH='$BIN:$PATH' HOME='$home' OMA_TEST_CHOICE='$choice';
-     source '$SOURCE_FILE'; install_ai_skills" /dev/null
+     source '$SOURCE_FILE'; install_ai_skills" /dev/null || CASE_STATUS=$?
+  check "installer exit status ($(basename "$home"))" '[[ $CASE_STATUS -eq 0 ]]'
 }
 
 check() {  # check <desc> <expr>   (expr is evaluated as a command)
@@ -129,12 +133,15 @@ linkname() { readlink "$1" 2>/dev/null; }
 # ------------------------------------------------------------------- the tests
 
 echo "=== T1: fresh install, no conflicts ==="
+: >"$FAKE_BUNX_LOG"
 run_case "$HOMES/t1" >/dev/null 2>&1
 H="$HOMES/t1"
 check "canonical marked"     '[[ $(marker "$H/.agents/skills/tdd") == "mattpocock/skills" ]]'
 check "claude link created"  '[[ $(linkname "$H/.claude/skills/tdd") == *".agents/skills/tdd" ]]'
 check "claude link works"    'grep -q "name: tdd" "$H/.claude/skills/tdd/SKILL.md"'
 check "hermes copy created"  'grep -q "name: tdd" "$H/.hermes/skills/tdd/SKILL.md"'
+check "CLI calls target opencode only" \
+  '[[ -s "$FAKE_BUNX_LOG" && $(grep -vc -- "-a opencode$" "$FAKE_BUNX_LOG") -eq 0 ]]'
 
 echo "=== T2: research collides everywhere; choice = rename ==="
 H="$HOMES/t2"
@@ -156,7 +163,7 @@ check "other skills installed"    'grep -q "name: tdd" "$H/.agents/skills/tdd/SK
 echo "=== T3: rerun with gum failing → stored rename applies, no prompt ==="
 rm -rf "$HOMES/t3"; cp -a "$H" "$HOMES/t3"
 run_case "$HOMES/t3" none >"$LOGS/t3.out" 2>&1
-check "no prompt on rerun"        '! grep -q "could not resolve the conflict" "$LOGS/t3.out"'
+check "no prompt on rerun"        '! grep -q "These skill entries already exist" "$LOGS/t3.out"'
 check "foreign entries survived"  'grep -q "claude bundled" "$HOMES/t3/.claude/skills/research/notes.md"'
 check "renamed copy intact"       'grep -q "name: research-mattpocock-skills" "$HOMES/t3/.agents/skills/research-mattpocock-skills/SKILL.md"'
 
@@ -172,35 +179,44 @@ check "canonical replaced marker" '[[ $(marker "$H/.agents/skills/research") == 
 check "claude research replaced"  'grep -q "name: research" "$H/.claude/skills/research/SKILL.md"'
 check "hermes research replaced"  'grep -q "name: research" "$H/.hermes/skills/research/SKILL.md"'
 
-echo "=== T5: claude-only collision, canonical ours → rename; foreign survives ==="
+echo "=== T5: managed canonical research + claude collision → global rename ==="
 H="$HOMES/t5"
-mkdir -p "$H/.agents/skills" "$H/.claude/skills/research"
+mkdir -p "$H/.agents/skills/research"
+printf '%s\n' --- "name: research" description: seeded --- body >"$H/.agents/skills/research/SKILL.md"
+printf '%s\n' 'mattpocock/skills' >"$H/.agents/skills/research/.oma-pi-skill-source"
+run_case "$H" >/dev/null 2>&1          # no collision yet: links the seeded copy
+rm -f "$H/.claude/skills/research"     # replace the link with a foreign entry
+mkdir -p "$H/.claude/skills/research"
 echo "claude bundled" >"$H/.claude/skills/research/notes.md"
-run_case "$H" >/dev/null 2>&1
 rm -f "$H/.agents/.oma-pi-skill-choices"
 run_case "$H" rename >"$LOGS/t5.out" 2>&1
+check "managed canonical intact"  '[[ $(marker "$H/.agents/skills/research") == "mattpocock/skills" ]]'
 check "renamed canonical copy"    'grep -q "name: research-mattpocock-skills" "$H/.agents/skills/research-mattpocock-skills/SKILL.md"'
 check "claude foreign intact"     'grep -q "claude bundled" "$H/.claude/skills/research/notes.md"'
 check "claude gets renamed link"  'grep -q "name: research-mattpocock-skills" "$H/.claude/skills/research-mattpocock-skills/SKILL.md"'
 check "hermes gets renamed copy"  'grep -q "name: research-mattpocock-skills" "$H/.hermes/skills/research-mattpocock-skills/SKILL.md"'
 
-echo "=== T6: claude link repair on refresh ==="
+echo "=== T6: claude link repair and stale Hermes copy refresh ==="
 H="$HOMES/t6"
 run_case "$H" >/dev/null 2>&1
 rm -f "$H/.claude/skills/tdd"
 run_case "$H" >"$LOGS/t6.out" 2>&1
 check "link repaired"  '[[ $(linkname "$H/.claude/skills/tdd") == *".agents/skills/tdd" ]]'
+echo "stale" >>"$H/.hermes/skills/tdd/SKILL.md"
+run_case "$H" >"$LOGS/t6-refresh.out" 2>&1
+check "hermes copy refreshed" '! grep -q stale "$H/.hermes/skills/tdd/SKILL.md"'
 
-echo "=== T7: pre-marker CLI installs are claimed from the lock ==="
+echo "=== T7: unmarked canonical copy prompts once; the choice sticks ==="
 H="$HOMES/t7"
-mkdir -p "$H/.agents/skills/tdd"
-printf '%s\n' --- "name: tdd" description: x --- body >"$H/.agents/skills/tdd/SKILL.md"
-printf '%s\n' '{"skills": {"tdd": {"source": "mattpocock/skills"}}}' >"$H/.agents/.skill-lock.json"
-run_case "$H" >"$LOGS/t7.out" 2>&1
-check "claimed from lock"      'grep -q "claimed tdd" "$LOGS/t7.out"'
-check "claimed marker written" '[[ $(marker "$H/.agents/skills/tdd") == "mattpocock/skills" ]]'
-check "no prompt for claimed"  '! grep -q "not managed by oma-pi" "$LOGS/t7.out"'
-check "claude link created"    '[[ $(linkname "$H/.claude/skills/tdd") == *".agents/skills/tdd" ]]'
+mkdir -p "$H/.agents/skills/research"
+echo "canonical foreign" >"$H/.agents/skills/research/SKILL.md"
+run_case "$H" skip >"$LOGS/t7.out" 2>&1
+check "prompt shown"              'grep -q "These skill entries already exist" "$LOGS/t7.out"'
+check "choice recorded"           'awk -F "\t" '\''$1=="research" && $2=="skip"'\'' "$H/.agents/.oma-pi-skill-choices" | grep -q .'
+check "foreign canonical intact"  'grep -q "canonical foreign" "$H/.agents/skills/research/SKILL.md"'
+check "claude got a real copy"    '[[ ! -L "$H/.claude/skills/research" && -d "$H/.claude/skills/research" ]]'
+run_case "$H" none >"$LOGS/t7-rerun.out" 2>&1
+check "no repeat prompt"          '! grep -q "These skill entries already exist" "$LOGS/t7-rerun.out"'
 
 echo "=== T8: stored skip + foreign canonical + free hermes → hermes gets it ==="
 H="$HOMES/t8"
@@ -215,6 +231,18 @@ check "hermes research marked"    '[[ $(marker "$H/.hermes/skills/research") == 
 check "claude gets real copy"     '[[ ! -L "$H/.claude/skills/research" && -d "$H/.claude/skills/research" ]]'
 check "claude copy works"         'grep -q "name: research" "$H/.claude/skills/research/SKILL.md"'
 check "other skills still fine"   'grep -q "name: tdd" "$H/.hermes/skills/tdd/SKILL.md"'
+run_case "$H" none >"$LOGS/t8-rerun.out" 2>&1
+check "skip rerun has no false error" '! grep -q "no usable copy" "$LOGS/t8-rerun.out"'
+
+echo "=== T9: legacy three-field choice rows still apply ==="
+H="$HOMES/t9"
+mkdir -p "$H/.agents/skills/research" "$H/.claude/skills/research"
+echo "canonical foreign" >"$H/.agents/skills/research/SKILL.md"
+echo "claude bundled" >"$H/.claude/skills/research/notes.md"
+printf '%s\t%s\t%s\n' 'research' 'rename' 'research-old-target' >"$H/.agents/.oma-pi-skill-choices"
+run_case "$H" none >"$LOGS/t9.out" 2>&1
+check "legacy row used, no prompt" '! grep -q "These skill entries already exist" "$LOGS/t9.out"'
+check "rename applied"             'grep -q "name: research-mattpocock-skills" "$H/.agents/skills/research-mattpocock-skills/SKILL.md"'
 
 echo
 echo "passed: $PASS  failed: $FAIL"
