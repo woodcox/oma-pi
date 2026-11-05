@@ -1464,6 +1464,91 @@ test_passwordless_sudo_unreadable_is_not_called_clean() {
   return $rc
 }
 
+test_console_autologin_is_reported() {
+  # A getty drop-in or LightDM config with autologin gives physical access a
+  # passwordless shell. Both must be found, and a commented-out line must not
+  # produce a finding.
+  setup_destdir
+  local rc=0 t out
+  t="$(mktemp -d)"
+  mkdir -p "$t/system/getty@tty1.service.d" \
+    "$t/system/serial-getty@ttyS0.service.d" \
+    "$t/lightdm/lightdm.conf.d"
+  cat >"$t/system/getty@tty1.service.d/autologin.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM
+EOF
+  cat >"$t/system/serial-getty@ttyS0.service.d/old.conf" <<'EOF'
+# ExecStart=-/sbin/agetty --autologin old --noclear %I $TERM
+EOF
+  cat >"$t/lightdm/lightdm.conf.d/autologin.conf" <<'EOF'
+[Seat:*]
+autologin-user=pi
+EOF
+  export OMAPI_GETTY_DIR="$t/system"
+  export OMAPI_LIGHTDM_DIR="$t/lightdm"
+
+  out="$(check_console_autologin 2>&1)"
+
+  [[ $out == *"console autologin is enabled"* ]] || {
+    printf '        autologin was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"getty@tty1.service.d/autologin.conf"* ]] || {
+    printf '        the getty drop-in was not named: %s\n' "$out"
+    rc=1
+  }
+  [[ $out == *"lightdm.conf.d/autologin.conf"* ]] || {
+    printf '        the LightDM config was not named: %s\n' "$out"
+    rc=1
+  }
+  [[ $(grep -c "autologin user 'pi'" <<<"$out") -eq 2 ]] || {
+    printf '        expected getty and LightDM to report the user: %s\n' "$out"
+    rc=1
+  }
+  [[ $out != *"autologin old"* ]] || {
+    printf '        a commented-out getty line was reported\n'
+    rc=1
+  }
+  unset OMAPI_GETTY_DIR OMAPI_LIGHTDM_DIR
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
+test_console_autologin_clean_is_not_a_warning() {
+  setup_destdir
+  local rc=0 t out
+  t="$(mktemp -d)"
+  mkdir -p "$t/system/getty@tty1.service.d" "$t/lightdm/lightdm.conf.d"
+  cat >"$t/system/getty@tty1.service.d/getty.conf" <<'EOF'
+[Service]
+ExecStart=-/sbin/agetty --noclear %I $TERM
+EOF
+  cat >"$t/lightdm/lightdm.conf.d/seat.conf" <<'EOF'
+[Seat:*]
+# autologin-user=pi
+EOF
+  export OMAPI_GETTY_DIR="$t/system"
+  export OMAPI_LIGHTDM_DIR="$t/lightdm"
+
+  out="$(check_console_autologin 2>&1)"
+
+  [[ $out == *"console autologin is off"* ]] || {
+    printf '        the clean path was not reported: %s\n' "$out"
+    rc=1
+  }
+  [[ $out != *"console autologin is enabled"* ]] || {
+    printf '        a commented-out autologin line was treated as a finding\n'
+    rc=1
+  }
+  unset OMAPI_GETTY_DIR OMAPI_LIGHTDM_DIR
+  rm -rf "$t"
+  teardown_destdir
+  return $rc
+}
+
 test_ask_never_passes_a_flag_gum_will_reject() {
   # gum v2.0.2 has no --default-no (added in 2.1) and exits 80 on it, so every
   # prompt whose default is "no" died. The v2.0.x spelling is --default=false,
@@ -3456,6 +3541,8 @@ t 'pi is kept when it is the only password account'   test_pi_is_not_locked_when
 t 'passwordless sudo rules are reported'              test_passwordless_sudo_is_reported
 t 'absent passwordless sudo is reported clean'        test_passwordless_sudo_clean_is_not_a_warning
 t 'unreadable sudoers is not called clean'            test_passwordless_sudo_unreadable_is_not_called_clean
+t 'console autologin is reported'                     test_console_autologin_is_reported
+t 'absent console autologin is not a warning'         test_console_autologin_clean_is_not_a_warning
 t 'ask never passes a flag gum will reject'   test_ask_never_passes_a_flag_gum_will_reject
 t 'SSH writes and rollback use privilege' test_harden_ssh_privileged_transaction
 t 'harden_ssh write preserves mode'       test_harden_ssh_write_preserves_mode

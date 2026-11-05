@@ -107,7 +107,7 @@ this script would report a move that never happened. See the README.
 Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
-              and flag passwordless sudo
+              and flag passwordless sudo / console autologin
   accounts    30-day password expiry + PAM quality checks
   services    stop and disable services a headless server does not need
   ssh         sshd hardening: no root login, key-only by default
@@ -932,6 +932,96 @@ check_passwordless_sudo() {
   note "review with 'sudo visudo' (or 'sudo visudo -f <file>') and remove NOPASSWD / !authenticate"
 }
 
+# Console autologin bypasses everything SSH does: whoever touches the keyboard
+# gets a shell as the configured user without a password. Report, never change
+# it - a kiosk or photo frame may rely on autologin, and guessing wrong means
+# the box no longer does its job. OMAPI_GETTY_DIR / OMAPI_LIGHTDM_DIR exist so
+# the tests can point this at fixtures.
+check_console_autologin() {
+  local system_dir="${OMAPI_GETTY_DIR:-/etc/systemd/system}"
+  local lightdm_dir="${OMAPI_LIGHTDM_DIR:-/etc/lightdm}"
+  local -a getty_files=() lightdm_files=() unreadable=()
+  local d f incomplete=0
+
+  if [[ -d $system_dir ]]; then
+    if [[ ! -r $system_dir ]]; then
+      incomplete=1
+    fi
+    for d in "$system_dir"/getty@*.service.d "$system_dir"/serial-getty@*.service.d; do
+      [[ -d $d ]] || continue
+      if [[ ! -r $d ]]; then
+        incomplete=1
+        continue
+      fi
+      for f in "$d"/*.conf; do
+        [[ -f $f ]] || continue
+        if [[ -r $f ]]; then
+          getty_files+=("$f")
+        else
+          unreadable+=("$f")
+          incomplete=1
+        fi
+      done
+    done
+  fi
+
+  if [[ -d $lightdm_dir ]]; then
+    for f in "$lightdm_dir"/lightdm.conf "$lightdm_dir"/lightdm.conf.d/*.conf; do
+      [[ -f $f ]] || continue
+      if [[ -r $f ]]; then
+        lightdm_files+=("$f")
+      else
+        unreadable+=("$f")
+        incomplete=1
+      fi
+    done
+  fi
+
+  local -a findings=()
+  local line who
+  for f in "${getty_files[@]}"; do
+    while IFS= read -r line; do
+      [[ $line =~ ^[[:space:]]*# ]] && continue
+      if [[ $line =~ --autologin[[:space:]=]+([^[:space:]]+) ]]; then
+        who="${BASH_REMATCH[1]}"
+        findings+=("${f}: autologin user '${who}' -- ${line}")
+      fi
+    done <"$f"
+  done
+  for f in "${lightdm_files[@]}"; do
+    while IFS= read -r line; do
+      [[ $line =~ ^[[:space:]]*# ]] && continue
+      if [[ $line =~ ^[[:space:]]*autologin-user[[:space:]]*=[[:space:]]*([^[:space:]]+) ]]; then
+        who="${BASH_REMATCH[1]}"
+        findings+=("${f}: autologin user '${who}' -- ${line}")
+      fi
+    done <"$f"
+  done
+
+  if ((${#findings[@]})); then
+    warn "console autologin is enabled:"
+    for line in "${findings[@]}"; do
+      printf '      %s\n' "$line"
+    done
+    note "anyone with physical access gets a shell without a password"
+    note "turn it off with 'sudo raspi-config' (System Options > Auto Login), or remove the --autologin / autologin-user line"
+  fi
+
+  if ((${#unreadable[@]})); then
+    for f in "${unreadable[@]}"; do
+      warn "could not read ${f}; autologin was NOT checked there"
+    done
+  fi
+  if ((incomplete)); then
+    warn "some autologin drop-ins could not be read; autologin was NOT fully checked"
+    return 0
+  fi
+
+  if ((${#findings[@]} == 0)); then
+    ok "console autologin is off"
+  fi
+}
+
 check_users() {
   section "Users and accounts"
 
@@ -1033,6 +1123,7 @@ check_users() {
   fi
 
   check_passwordless_sudo
+  check_console_autologin
 
   # Report, do not touch: accounts that have never logged in are the ones
   # most likely to still carry a default or reused password.
