@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 #
-# Tests for omapi-harden. Sourced, never executed, so main() never runs.
+# Tests for shippi-harden. Sourced, never executed, so main() never runs.
 #
 # The interesting tests here are the ones that check the script cannot lock
 # you out of your own machine. A hardening script is only ever as good as
 # its worst failure mode, and that failure mode is a Pi you cannot ssh into.
 #
-# Run: ./test/omapi-harden-test.sh
+# Run: ./test/shippi-harden-test.sh
 set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$TEST_DIR/bin/omapi-harden"
+SCRIPT="$TEST_DIR/bin/shippi-harden"
 PASS=0
 FAIL=0
 # Test functions already run, so t() can reject a duplicate registration
 # rather than silently running the same test twice and counting it twice.
 _SEEN_TESTS=()
 
-# shellcheck source=../bin/omapi-harden
+# shellcheck source=../bin/shippi-harden
 source "$SCRIPT"
 
 # Snapshot the script's own functions, so t() can tell when a test has
@@ -35,9 +35,9 @@ done
 unset _f
 
 setup_destdir() {
-  OMAPI_SECURITY_DESTDIR="$(mktemp -d)"
-  export OMAPI_SECURITY_DESTDIR
-  CONF_DEST="$OMAPI_SECURITY_DESTDIR"
+  SHIPPI_SECURITY_DESTDIR="$(mktemp -d)"
+  export SHIPPI_SECURITY_DESTDIR
+  CONF_DEST="$SHIPPI_SECURITY_DESTDIR"
   DRY_RUN=0
   ASSUME_YES=1
   # Stub every privileged call. Without this the tests are not "no root
@@ -132,7 +132,7 @@ teardown_destdir() {
   [[ -n ${_SAVED_PEEK:-} ]] && eval "$_SAVED_PEEK"
   _SAVED_HAVE="" _SAVED_RUN_ROOT="" _SAVED_PRIV="" _SAVED_PEEK=""
   [[ -n $CONF_DEST ]] && rm -rf "$CONF_DEST"
-  unset OMAPI_SECURITY_DESTDIR
+  unset SHIPPI_SECURITY_DESTDIR
   CONF_DEST=""
   DRY_RUN=0
   ASSUME_YES=0
@@ -331,7 +331,7 @@ test_no_lockout_with_second_path_only() {
   setup_destdir
   local home; home="$(mktemp -d)"
   mkdir -p "$home/.ssh"
-  ssh-keygen -q -t ed25519 -N '' -C 'second@omapi' -f "$home/id" </dev/null >/dev/null 2>&1
+  ssh-keygen -q -t ed25519 -N '' -C 'second@shippi' -f "$home/id" </dev/null >/dev/null 2>&1
   cp "$home/id.pub" "$home/.ssh/authorized_keys2"
   chmod 600 "$home/.ssh/authorized_keys2"
 
@@ -349,7 +349,7 @@ test_usable_key_rejects_real_private_key() {
   # wrong reason.
   setup_destdir
   local d; d="$(mktemp -d)"
-  ssh-keygen -q -t ed25519 -N '' -C 'priv@omapi' -f "$d/id" </dev/null >/dev/null 2>&1
+  ssh-keygen -q -t ed25519 -N '' -C 'priv@shippi' -f "$d/id" </dev/null >/dev/null 2>&1
   local rc=0
   # Sanity: ssh-keygen really does accept it, which is why the guard is needed.
   ssh-keygen -l -f "$d/id" &>/dev/null || rc=1
@@ -372,7 +372,7 @@ test_usable_key_rejects_empty_file() {
 
 test_usable_key_accepts_real_key() {
   local f; f="$(mktemp -d)"
-  ssh-keygen -q -t ed25519 -N '' -C 'test@omapi' -f "$f/id" </dev/null >/dev/null 2>&1 || return 1
+  ssh-keygen -q -t ed25519 -N '' -C 'test@shippi' -f "$f/id" </dev/null >/dev/null 2>&1 || return 1
   cat "$f/id.pub" >"$f/authorized_keys"
   have_usable_key "$f/authorized_keys"
   local rc=$?
@@ -432,7 +432,7 @@ EOF
   [[ $parsed == *"tcp 22"* ]]
 }
 
-# Runs the REAL parser from omapi-harden against the given fixture. A copied
+# Runs the REAL parser from shippi-harden against the given fixture. A copied
 # duplicate of the awk program is what let a broken parser pass its own test.
 _parse_ports() {
   listening_ports "$1"
@@ -462,7 +462,7 @@ test_apt_config_origins_match_os_release() {
   local codename
   codename="$(awk -F= '/^VERSION_CODENAME=/{gsub(/"/, "", $2); print $2}' /etc/os-release)"
   [[ -n $codename ]] || { teardown_destdir; return 0; }
-  grep -q "${codename}-security" "$CONF_DEST/etc/apt/apt.conf.d/51omapi-origins"
+  grep -q "${codename}-security" "$CONF_DEST/etc/apt/apt.conf.d/51shippi-origins"
   local rc=$?
   teardown_destdir
   return $rc
@@ -509,7 +509,7 @@ test_rpi_archive_is_allowed_when_this_box_has_it() {
     printf ' 500 http://archive.raspberrypi.com/debian bookworm/main arm64 Packages\n%s\n' "$release"
   }
   configure_updates >/dev/null 2>&1
-  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51omapi-origins" rc=0
+  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51shippi-origins" rc=0
   [[ -f $cfg ]] || rc=1
   grep -qF '"Raspberry Pi Foundation:bookworm";' "$cfg" || rc=1
   teardown_destdir
@@ -523,7 +523,7 @@ test_third_party_repos_are_never_auto_upgraded() {
   # stack is a far worse outcome than a patch that waits for a human.
   setup_destdir
   configure_updates >/dev/null 2>&1
-  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51omapi-origins" rc=0
+  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51shippi-origins" rc=0
   [[ -f $cfg ]] || rc=1
   grep -qiE 'tailscale|docker|charm|gierens|"gh:|cli\.github' "$cfg" && rc=1
   teardown_destdir
@@ -657,7 +657,7 @@ test_dry_run_touches_nothing() {
   local before rc=0
   before="$(cat "$CONF_DEST/etc/ssh/sshd_config")"
   DRY_RUN=1
-  write_conf /etc/fail2ban/jail.d/omapi-hardening.local <<<'ignored'
+  write_conf /etc/fail2ban/jail.d/shippi-hardening.local <<<'ignored'
   local block; block="$(mktemp)"
   printf '%s\nPasswordAuthentication no\n%s\n' "$MANAGED_BEGIN" "$MANAGED_END" >"$block"
   replace_managed_block "$block" /etc/ssh/sshd_config
@@ -828,7 +828,7 @@ test_force_flag_is_not_accepted() {
   # script must never offer. It has been removed, so it must now be rejected.
   #
   # Uses `bash "$SCRIPT"` and the same rc-then-assert shape as
-  # test_unknown_option_rejected: the earlier version ran omapi-harden with
+  # test_unknown_option_rejected: the earlier version ran shippi-harden with
   # `|| rc=1` under a test-local `local rc=0`, so the non-zero exit it saw
   # from the rejection and the non-zero exit it expected were indistinguishable.
   local out rc
@@ -916,15 +916,15 @@ test_docker_loopback_survives_a_missing_protocol_suffix() {
 
 test_dry_run_does_not_create_directories() {
   # `install -d` used to run before the dry-run return in
-  # replace_managed_block, so `omapi-harden --dry-run` created /etc/ssh and
+  # replace_managed_block, so `shippi-harden --dry-run` created /etc/ssh and
   # /etc/ufw. A dry run that mutates the filesystem is not a dry run.
   setup_destdir
   local rc=0 d="$CONF_DEST/etc/brand-new-dir"
   DRY_RUN=1
   local block; block="$(mktemp)"
-  printf '# BEGIN OMAPI MANAGED\nx\n# END OMAPI MANAGED\n' >"$block"
+  printf '# BEGIN SHIPPI MANAGED\nx\n# END SHIPPI MANAGED\n' >"$block"
   replace_managed_block "$block" /etc/brand-new-dir/file.conf \
-    '# BEGIN OMAPI MANAGED' '# END OMAPI MANAGED' >/dev/null 2>&1
+    '# BEGIN SHIPPI MANAGED' '# END SHIPPI MANAGED' >/dev/null 2>&1
   rm -f "$block"
   DRY_RUN=0
   if [[ -d $d ]]; then
@@ -1165,7 +1165,7 @@ test_a_failing_awk_in_the_port_rewrite_is_not_silent() {
   # GLM finding 3. A failure inside `awk && cat && rm` is exempt from set -e, so
   # the Port rewrite used to fail silently: harden_ssh returned 0, printed
   # "sshd accepts the new config", left two active `Port` lines and a stray
-  # .omapi-tmp, and warned about nothing. A config write that failed silently
+  # .shippi-tmp, and warned about nothing. A config write that failed silently
   # is the worst case there is here.
   setup_destdir
   local rc=0
@@ -1196,8 +1196,8 @@ test_a_failing_awk_in_the_port_rewrite_is_not_silent() {
     rc=1
   fi
   # And no temp file left behind.
-  if [[ -n $(find "$CONF_DEST" -name '*.omapi-tmp' 2>/dev/null) ]]; then
-    printf '        a .omapi-tmp file was left behind after the failure\n'
+  if [[ -n $(find "$CONF_DEST" -name '*.shippi-tmp' 2>/dev/null) ]]; then
+    printf '        a .shippi-tmp file was left behind after the failure\n'
     rc=1
   fi
   teardown_destdir
@@ -1360,7 +1360,7 @@ test_ask_never_passes_a_flag_gum_will_reject() {
   # (whose default is Yes) is used for a default-n prompt.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   # Only actual invocations, not the comment that explains why the flag is
   # wrong - the file legitimately mentions it there.
   if grep -qE '^[[:space:]]*gum confirm .*--default-no' "$f"; then
@@ -1459,7 +1459,7 @@ test_validator_requires_both_markers() {
   # unprivileged path still refuses rather than claiming success.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if ! grep -qF 'grep -qFx "$DOCKER_UFW_BEGIN"' "$f"; then
     printf '        the validator does not require both markers before trusting the parse\n'
     rc=1
@@ -1494,7 +1494,7 @@ test_apparmor_does_not_claim_success_it_cannot_confirm() {
   # literal "?" placeholders and exited 0.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -q 'ok "apparmor enabled (\${enforced:-?}' "$f"; then
     printf '        apparmor still reports success unconditionally\n'
     rc=1
@@ -1508,8 +1508,8 @@ test_reachable_is_only_reported_when_the_rule_was_added() {
   # the report, so a rejected rule printed a warning AND a success line.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
-  if grep -q 'comment "omapi: \${name}" || warn "could not add a route rule' "$f"; then
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
+  if grep -q 'comment "shippi: \${name}" || warn "could not add a route rule' "$f"; then
     printf '        the reachable line is still unconditional after a failed rule\n'
     rc=1
   fi
@@ -1529,7 +1529,7 @@ test_unattended_upgrade_check_is_not_tautological() {
   # box this was written on.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -q "apt-config dump | grep -q Unattended-Upgrade" "$f"; then
     printf '        still checking for the package config, not for origins\n'
     rc=1
@@ -1586,12 +1586,12 @@ test_harden_ssh_privileged_transaction() {
     local privileged=1 status=0
     command chmod 755 "$d" "$d/sshd_config.d"
     # Inject failures only at the transaction's own staging/backup operations.
-    if [[ $scenario == backup && $1 == cp && ${!#} == "$main.omapi-backup" ]] ||
-       [[ $scenario == stage && $1 == cp && ${!#} == "$main.omapi-tmp" ]] ||
-       [[ $scenario == mode && $1 == chmod && ${!#} == "$main.omapi-tmp" ]] ||
-       [[ $scenario == owner && $1 == chown && ${!#} == "$main.omapi-tmp" ]] ||
-       [[ $scenario == rename && $1 == mv && ${!#} == "$main" && $3 == "$main.omapi-tmp" ]] ||
-       [[ $scenario == drop_stage && $1 == cp && ${!#} == "$drop.omapi-tmp" ]]; then
+    if [[ $scenario == backup && $1 == cp && ${!#} == "$main.shippi-backup" ]] ||
+       [[ $scenario == stage && $1 == cp && ${!#} == "$main.shippi-tmp" ]] ||
+       [[ $scenario == mode && $1 == chmod && ${!#} == "$main.shippi-tmp" ]] ||
+       [[ $scenario == owner && $1 == chown && ${!#} == "$main.shippi-tmp" ]] ||
+       [[ $scenario == rename && $1 == mv && ${!#} == "$main" && $3 == "$main.shippi-tmp" ]] ||
+       [[ $scenario == drop_stage && $1 == cp && ${!#} == "$drop.shippi-tmp" ]]; then
       injected=1
       [[ $scenario == *stage ]] && printf 'partial\n' >"${!#}"
       status=1
@@ -1630,7 +1630,7 @@ test_harden_ssh_privileged_transaction() {
           assert_eq "$injected" 1 || rc=1
           assert_eq "$(cat "$drop")" "$drop_content" || rc=1
         fi
-        [[ ! -e $drop.omapi-backup ]] || rc=1
+        [[ ! -e $drop.shippi-backup ]] || rc=1
         ;;
       *)
         assert_eq "$hrc" 1 || rc=1
@@ -1646,7 +1646,7 @@ test_harden_ssh_privileged_transaction() {
     esac
     assert_eq "$(stat -c %a "$main")" 640 || rc=1
     assert_eq "$(stat -c %a "$drop")" 600 || rc=1
-    if [[ -e $main.omapi-tmp || -e $drop.omapi-tmp ]]; then
+    if [[ -e $main.shippi-tmp || -e $drop.shippi-tmp ]]; then
       printf '        %s: staging file left behind\n' "$scenario"
       rc=1
     fi
@@ -1670,7 +1670,7 @@ test_harden_ssh_write_preserves_mode() {
   local d="$CONF_DEST/etc/ssh"
   mkdir -p "$d/sshd_config.d"
   local main="$d/sshd_config"
-  local drop="$d/sshd_config.d/99-omapi.conf"
+  local drop="$d/sshd_config.d/99-shippi.conf"
   printf 'Port 22\nPermitRootLogin yes\n' >"$main"; chmod 600 "$main"
   # 0600 for the drop-in too, deliberately. At 0644 the staged file inherits the
   # same mode, so an unguarded rename is invisible - which is how the missing
@@ -1713,7 +1713,7 @@ test_harden_ssh_write_preserves_mode() {
   fi
   # And no staging file may survive a successful write.
   local leftovers
-  leftovers="$(ls "$d"/*.omapi-tmp "$d"/sshd_config.d/*.omapi-tmp 2>/dev/null | wc -l)"
+  leftovers="$(ls "$d"/*.shippi-tmp "$d"/sshd_config.d/*.shippi-tmp 2>/dev/null | wc -l)"
   if [[ $leftovers -ne 0 ]]; then
     printf '        %s staging file(s) left behind\n' "$leftovers"
     rc=1
@@ -1730,7 +1730,7 @@ test_harden_ssh_survives_an_unopenable_tty() {
   # anything was written. Reproduced here.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   # The probe must actually open the tty, not just test for it.
   if ! grep -q '(: </dev/tty) 2>/dev/null' "$f"; then
     printf '        /dev/tty is still only tested for existence, not opened\n'
@@ -1752,12 +1752,12 @@ test_mode_is_applied_before_the_rename_not_after() {
   # see this from the suite.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
-  if grep -qE 'mv -f "\$dropin\.omapi-tmp" "\$dropin".*chmod "\$dmode" "\$dropin"' "$f"; then
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
+  if grep -qE 'mv -f "\$dropin\.shippi-tmp" "\$dropin".*chmod "\$dmode" "\$dropin"' "$f"; then
     printf '        the drop-in mode is applied AFTER the rename\n'
     rc=1
   fi
-  if ! grep -q 'chmod "\$dmode" "\$dropin.omapi-tmp"' "$f"; then
+  if ! grep -q 'chmod "\$dmode" "\$dropin.shippi-tmp"' "$f"; then
     printf '        the mode is not applied to the staging file before mv\n'
     rc=1
   fi
@@ -1904,7 +1904,7 @@ test_managed_block_preserves_mode_and_owner_in_practice() {
     printf '        the existing rule was lost\n'
     rc=1
   fi
-  if ls "${f}.omapi-stage."* >/dev/null 2>&1; then
+  if ls "${f}.shippi-stage."* >/dev/null 2>&1; then
     printf '        a staging file was left behind\n'
     rc=1
   fi
@@ -1919,7 +1919,7 @@ test_managed_block_rewrite_allowed_when_remainder_is_empty() {
   # use the exit status, and only refuse when BOTH reads fail.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -q '\[\[ -s \$target && -z \$tail \]\]' "$f"; then
     printf '        readability is still judged by an empty remainder\n'
     rc=1
@@ -1937,7 +1937,7 @@ test_ufw_snapshot_cleanup_uses_run_root() {
   # the temp file is left behind in /tmp on every run.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -qE '^[[:space:]]*rm -f "\$rules_backup"' "$f"; then
     printf '        an unprivileged rm of the ufw snapshot is still present\n'
     rc=1
@@ -2048,7 +2048,7 @@ test_ufw_rules_snapshot_is_taken_with_run_root() {
   # while the code reported that it had a backup. Assert it is privileged.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -qE '^[[:space:]]*cp -p "\$\{CONF_DEST\}/etc/ufw/after6?\.rules"' "$f"; then
     printf '        an unprivileged cp of the ufw rules files is still present\n'
     rc=1
@@ -2069,7 +2069,7 @@ test_replace_managed_block_reads_target_via_peek() {
   # the test user can read, and only /etc/ufw/*.rules is 0640 root:root.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -qE "^[[:space:]]*awk -v b1=.*\"\\\$target\" >\"\\\$body\.tail\"" "$f"; then
     printf '        replace_managed_block still reads the target with a bare awk\n'
     rc=1
@@ -2088,7 +2088,7 @@ test_replace_managed_block_writes_target_atomically() {
   # The content must be staged beside the target and renamed into place.
   setup_destdir
   local rc=0
-  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/omapi-harden"
+  local f; f="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/shippi-harden"
   if grep -qE 'run_root cat "\$body" >"\$target"' "$f"; then
     printf '        the target is written by an unprivileged redirection\n'
     rc=1
@@ -2202,7 +2202,7 @@ test_bad_task_before_any_change() {
   # The task list is validated before a single step runs, so a typo cannot
   # half-harden a box.
   local out rc
-  out="$(OMAPI_SECURITY_DESTDIR="$(mktemp -d)" bash "$SCRIPT" --yes packages not-a-task 2>&1)"
+  out="$(SHIPPI_SECURITY_DESTDIR="$(mktemp -d)" bash "$SCRIPT" --yes packages not-a-task 2>&1)"
   rc=$?
   [[ $rc -ne 0 ]] && assert_contains "$out" "unknown task"
 }
@@ -2244,7 +2244,7 @@ test_sysctl_file_has_no_bogus_keys() {
   # "permission denied" and worth catching in a test rather than in a log.
   setup_destdir
   configure_sysctl >/dev/null 2>&1
-  local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
+  local f="$CONF_DEST/etc/sysctl.d/99-shippi-hardening.conf"
   local bad
   bad="$(sysctl -p "$f" 2>&1 | grep -vi 'permission denied' || true)"
   if [[ -n $bad ]]; then
@@ -2264,7 +2264,7 @@ test_ip_forward_never_disabled_when_docker_runs() {
   stub docker_present
   docker_present() { return 0; }
   configure_sysctl >/dev/null 2>&1
-  local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
+  local f="$CONF_DEST/etc/sysctl.d/99-shippi-hardening.conf"
   local rc=0
   if [[ -f $f ]] && grep -qE '^\s*net\.ipv4\.ip_forward\s*=\s*0' "$f"; then
     printf '        ip_forward = 0 was written while Docker is present\n'
@@ -2282,7 +2282,7 @@ test_ip_forward_zeroed_when_no_docker() {
   stub docker_present
   docker_present() { return 1; }
   configure_sysctl >/dev/null 2>&1
-  local f="$CONF_DEST/etc/sysctl.d/99-omapi-hardening.conf"
+  local f="$CONF_DEST/etc/sysctl.d/99-shippi-hardening.conf"
   local rc=0
   if ! grep -qE '^\s*net\.ipv4\.ip_forward\s*=\s*0' "$f"; then
     printf '        ip_forward = 0 missing with no Docker present\n'
@@ -2321,7 +2321,7 @@ test_apt_config_parses_with_real_apt() {
   # against the system config instead of the generated one.
   setup_destdir
   configure_updates >/dev/null 2>&1
-  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51omapi-origins"
+  local cfg="$CONF_DEST/etc/apt/apt.conf.d/51shippi-origins"
   local out rc=0
   if have apt-config; then
     out="$(APT_CONFIG="$cfg" apt-config dump 2>&1)"
@@ -2345,7 +2345,7 @@ test_apt_config_parses_with_real_apt() {
 test_fail2ban_jail_parses_as_ini() {
   setup_destdir
   configure_fail2ban >/dev/null 2>&1
-  local f="$CONF_DEST/etc/fail2ban/jail.d/omapi-hardening.local"
+  local f="$CONF_DEST/etc/fail2ban/jail.d/shippi-hardening.local"
   local rc=0
   if [[ -f $f ]] && have python3; then
     if ! python3 -c "
@@ -2367,7 +2367,7 @@ test_ask_uses_gum_not_a_tty_check() {
   # The per-port and per-account loops put the loop list on stdin, so `[[ -t 0 ]]`
   # is false inside them and ask silently took its default: every passwordless
   # account locked and every unidentified port closed, with no prompt shown.
-  # gum reads /dev/tty and works regardless, and is what the rest of oma-pi
+  # gum reads /dev/tty and works regardless, and is what the rest of shippi
   # uses. Reading the real function body guards the fix.
   local body rc=0
   body="$_ORIGINAL_ASK"
@@ -2383,7 +2383,7 @@ test_ask_uses_gum_not_a_tty_check() {
 }
 
 test_lockout_prompt_defaults_to_no() {
-  # `sudo omapi-harden --yes` must NOT be able to disable SSH passwords with
+  # `sudo shippi-harden --yes` must NOT be able to disable SSH passwords with
   # no verified way back in. ask returning its default under --yes means the
   # default has to be n.
   local body rc=0
@@ -2405,7 +2405,7 @@ test_lockout_prompt_defaults_to_no() {
 }
 
 test_lockdown_ssh_never_writes_allowusers_root() {
-  # Under `sudo omapi-harden`, id -un is root. AllowUsers root next to
+  # Under `sudo shippi-harden`, id -un is root. AllowUsers root next to
   # PermitRootLogin no is a config sshd -t accepts and that locks out every
   # account, so the bare $(id -un) must not be what gets written.
   local body rc=0
@@ -2443,7 +2443,7 @@ test_apt_periodic_keys_are_preserved() {
   grep -q 'APT::Periodic::Update-Package-Lists "1"' "$f" || rc=1
   grep -q 'APT::Periodic::Unattended-Upgrade "1"' "$f" || rc=1
   # And the policy must live in its own file, not overwrite the managed one.
-  [[ -f $CONF_DEST/etc/apt/apt.conf.d/51omapi-origins ]] || rc=1
+  [[ -f $CONF_DEST/etc/apt/apt.conf.d/51shippi-origins ]] || rc=1
   teardown_destdir
   return $rc
 }

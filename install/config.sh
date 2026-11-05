@@ -71,13 +71,13 @@ else
   # Herdr has no server-wide environment like `tmux setenv`, so a marker keyed
   # on the session socket stands in for FASTFETCH_SHOWN. Named sessions get
   # their own socket, and therefore their own first-pane banner.
-  _oma_fastfetch_marker="${XDG_RUNTIME_DIR:-/tmp}/oma-pi-fastfetch-$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | md5sum | cut -d' ' -f1)"
-  if [[ ! -e $_oma_fastfetch_marker ]]; then
-    mkdir -p "$(dirname "$_oma_fastfetch_marker")"
-    : >"$_oma_fastfetch_marker"
+  _shippi_fastfetch_marker="${XDG_RUNTIME_DIR:-/tmp}/shippi-fastfetch-$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | md5sum | cut -d' ' -f1)"
+  if [[ ! -e $_shippi_fastfetch_marker ]]; then
+    mkdir -p "$(dirname "$_shippi_fastfetch_marker")"
+    : >"$_shippi_fastfetch_marker"
     fastfetch
   fi
-  unset _oma_fastfetch_marker
+  unset _shippi_fastfetch_marker
 fi
 BASHRC_HERDR
     echo "✓ Herdr auto-start"
@@ -90,9 +90,9 @@ install_bins() {
   mkdir -p "$HOME/.local/bin"
   cp -Rf "$INSTALLER_DIR/bin/"* "$HOME/.local/bin/"
   chmod +x "$HOME/.local/bin/"*
-  echo "✓ omapi-ssh"
-  echo "✓ omapi-refresh"
-  echo "✓ omapi-setup"
-  echo "✓ omapi-help"
-  echo "✓ omapi-harden"
+  echo "✓ shippi-ssh"
+  echo "✓ shippi-refresh"
+  echo "✓ shippi-setup"
+  echo "✓ shippi-help"
+  echo "✓ shippi-harden"
 }
