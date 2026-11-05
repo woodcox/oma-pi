@@ -127,22 +127,18 @@ for further info.
 
 After installing you can run `omapi-harden` which applies the following hardening: 
 sshd hardening, ufw with only the ports you actually run exposed, fail2ban, automatic
-security updates, AppArmor, kernel and network sysctls, 30-day password
-ageing, and service minimisation (it offers to disable things a headless server
+security updates, AppArmor, kernel and network sysctls, password quality
+checks, and service minimisation (it offers to disable things a headless server
 does not need, such as cups, Bluetooth and triggerhappy). 
 
-Password ageing is written to `/etc/login.defs` as a 30-day maximum and applied
-to every interactive human account with `chage -M 30 -W 7`; root and
-system/service accounts are left alone. An existing password already older than
-30 days expires at that account's next login — the current SSH session
-survives, and password SSH goes through PAM's password-change prompt, but a
-key-only or automation login can be refused until the password is changed from
-a console. Keep a tested console or key recovery route before the first run.
-Password changes are checked by `pam_pwquality` (enabled through
-`pam-auth-update`): 15 characters minimum, at least three character classes, no
-username or dictionary matches, and no trivial repeats or sequences, so 30-day
-rotation cannot be satisfied with an incrementing weak password. Undo the PAM
-profile with `sudo pam-auth-update --disable pwquality`.
+Passwords do not expire on a timer. Forced rotation mostly produces predictable
+increments, and on a headless key-only box an expired password can lock out the
+next login; set a maximum yourself with `chage -M <days> <user>` if your policy
+requires one. Password changes are checked by `pam_pwquality` (enabled through
+`pam-auth-update`) instead: 15 characters minimum, at least three character
+classes, no username or dictionary matches, and no trivial repeats or sequences,
+so a replacement cannot be the old password plus a digit. Undo the PAM profile
+with `sudo pam-auth-update --disable pwquality`.
 The users task also reads `/etc/sudoers` and `/etc/sudoers.d` and warns — it
 never edits those files — when a `NOPASSWD` rule or `!authenticate` makes root
 reachable from a shell without a password; if it cannot read them it says the

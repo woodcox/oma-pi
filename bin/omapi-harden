@@ -108,7 +108,7 @@ Tasks (default: all but aide):
   packages    install the hardening tooling (ufw, fail2ban, apparmor, ...)
   users       no empty passwords, lock the default `pi` account, audit UID 0
               and flag passwordless sudo / console autologin
-  accounts    30-day password expiry + PAM quality checks
+  accounts    password quality checks (pam_pwquality)
   services    stop and disable services a headless server does not need
               (ModemManager warns first: it may be a cellular uplink)
   ssh         sshd hardening: no root login, key-only by default
@@ -1183,135 +1183,12 @@ check_users() {
 }
 
 # ---------------------------------------------------------------------------
-# accounts (login.defs)
+# accounts (password quality)
 # ---------------------------------------------------------------------------
-# Replace KEY=VALUE pairs in a line-oriented config, leaving every other line
-# (comments included) exactly where it was. An existing key is rewritten in
-# place; a key the file does not define is appended. Staged and renamed with
-# the target's own mode and owner, because a half-written login.defs is a box
-# where `useradd`, `passwd` and login itself start behaving strangely.
-replace_conf_values() {
-  local path="$1"
-  shift
-  local target="${CONF_DEST}${path}"
-  local pair
-
-  # Checked before the dry-run branch: a run against a missing file must say
-  # so in both modes, not offer to write what the real run cannot.
-  if [[ ! -f $target ]]; then
-    warn "no ${path}; not changing it"
-    return 1
-  fi
-
-  if ((DRY_RUN)); then
-    for pair in "$@"; do
-      printf '  %s•%s would set %s in %s\n' "$C_DIM" "$C_OFF" "$pair" "$path"
-    done
-    return 0
-  fi
-
-  local body
-  if ! body="$(mktemp)"; then
-    warn "could not create a staging file for ${path}; it has NOT been changed"
-    return 1
-  fi
-
-  # One program for both reads. The direct read is enough for a world-readable
-  # file (and for the test destdir); a root-only login.defs needs peek, because
-  # the invoking user is not root even when every write goes through sudo.
-  # Judge the read by exit status: an empty result is a valid file, and an
-  # unreadable one must not be mistaken for it.
-  local rewrite='
-    BEGIN {
-      n = split(pairs, a, " ")
-      for (i = 1; i <= n; i++) {
-        split(a[i], kv, "=")
-        want[kv[1]] = kv[2]
-        order[i] = kv[1]
-      }
-    }
-    {
-      line = $0
-      if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]/) {
-        key = line
-        sub(/^[[:space:]]*/, "", key)
-        sub(/[[:space:]].*$/, "", key)
-        if (key in want) {
-          # Preserve everything after the old value, so an inline comment
-          # such as "PASS_MAX_DAYS 99999 # reviewed exception" survives.
-          rest = line
-          sub(/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]+[^[:space:]]+/, "", rest)
-          print key " " want[key] rest
-          seen[key] = 1
-          next
-        }
-      }
-      print
-    }
-    END {
-      for (i = 1; i <= n; i++) {
-        if (!(order[i] in seen)) print order[i] " " want[order[i]]
-      }
-    }
-  '
-
-  local read_ok=0
-  if [[ -r $target ]]; then
-    awk -v pairs="$*" "$rewrite" "$target" >"$body" 2>/dev/null && read_ok=1
-  fi
-  if ((!read_ok)); then
-    if ! peek awk -v pairs="$*" "$rewrite" "$target" >"$body" 2>/dev/null; then
-      rm -f "$body"
-      warn "could not read ${path}; it has NOT been changed"
-      return 1
-    fi
-  fi
-
-  install_staged "$body" "$target" "$path" || return 1
-  note "updated $path"
-}
-
-# Password ageing has two halves: login.defs supplies the defaults for NEW
-# passwords, but an existing account's own expiry lives in /etc/shadow. The
-# policy here is a 30-day maximum, so both halves are applied - the login.defs
-# default and `chage -M 30` for accounts that already have a password.
-#
-# Applied to interactive human accounts only: UID 1000-59999, a real shell,
-# and a real password hash. Root cannot log in over SSH and expiring it can
-# break console recovery; service accounts do not log in, and expiring their
-# password only breaks whatever consumes it.
-#
-# The lockout hazard is deliberate. An account whose password is already older
-# than 30 days expires at its next login. The current SSH session survives,
-# and password SSH goes through PAM's password-change prompt, but a key-only
-# or automation login can be refused until the password is changed from a
-# console. Say so rather than let it surprise someone.
-#
-# UMASK is deliberately NOT touched. It was 027; on a single-admin box a
-# group-restricted umask saves nothing and quietly breaks anything the box
-# writes for others to read, so the whole key is left as the distro set it.
-LOGIN_DEFS_POLICY=(
-  PASS_MAX_DAYS=30
-  PASS_MIN_DAYS=1
-  PASS_WARN_AGE=7
-)
-
-# Read one policy value back. Direct first, because login.defs is normally
-# world-readable and the test destdir belongs to the caller; peek for the
-# root-only case, where a non-root operator is running the writes through
-# sudo and cannot open the file directly.
-login_defs_value() {
-  local key="$1" file="${CONF_DEST}/etc/login.defs" value=""
-  if [[ -r $file ]]; then
-    value="$(awk -v k="$key" '$1 == k { v = $2 } END { if (v != "") print v }' "$file" 2>/dev/null || true)"
-  else
-    value="$(peek awk -v k="$key" '$1 == k { v = $2 } END { if (v != "") print v }' "$file" 2>/dev/null || true)"
-  fi
-  printf '%s\n' "$value"
-}
-
-# Interactive accounts `chage` will be applied to. Optional arguments exist
-# for the test suite; production calls use the real files.
+# Interactive human accounts with a real password hash. Used by the
+# --password-ssh guard: if none exists, a password-ssh block with
+# PermitRootLogin no would leave no password login path. Optional arguments
+# exist for the test suite; production calls use the real files.
 password_login_accounts() {
   local passwd="${1:-/etc/passwd}" shadow="${2:-/etc/shadow}"
   peek awk -F: '
@@ -1323,17 +1200,18 @@ password_login_accounts() {
   ' "$passwd" "$shadow" 2>/dev/null || true
 }
 
-# Password quality is the control that makes 30-day rotation worth doing:
-# otherwise every new password can be the old one plus a digit. pam_pwquality
-# is enabled through pam-auth-update rather than by editing
-# /etc/pam.d/common-password by hand - a local edit there is exactly what
-# pam-auth-update refuses to overwrite later.
+# Password quality, not rotation: every password set after this run has to be
+# long and varied enough that "the old password plus a digit" is not a valid
+# replacement. pam_pwquality is enabled through pam-auth-update rather than by
+# editing /etc/pam.d/common-password by hand - a local edit there is exactly
+# what pam-auth-update refuses to overwrite later.
 have_pwquality() {
   dpkg-query -W -f='${Status}' libpam-pwquality 2>/dev/null | grep -q 'ok installed'
 }
 
 configure_password_quality() {
-  step "Password quality (pam_pwquality)"
+  section "Password quality (pam_pwquality)"
+  note "passwords are checked when they are set; they do not expire on a timer"
 
   if ! ((DRY_RUN)) && ! have_pwquality; then
     warn "libpam-pwquality is not installed, skipping (packages task installs it)"
@@ -1346,7 +1224,7 @@ configure_password_quality() {
   # own that file. libpwquality reads pwquality.conf.d/*.conf after it.
   if ! write_conf /etc/security/pwquality.conf.d/omapi-hardening.conf <<'EOF'
 # Managed by oma-pi omapi-harden. Re-run the script to change these.
-# Enforced by pam_pwquality at passwd/chage time, including the PAM
+# Enforced by pam_pwquality at passwd time, including the PAM
 # password-change prompt over SSH.
 minlen = 15
 minclass = 3
@@ -1389,57 +1267,6 @@ EOF
     note "if pam-auth-update reported local changes, merge /etc/pam.d/common-password by hand"
     note "the policy is in /etc/security/pwquality.conf.d/omapi-hardening.conf"
   fi
-}
-
-configure_account_policy() {
-  section "Account policy (30-day password age)"
-
-  note "30-day maximum for new passwords and every human login account"
-
-  if ! replace_conf_values /etc/login.defs "${LOGIN_DEFS_POLICY[@]}"; then
-    warn "password ageing defaults were not applied"
-    return 0
-  fi
-
-  configure_password_quality
-
-  if ((!DRY_RUN)); then
-    # Report what actually landed, not what was asked for.
-    local k v
-    for k in "${LOGIN_DEFS_POLICY[@]%=*}"; do
-      v="$(login_defs_value "$k")"
-      [[ -n $v ]] && ok "${k} ${v}"
-    done
-  fi
-
-  local users user
-  users="$(password_login_accounts)"
-  if [[ -z $users ]]; then
-    if ((DRY_RUN)); then
-      note "would apply chage -M 30 -W 7 to every password-bearing login account"
-    else
-      warn "could not enumerate login accounts from /etc/passwd and /etc/shadow"
-      note "login.defs applies to new passwords; existing accounts were NOT changed"
-    fi
-    return 0
-  fi
-
-  if ((DRY_RUN)); then
-    for user in $users; do
-      printf '  %s•%s would run: chage -M 30 -W 7 %s\n' "$C_DIM" "$C_OFF" "$user"
-    done
-    return 0
-  fi
-
-  note "a password already older than 30 days expires at that account's next login"
-  for user in $users; do
-    if run_root chage -M 30 -W 7 "$user"; then
-      ok "${user}: password expires every 30 days"
-    else
-      warn "could not set the password age for ${user}"
-    fi
-  done
-  note "check one with 'sudo chage -l <user>'"
 }
 
 # ---------------------------------------------------------------------------
@@ -3718,17 +3545,6 @@ audit_system_health() {
   fi
 }
 
-# One line per policy value, so a saved --report shows what the accounts task
-# actually applied instead of only what it was asked to apply.
-account_policy_summary() {
-  local k v line=""
-  for k in "${LOGIN_DEFS_POLICY[@]%=*}"; do
-    v="$(login_defs_value "$k")"
-    line+="${k}=${v:-unknown} "
-  done
-  printf '%s\n' "${line% }"
-}
-
 # Enabled/active state for every unit the services task may touch. Read-only,
 # and deliberately unprivileged for the same reason the service task is.
 service_state_summary() {
@@ -3856,7 +3672,6 @@ audit() {
       sed 's/^/  /' || true
 
     printf '\n-- accounts --\n'
-    printf '  login.defs policy: %s\n' "$(account_policy_summary)"
     printf '  passwordless: %s\n' \
       "$(peek awk -F: '($2 == "") {print $1}' /etc/shadow 2>/dev/null | tr '\n' ' ' || true)"
     printf '  uid 0: %s\n' \
@@ -4013,7 +3828,7 @@ main() {
 
   want_task packages && install_hardening_packages
   want_task users && check_users
-  want_task accounts && configure_account_policy
+  want_task accounts && configure_password_quality
   want_task services && configure_services
   want_task ssh && harden_ssh
   want_task firewall && configure_firewall

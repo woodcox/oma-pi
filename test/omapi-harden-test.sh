@@ -2769,12 +2769,10 @@ test_audit_system_health_says_unknown_not_healthy() {
   return $rc
 }
 
-test_audit_reports_login_defs_and_service_state() {
-  # The saved --report has to show whether the accounts and services tasks
-  # actually applied, not just the units that happen to be failed.
+test_audit_reports_service_state() {
+  # The saved --report has to show whether the services task actually applied,
+  # not just the units that happen to be failed.
   setup_destdir
-  mkdir -p "$CONF_DEST/etc"
-  printf 'PASS_MAX_DAYS 30\nPASS_MIN_DAYS 1\nPASS_WARN_AGE 7\n' >"$CONF_DEST/etc/login.defs"
   stub systemctl
   systemctl() {
     case "$*" in
@@ -2784,15 +2782,7 @@ test_audit_reports_login_defs_and_service_state() {
     esac
   }
   local out rc=0
-  out="$(account_policy_summary; service_state_summary)"
-  [[ $out == *"PASS_MAX_DAYS=30"* ]] || {
-    printf '        login.defs values are missing from the audit: %s\n' "$out"
-    rc=1
-  }
-  [[ $out == *"PASS_MIN_DAYS=1"* && $out == *"PASS_WARN_AGE=7"* ]] || {
-    printf '        not every login.defs value was reported: %s\n' "$out"
-    rc=1
-  }
+  out="$(service_state_summary)"
   [[ $out == *"cups.service"*"enabled"*"active"* ]] || {
     printf '        service states are missing from the audit: %s\n' "$out"
     rc=1
@@ -3273,58 +3263,13 @@ test_docker_ufw6_only_written_when_ipv6_enabled() {
 }
 
 # ---------------------------------------------------------------------------
-printf '\naccount policy and service minimisation\n'
-
-test_account_policy_replaces_values_in_place() {
-  setup_destdir
-  mkdir -p "$CONF_DEST/etc"
-  local f="$CONF_DEST/etc/login.defs" rc=0
-  printf '# stock comment\nUMASK\t\t022\nPASS_MAX_DAYS\t99999 # reviewed exception\nPASS_MIN_DAYS\t0\nPASS_WARN_AGE\t7\n' >"$f"
-  chmod 644 "$f"
-
-  configure_account_policy >/dev/null 2>&1
-
-  # The inline comment after the old value survives the rewrite: this is an
-  # edit of one value, not a replacement of the line.
-  grep -qx 'PASS_MAX_DAYS 30 # reviewed exception' "$f" || rc=1
-  grep -qE '^PASS_MIN_DAYS[[:space:]]+1$' "$f" || rc=1
-  grep -qE '^PASS_WARN_AGE[[:space:]]+7$' "$f" || rc=1
-  # UMASK is deliberately not in LOGIN_DEFS_POLICY: the distro value survives
-  # untouched, and the run must not append a second copy of it either.
-  grep -qE '^UMASK[[:space:]]+022$' "$f" || rc=1
-  # The stock comment has to survive: this is an edit, not a replacement.
-  grep -qx '# stock comment' "$f" || rc=1
-  # ... and so does the mode.
-  [[ $(stat -c %a "$f") == 644 ]] || rc=1
-
-  # A second run must not append a duplicate copy of every key.
-  configure_account_policy >/dev/null 2>&1
-  [[ $(grep -c '^PASS_MAX_DAYS' "$f") -eq 1 ]] || rc=1
-  [[ $(grep -c '^UMASK' "$f") -eq 1 ]] || rc=1
-
-  teardown_destdir
-  return $rc
-}
-
-test_account_policy_dry_run_touches_nothing() {
-  setup_destdir
-  mkdir -p "$CONF_DEST/etc"
-  local f="$CONF_DEST/etc/login.defs" rc=0 before
-  printf 'PASS_MAX_DAYS\t99999\nUMASK\t\t022\n' >"$f"
-  before="$(cat "$f")"
-  DRY_RUN=1
-  configure_account_policy >/dev/null 2>&1
-  DRY_RUN=0
-  [[ $(cat "$f") == "$before" ]] || rc=1
-  teardown_destdir
-  return $rc
-}
+printf '\npassword quality and service minimisation\n'
 
 test_password_login_accounts_filter() {
   # Only interactive human accounts with a real crypt hash: no root, no
   # system/service users (UID below 1000), no nologin/false shells, and no
-  # locked/blank hash. A false positive here would expire an account that
-  # exists to run a service.
+  # locked/blank hash. A false positive here would let --password-ssh believe
+  # a service account is a way back in.
   setup_destdir
   local d rc=0 pw sh out
   d="$(mktemp -d)"
@@ -3354,36 +3299,6 @@ EOF
     rc=1
   }
   rm -rf "$d"
-  teardown_destdir
-  return $rc
-}
-
-test_account_policy_applies_expiry_to_existing_accounts() {
-  setup_destdir
-  mkdir -p "$CONF_DEST/etc"
-  local f="$CONF_DEST/etc/login.defs" rc=0 out
-  printf 'PASS_MAX_DAYS\t365\nPASS_MIN_DAYS\t0\nPASS_WARN_AGE\t14\n' >"$f"
-  chmod 644 "$f"
-  stub password_login_accounts
-  password_login_accounts() { printf 'alice\nbob\n'; }
-
-  out="$(configure_account_policy 2>&1)"
-
-  [[ $out == *"chage -M 30 -W 7 alice"* ]] || {
-    printf '        chage was not applied to alice: %s\n' "$out"
-    rc=1
-  }
-  [[ $out == *"chage -M 30 -W 7 bob"* ]] || {
-    printf '        chage was not applied to bob: %s\n' "$out"
-    rc=1
-  }
-  [[ $out == *"alice: password expires every 30 days"* ]] || rc=1
-  # The warning about accounts already past the limit has to be present: this
-  # is the lockout risk the 30-day policy creates.
-  [[ $out == *"already older than 30 days expires"* ]] || {
-    printf '        the immediate-expiry warning is missing\n'
-    rc=1
-  }
   teardown_destdir
   return $rc
 }
@@ -3936,10 +3851,7 @@ t 'hostname from= rules are detected'                   test_key_from_requires_d
 t 'sshd keeps UseDNS for hostname from= keys'           test_sshd_hostname_from_key_keeps_dns
 t '--agent-forwarding is parsed by main'                test_cli_agent_forwarding_flag_sets_variable
 t 'sshd flag choices revert on re-run'                  test_sshd_flag_choices_revert
-t 'account policy edits login.defs in place'            test_account_policy_replaces_values_in_place
-t 'account policy dry run changes nothing'              test_account_policy_dry_run_touches_nothing
-t 'account policy filters login accounts'               test_password_login_accounts_filter
-t 'account policy expiry reaches existing accounts'     test_account_policy_applies_expiry_to_existing_accounts
+t 'password login accounts are filtered'                test_password_login_accounts_filter
 t 'password quality dry run plans PAM enablement'       test_password_quality_dry_run_plans_pam
 t 'password quality writes policy and enables PAM'      test_password_quality_writes_policy_and_enables_pam
 t 'service minimisation dry run changes nothing'        test_services_dry_run_touches_nothing
@@ -3973,7 +3885,7 @@ t '--lockdown-ssh refuses to write AllowUsers root'      test_lockdown_ssh_never
 t 'audit reports failed units and pending reboot'       test_audit_system_health_reports_failures
 t 'audit reports a clean system health'                 test_audit_system_health_reports_clean
 t 'audit says unknown instead of healthy'               test_audit_system_health_says_unknown_not_healthy
-t 'audit reports login.defs and services'               test_audit_reports_login_defs_and_service_state
+t 'audit reports managed service state'                 test_audit_reports_service_state
 t 'pending reboot lists requesting packages'            test_pending_reboot_summary_reads_packages
 t 'newest installed kernel is version-sorted'           test_newest_installed_kernel_sorts_versions
 t 'failed units returns unit names only'                test_failed_systemd_units_returns_unit_names
